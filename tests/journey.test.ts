@@ -206,6 +206,20 @@ test('wizard audit runs straddle-audit and prints the findings table from its re
   assert.match(r.stdout, /Findings \(straddle-audit-report\.md\)\n.*\n.*\n\s+\| 1 \| src\/pay\.ts:12 \| idempotency \| create without key \| high \|/);
 });
 
+test('wizard skill run <name> launches that versioned skill in the chosen agent', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.setState({ marketplace: '/b', installed: true });
+  claude.sessions({ 'straddle-go-live': { steps: ['01-begin'], text: handoff('straddle-go-live', 'not_ready', []) } });
+
+  const r = await runWizard(['skill', 'run', 'straddle-go-live'], { cwd: repo, claude, input: ['1', '1', '1'] });
+
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /Step 1 of 1: Go Live \(straddle-go-live /);
+  assert.deepEqual(claude.calls().filter((c) => c.includes('--settings')).map((c) => (JSON.parse(c) as string[]).at(-1)), ['/straddle:straddle-go-live']);
+  assert.equal(readReceipt(repo).program, 'skill:straddle-go-live');
+});
+
 test('there is no diagnose command', async () => {
   const r = await runWizard(['diagnose'], { cwd: nextRepo() });
 

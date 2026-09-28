@@ -170,9 +170,10 @@ async function journey(run: (io: Prompter) => Promise<number>): Promise<number> 
 }
 
 async function main(): Promise<number> {
-  const [command, sub, ...rest] = positionals;
+  const [command, sub, name, ...rest] = positionals;
   const opts = (io: Prompter) => ({ repo, env, io, bundlePath, exclude });
-  if (rest.length) fail(`Unexpected arguments: ${rest.join(' ')}\n\n${USAGE}`);
+  const extra = command === 'skill' && sub === 'run' ? rest : [name, ...rest].filter((a) => a !== undefined);
+  if (extra.length) fail(`Unexpected arguments: ${extra.join(' ')}\n\n${USAGE}`);
   if (command === undefined) return journey((io) => start('integration', opts(io)));
   if (command === 'diagnose') fail('Unknown command "diagnose". Audit replaces Diagnose: run `wizard audit`.');
   if (Object.hasOwn(PROGRAMS, command) && sub === undefined) return journey((io) => start(command as ProgramName, opts(io)));
@@ -182,7 +183,6 @@ async function main(): Promise<number> {
   if (command === 'mcp' && (sub === 'add' || sub === 'remove')) return configure(`mcp ${sub}`);
   if (command === 'skill' && sub === 'list') return skillList();
   if (command === 'skill' && sub === 'run') {
-    const name = positionals[2];
     if (!name) fail('Name the skill: wizard skill run <name>. See `wizard skill list`.');
     if (name === 'straddle-best-practices') fail('straddle-best-practices holds the shared rules every other skill reads; it does not run on its own.');
     if (!isRunnableSkill(name)) fail(`Unknown skill "${name}". See \`wizard skill list\`.`);
