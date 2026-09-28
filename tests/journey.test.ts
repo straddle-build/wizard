@@ -121,6 +121,28 @@ test('Integrate never starts before the durable plan exists', async () => {
   assert.equal(readReceipt(repo).state, 'blocked');
 });
 
+test('an edit the developer denies in the agent is not reported as a change, and the step stays blocked', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+  const claude = fakeClaude();
+  claude.setState({ marketplace: '/b', installed: true });
+  claude.sessions({ 'straddle-integrate': {
+    steps: ['01-begin', '02-sources', '03-code'], denied: ['03-code', 'src/straddle.ts'],
+    writes: [{ path: 'src/straddle.ts', content: 'export {}' }], text: handoff('straddle-integrate', 'blocked', []),
+  } });
+
+  const r = await runWizard(['integrate'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '1'] });
+
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stdout, /Observed \(Claude Code hooks\): entered 01-begin, 02-sources\n/);
+  assert.match(r.stdout, /Files changed: none/);
+  assert.equal(existsSync(join(repo, 'src', 'straddle.ts')), false);
+  const receipt = readReceipt(repo);
+  assert.equal(receipt.state, 'blocked');
+  assert.match(receipt.stateReason, /Integrate reported blocked/);
+  assert.deepEqual(receipt.steps[0]?.observedEvents.filter((e) => e.kind === 'edit'), []);
+});
+
 test('a missing key or environment is an explicit configuration error before any Straddle-request step', async () => {
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-integration-plan.md': PLAN });

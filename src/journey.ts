@@ -381,7 +381,8 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
     SessionStart: [{ hooks: hook }],
     SessionEnd: [{ hooks: hook }],
     Stop: [{ hooks: hook }],
-    PreToolUse: [{ matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit', hooks: hook }],
+    PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: hook }],
+    PostToolUse: [{ matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit', hooks: hook }],
   } }, null, 2));
 
   const step: StepRun = {

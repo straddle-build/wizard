@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Claude Code hook command installed per session through `claude --settings`. It records only event kind,
 // skill step names and repository-relative edit paths: never prompts, file contents or tool output.
-// It also enforces "no code edit before the durable plan exists" for Claude Code's file-edit tools.
+// Step entries and edits come from PostToolUse, which runs only after a tool call was allowed and completed;
+// an attempted call the client or developer denies is never recorded as progress or a change.
+// PreToolUse enforces "no code edit before the durable plan exists" for Claude Code's file-edit tools.
 import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -50,18 +52,20 @@ if (hookEvent === 'SessionStart') {
   record(reason ? { at, kind: 'session-end', reason } : { at, kind: 'session-end' });
 } else if (hookEvent === 'Stop') {
   record({ at, kind: 'turn-end' });
-} else if (hookEvent === 'PreToolUse' && tool === 'Read') {
+} else if (hookEvent === 'PostToolUse' && tool === 'Read') {
   const step = STEP_FILE.exec(text(field(input, 'file_path')) ?? '');
   if (step) record({ at, kind: 'step-entered', skill: step[1]!, step: step[2]! });
+} else if (hookEvent === 'PostToolUse' && EDIT_TOOLS[tool]) {
+  const path = text(field(input, 'file_path')) ?? text(field(input, 'notebook_path'));
+  const rel = path ? repoRelative(path) : null;
+  if (rel !== null) record({ at, kind: 'edit', path: rel });
 } else if (hookEvent === 'PreToolUse' && EDIT_TOOLS[tool]) {
   const path = text(field(input, 'file_path')) ?? text(field(input, 'notebook_path'));
   const rel = path ? repoRelative(path) : null;
   if (!path) {
     deny('Straddle Wizard could not read the edit target, so it cannot confirm the durable plan exists.');
-  } else if (rel === null) {
-    // Outside the repository: the client's own permission prompt decides.
-  } else if ((SKILL_ARTIFACTS as readonly string[]).includes(rel) || gate.some((file) => existsSync(join(repo, file)))) {
-    record({ at, kind: 'edit', path: rel });
+  } else if (rel === null || (SKILL_ARTIFACTS as readonly string[]).includes(rel) || gate.some((file) => existsSync(join(repo, file)))) {
+    // Allowed by the gate. Outside the repository, or once the plan exists, the client's own permission prompt decides.
   } else {
     record({ at, kind: 'edit-denied', path: rel });
     deny(`No code edit before the durable plan exists: ${gate.join(' or ')} is not in the repository yet. Run the plan step first.`);

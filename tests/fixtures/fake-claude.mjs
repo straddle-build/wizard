@@ -77,12 +77,18 @@ function hook(event, payload) {
 }
 
 hook('SessionStart', { source: 'startup' });
+// Like Claude Code: PreToolUse before the permission decision, PostToolUse only after the tool completed.
+// `denied` lists tool targets the developer refuses at the client's own permission prompt.
+const deniedByDeveloper = new Set(script.denied ?? []);
 for (const step of script.steps) {
-  hook('PreToolUse', { tool_name: 'Read', tool_input: { file_path: `${process.env.FAKE_PLUGIN_ROOT ?? '/plugin'}/skills/${skill}/steps/${step}.md` } });
+  const call = { tool_name: 'Read', tool_input: { file_path: `${process.env.FAKE_PLUGIN_ROOT ?? '/plugin'}/skills/${skill}/steps/${step}.md` } };
+  if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
 }
 for (const w of script.writes ?? []) {
-  const decision = hook('PreToolUse', { tool_name: 'Write', tool_input: { file_path: join(process.cwd(), w.path), content: w.content } });
-  if (decision === 'allow') writeFileSync(join(process.cwd(), w.path), w.content);
+  const call = { tool_name: 'Write', tool_input: { file_path: join(process.cwd(), w.path), content: w.content } };
+  let decision = hook('PreToolUse', call);
+  if (decision === 'allow' && deniedByDeveloper.has(w.path)) decision = 'denied by developer';
+  if (decision === 'allow') { writeFileSync(join(process.cwd(), w.path), w.content); hook('PostToolUse', call); }
   log(`write ${w.path} ${decision}`);
 }
 appendFileSync(transcript, JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n');

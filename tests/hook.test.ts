@@ -16,13 +16,16 @@ function recorded(events: string) {
   return readFileSync(events, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
 }
 
-test('records step entry from a Read of a skill step file, without file contents or prompts', () => {
+test('records step entry only from a completed Read of a skill step file, without file contents or prompts', () => {
   const repo = nextRepo();
   const events = join(tempDir('events'), 'e.jsonl');
+  const read = (hook_event_name: string, file_path: string) => ({ hook_event_name, tool_name: 'Read', tool_input: { file_path } });
 
   runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'SessionStart', transcript_path: '/t/s.jsonl', source: 'startup' });
-  runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '/b/skills/straddle-plan/steps/03-write-plan.md' } });
-  runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: join(repo, 'src/app/page.tsx') } });
+  // An attempted read the developer then denies never reaches PostToolUse, so it is not a step entry.
+  runHook(repo, events, 'straddle-integration-plan.md', read('PreToolUse', '/b/skills/straddle-plan/steps/02-sources.md'));
+  runHook(repo, events, 'straddle-integration-plan.md', read('PostToolUse', '/b/skills/straddle-plan/steps/03-write-plan.md'));
+  runHook(repo, events, 'straddle-integration-plan.md', read('PostToolUse', join(repo, 'src/app/page.tsx')));
   runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'UserPromptSubmit', prompt: 'my key is sk_test_secret' });
 
   const lines = recorded(events).map(({ at, ...rest }) => rest);
@@ -33,21 +36,22 @@ test('records step entry from a Read of a skill step file, without file contents
   assert.ok(!readFileSync(events, 'utf8').includes('sk_test_secret'));
 });
 
-test('denies code edits in the repository until the durable plan exists, and allows the plan itself', () => {
+test('denies code edits in the repository until the durable plan exists, and records only edits that completed', () => {
   const repo = nextRepo();
   const events = join(tempDir('events'), 'e.jsonl');
-  const write = (path: string) => ({ hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: join(repo, path), content: 'x' } });
+  const write = (hook_event_name: string, path: string) => ({ hook_event_name, tool_name: 'Write', tool_input: { file_path: join(repo, path), content: 'x' } });
 
-  assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('src/straddle.ts')).decision, 'deny');
-  assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('straddle-integration-plan.md')).decision, undefined);
+  assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('PreToolUse', 'src/straddle.ts')).decision, 'deny');
+  assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('PreToolUse', 'straddle-integration-plan.md')).decision, undefined);
+  runHook(repo, events, 'straddle-integration-plan.md', write('PostToolUse', 'straddle-integration-plan.md'));
 
   writeFiles(repo, { 'straddle-integration-plan.md': '# Straddle integration plan\n' });
-  assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('src/straddle.ts')).decision, undefined);
+  // Allowed by the gate but then denied by the developer in the client: no PostToolUse, so no edit is recorded.
+  assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('PreToolUse', 'src/straddle.ts')).decision, undefined);
 
   assert.deepEqual(recorded(events).map((e) => [e.kind, e.path]), [
     ['edit-denied', 'src/straddle.ts'],
     ['edit', 'straddle-integration-plan.md'],
-    ['edit', 'src/straddle.ts'],
   ]);
 });
 
