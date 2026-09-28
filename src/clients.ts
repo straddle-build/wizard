@@ -69,20 +69,25 @@ export interface ClientState {
   apiMcp: string;
 }
 
+// Where Claude Code keeps the "straddle" marketplace: the directory it was added from, or its own copy of a Git source.
+export function claudeMarketplacePath(env: NodeJS.ProcessEnv): string | null {
+  const markets = parseJson(native('claude', ['plugin', 'marketplace', 'list', '--json'], env).out);
+  const market = Array.isArray(markets) ? markets.find((m) => field(m, 'name') === 'straddle') : undefined;
+  return text(field(market, 'installLocation')) ?? text(field(market, 'path')) ?? null;
+}
+
 function inspectClaude(env: NodeJS.ProcessEnv, version: string): ClientState {
   const auth = native('claude', ['auth', 'status', '--json'], env);
   const loggedIn = field(parseJson(auth.out), 'loggedIn');
   const listed = parseJson(native('claude', ['plugin', 'list', '--json'], env).out);
   const entry = Array.isArray(listed) ? listed.find((p) => field(p, 'id') === PLUGIN_ID) : undefined;
-  const markets = parseJson(native('claude', ['plugin', 'marketplace', 'list', '--json'], env).out);
-  const market = Array.isArray(markets) ? markets.find((m) => field(m, 'name') === 'straddle') : undefined;
   return {
     name: 'claude',
     label: CLIENT_LABEL.claude,
     version,
     loggedIn: typeof loggedIn === 'boolean' ? loggedIn : null,
     plugin: !Array.isArray(listed) ? { state: 'unverified', version: null } : entry ? { state: 'installed', version: text(field(entry, 'version')) ?? null } : { state: 'missing', version: null },
-    marketplacePath: text(field(market, 'path')) ?? null,
+    marketplacePath: claudeMarketplacePath(env),
     apiMcp: entry
       ? 'declared by the Straddle plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in'
       : 'not declared (install the plugin, or `wizard mcp add --client claude`)',

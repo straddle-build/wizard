@@ -2,13 +2,13 @@
 import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { bundleLabel, loadBundle } from './bundle.ts';
+import { bundleLabel } from './bundle.ts';
 import {
   CLIENT_LABEL, CLIENT_NAMES, EVENT_SURFACE, displayCommand, inspectClient, installPlan, mcpAddPlan, mcpRemovePlan, removePlan, runCommands, updatePlan,
   type ClientName, type ConfigPlan,
 } from './clients.ts';
 import { straddleConfiguration } from './configuration.ts';
-import { handleInterrupt, printPlan, resume, start } from './journey.ts';
+import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, start, type JourneyOptions } from './journey.ts';
 import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
 import { loadReceipt } from './receipt.ts';
 import { Prompter } from './ui.ts';
@@ -30,9 +30,9 @@ Guided setup that hands your Straddle integration to your local coding agent.
 Options
   --dir <path>        Repository to work in (default: current directory)
   --client <name>     claude, codex or cursor
-  --bundle <path>     straddle-build/skills checkout at the pinned commit (or STRADDLE_WIZARD_BUNDLE)
+  --bundle <path>     Use this Straddle skills bundle instead of finding or fetching one (or STRADDLE_WIZARD_BUNDLE)
   --exclude <glob>    Extra sensitive path the Wizard never opens (repeatable, or STRADDLE_WIZARD_EXCLUDE=a,b)
-  --yes               Run install/update/remove/mcp commands without asking
+  --yes               Fetch the skills and run install/update/remove/mcp commands without asking
   --json              Machine-readable output for status and skill list`;
 
 function fail(message: string, code = 2): never {
@@ -62,7 +62,7 @@ function readArgs() {
 const { values, positionals } = readArgs();
 const env = process.env;
 const repo = resolve(values.dir ?? process.cwd());
-const bundlePath = values.bundle ?? env.STRADDLE_WIZARD_BUNDLE;
+const bundlePath = values.bundle || env.STRADDLE_WIZARD_BUNDLE || undefined;
 const exclude = [...(values.exclude ?? []), ...(env.STRADDLE_WIZARD_EXCLUDE?.split(',').map((s) => s.trim()).filter(Boolean) ?? [])];
 const say = (line = '') => process.stdout.write(`${line}\n`);
 
@@ -70,14 +70,29 @@ if (values.version) { say(WIZARD_VERSION); process.exit(0); }
 if (values.help || positionals[0] === 'help') { say(USAGE); process.exit(0); }
 if (!existsSync(repo) || !statSync(repo).isDirectory()) fail(`${repo} is not a directory.`);
 
+function clientOption(): ClientName | undefined {
+  if (values.client === undefined) return undefined;
+  if ((CLIENT_NAMES as readonly string[]).includes(values.client)) return values.client as ClientName;
+  fail(`Unknown client "${values.client}". Use claude, codex or cursor.`);
+}
+
 function pickClient(): ClientName {
-  if (values.client) {
-    if ((CLIENT_NAMES as readonly string[]).includes(values.client)) return values.client as ClientName;
-    fail(`Unknown client "${values.client}". Use claude, codex or cursor.`);
-  }
+  const chosen = clientOption();
+  if (chosen) return chosen;
   const found = (['claude', 'codex'] as const).filter((name) => inspectClient(name, env).version !== null);
   if (found.length === 1) return found[0]!;
   fail(`Pass --client ${found.length ? found.join(' or ') : 'claude, codex or cursor'}.`);
+}
+
+// One reader for stdin, shared by every question in this process.
+let prompter: Prompter | null = null;
+const io = () => (prompter ??= new Prompter(process.stdin, process.stdout));
+
+async function preparedBundle() {
+  const check = await prepareBundle(io(), { override: bundlePath, env }, Boolean(values.yes));
+  if (check === null) say('Cancelled. Nothing was fetched.');
+  else if (!check.ok) say(check.reason);
+  return check?.ok ? check.bundle : null;
 }
 
 async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number> {
@@ -86,8 +101,7 @@ async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number>
   if (plan.kind === 'nothing') return 0;
   if (plan.kind === 'manual') { say('The Wizard changed nothing; follow the steps above in the client.'); return 1; }
   if (!values.yes) {
-    const io = new Prompter(process.stdin, process.stdout);
-    const go = await io.choose('Run these commands?', [{ label: 'Run them', value: true }, { label: 'Cancel', value: false }], 0);
+    const go = await io().choose('Run these commands?', [{ label: 'Run them', value: true }, { label: 'Cancel', value: false }], 0);
     if (!go) { say('Cancelled. Nothing was changed.'); return 130; }
   }
   let ok = true;
@@ -105,20 +119,20 @@ async function configure(kind: 'install' | 'update' | 'remove' | 'mcp add' | 'mc
   if (kind === 'remove') return confirmAndRun(removePlan(state), `Remove the Straddle plugin from ${state.label}:`);
   if (kind === 'mcp add') return confirmAndRun(mcpAddPlan(state), `Register the Straddle API MCP and Docs MCP in ${state.label}:`);
   if (kind === 'mcp remove') return confirmAndRun(mcpRemovePlan(state), `Remove the Straddle MCP servers from ${state.label}:`);
-  const check = loadBundle(bundlePath);
-  if (!check.ok) { say(check.reason); return 1; }
-  const plan = kind === 'install' ? installPlan(state, check.bundle) : updatePlan(state, check.bundle);
-  const code = await confirmAndRun(plan, `${kind === 'install' ? 'Install' : 'Update'} the Straddle plugin in ${state.label} from the ${bundleLabel(check.bundle)}:`);
+  const bundle = await preparedBundle();
+  if (!bundle) return 1;
+  const plan = kind === 'install' ? installPlan(state, bundle) : updatePlan(state, bundle);
+  const code = await confirmAndRun(plan, `${kind === 'install' ? 'Install' : 'Update'} the Straddle plugin in ${state.label} from the ${bundleLabel(bundle)}:`);
   const after = inspectClient(client, env);
   say(`Straddle plugin in ${after.label}: ${after.plugin.state}${after.plugin.version ? ` ${after.plugin.version}` : ''}`);
   return code;
 }
 
 function status(): number {
-  const check = loadBundle(bundlePath);
+  const loaded = loadReceipt(repo);
+  const check = findBundle({ override: bundlePath, remembered: loaded.kind === 'found' ? loaded.receipt.bundle?.path : null, env });
   const clients = CLIENT_NAMES.map((name) => inspectClient(name, env));
   const config = straddleConfiguration(env);
-  const loaded = loadReceipt(repo);
   const run = loaded.kind === 'found'
     ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client }
     : loaded.kind === 'invalid' ? { error: `unreadable receipt: ${loaded.reason}` } : null;
@@ -149,12 +163,12 @@ function status(): number {
   return 0;
 }
 
-function skillList(): number {
-  const check = loadBundle(bundlePath);
-  if (!check.ok) { say(check.reason); return 1; }
-  const skills = Object.entries(check.bundle.skills).map(([name, info]) => ({ name, version: info.version, runnable: isRunnableSkill(name), description: info.description }));
-  if (values.json) { say(JSON.stringify({ bundle: bundleLabel(check.bundle), skills }, null, 2)); return 0; }
-  say(`Skills in the ${bundleLabel(check.bundle)}:`);
+async function skillList(): Promise<number> {
+  const bundle = await preparedBundle();
+  if (!bundle) return 1;
+  const skills = Object.entries(bundle.skills).map(([name, info]) => ({ name, version: info.version, runnable: isRunnableSkill(name), description: info.description }));
+  if (values.json) { say(JSON.stringify({ bundle: bundleLabel(bundle), path: bundle.path, skills }, null, 2)); return 0; }
+  say(`Skills in the ${bundleLabel(bundle)}:`);
   for (const s of skills) {
     const summary = s.description.split('. ')[0] ?? '';
     say(`  ${s.name.padEnd(26)}${s.version.padEnd(8)}${s.runnable ? `wizard skill run ${s.name}` : 'shared rules the other skills read'}`);
@@ -163,21 +177,19 @@ function skillList(): number {
   return 0;
 }
 
-async function journey(run: (io: Prompter) => Promise<number>): Promise<number> {
-  const io = new Prompter(process.stdin, process.stdout);
-  process.on('SIGINT', () => handleInterrupt(io));
-  return run(io);
+async function journey(run: (opts: JourneyOptions) => Promise<number>): Promise<number> {
+  process.on('SIGINT', () => handleInterrupt(io()));
+  return run({ repo, env, io: io(), bundlePath, client: clientOption(), exclude });
 }
 
 async function main(): Promise<number> {
   const [command, sub, name, ...rest] = positionals;
-  const opts = (io: Prompter) => ({ repo, env, io, bundlePath, exclude });
   const extra = command === 'skill' && sub === 'run' ? rest : [name, ...rest].filter((a) => a !== undefined);
   if (extra.length) fail(`Unexpected arguments: ${extra.join(' ')}\n\n${USAGE}`);
-  if (command === undefined) return journey((io) => start('integration', opts(io)));
+  if (command === undefined) return journey((opts) => start('integration', opts));
   if (command === 'diagnose') fail('Unknown command "diagnose". Audit replaces Diagnose: run `wizard audit`.');
-  if (Object.hasOwn(PROGRAMS, command) && sub === undefined) return journey((io) => start(command as ProgramName, opts(io)));
-  if (command === 'resume' && sub === undefined) return journey((io) => resume(opts(io)));
+  if (Object.hasOwn(PROGRAMS, command) && sub === undefined) return journey((opts) => start(command as ProgramName, opts));
+  if (command === 'resume' && sub === undefined) return journey(resume);
   if ((command === 'install' || command === 'update' || command === 'remove') && sub === undefined) return configure(command);
   if (command === 'status' && sub === undefined) return status();
   if (command === 'mcp' && (sub === 'add' || sub === 'remove')) return configure(`mcp ${sub}`);
@@ -186,7 +198,7 @@ async function main(): Promise<number> {
     if (!name) fail('Name the skill: wizard skill run <name>. See `wizard skill list`.');
     if (name === 'straddle-best-practices') fail('straddle-best-practices holds the shared rules every other skill reads; it does not run on its own.');
     if (!isRunnableSkill(name)) fail(`Unknown skill "${name}". See \`wizard skill list\`.`);
-    return journey((io) => start(`skill:${name}`, opts(io)));
+    return journey((opts) => start(`skill:${name}`, opts));
   }
   fail(`Unknown command "${[command, sub].filter(Boolean).join(' ')}".\n\n${USAGE}`);
 }

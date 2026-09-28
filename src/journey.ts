@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bundleLabel, loadBundle, type Bundle } from './bundle.ts';
+import { PINNED_BUNDLE, bundleLabel, fetchCommands, loadBundle, snapshotDir, type Bundle, type BundleCheck } from './bundle.ts';
 import {
-  CLIENT_LABEL, EVENT_SURFACE, EVENT_SURFACE_NOTE, displayCommand, inspectClient, installPlan, launchCommand, runCommands, updatePlan,
+  CLIENT_LABEL, EVENT_SURFACE, EVENT_SURFACE_NOTE, claudeMarketplacePath, displayCommand, inspectClient, installPlan, launchCommand, runCommands, updatePlan,
   type ClientName, type ClientState, type Command, type CommandResult, type ConfigPlan,
 } from './clients.ts';
 import { straddleConfiguration } from './configuration.ts';
@@ -21,6 +21,7 @@ export interface JourneyOptions {
   env: NodeJS.ProcessEnv;
   io: Prompter;
   bundlePath: string | undefined;
+  client: ClientName | undefined;
   exclude: string[];
 }
 
@@ -167,6 +168,51 @@ function printCommandResults(io: Prompter, results: readonly CommandResult[]): b
   return results.every((r) => r.outcome !== 'failed');
 }
 
+// ---------- Skill bundle ----------
+
+export interface BundleRequest { override: string | undefined; remembered?: string | null | undefined; env: NodeJS.ProcessEnv }
+
+const SNAPSHOT = `merged-source snapshot ${PINNED_BUNDLE.repository}@${PINNED_BUNDLE.commit.slice(0, 7)} (plugin ${PINNED_BUNDLE.pluginVersion}; not a tagged release)`;
+
+// The developer's --bundle first, then a verified copy already on this machine: the last one this run used,
+// Claude Code's "straddle" marketplace, or the Wizard's own snapshot. Never fetches.
+export function findBundle(req: BundleRequest): BundleCheck {
+  if (req.override) return loadBundle(req.override);
+  for (const path of [req.remembered, claudeMarketplacePath(req.env), snapshotDir(req.env)]) {
+    if (!path) continue;
+    const check = loadBundle(path);
+    if (check.ok) return check;
+  }
+  return { ok: false, reason: `The Straddle skills are not on this machine yet. \`wizard\` or \`wizard install\` fetches the ${SNAPSHOT}.` };
+}
+
+// Like findBundle, then offers to fetch the pinned snapshot. Resolves null when the developer cancels.
+export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boolean): Promise<BundleCheck | null> {
+  const found = findBundle(req);
+  if (found.ok || req.override) return found;
+  const dir = snapshotDir(req.env);
+  const staging = `${dir}.partial`;
+  const commands = fetchCommands(staging);
+  io.say(io.bold('Straddle skills'));
+  io.say(`  Not on this machine yet. The Wizard fetches the ${SNAPSHOT}`);
+  io.say(`  from GitHub into ${dir}, checks its content, and changes nothing else:`);
+  for (const command of commands) io.say(`    ${displayCommand(command)}`);
+  if (!yes) {
+    const go = await io.choose('Fetch the Straddle skills?', [{ label: 'Fetch', value: true }, { label: 'Cancel', value: false }], 0);
+    io.say();
+    if (!go) return null;
+  }
+  rmSync(staging, { recursive: true, force: true });
+  mkdirSync(dirname(staging), { recursive: true });
+  const fetched = printCommandResults(io, runCommands(commands, req.env));
+  io.say();
+  const check: BundleCheck = fetched ? loadBundle(staging) : { ok: false, reason: `fetching the ${SNAPSHOT} failed` };
+  if (!check.ok) { rmSync(staging, { recursive: true, force: true }); return check; }
+  rmSync(dir, { recursive: true, force: true });
+  renameSync(staging, dir);
+  return loadBundle(dir);
+}
+
 export function printPlan(say: (line: string) => void, plan: ConfigPlan): void {
   if (plan.kind === 'nothing') { say(plan.note); return; }
   if (plan.kind === 'manual') { for (const step of plan.steps) say(`  ${step}`); return; }
@@ -202,7 +248,8 @@ function printCredentialHelp(io: Prompter, env: NodeJS.ProcessEnv): void {
 }
 
 async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions): Promise<{ bundle: Bundle; client: ClientState } | number> {
-  const check = loadBundle(opts.bundlePath ?? receipt.bundle?.path);
+  const check = await prepareBundle(io, { override: opts.bundlePath, remembered: receipt.bundle?.path, env: opts.env }, false);
+  if (!check) return finish(receipt, 'aborted', 'developer cancelled the Straddle skills fetch');
   if (!check.ok) {
     io.say(`Skill bundle: ${check.reason}`);
     return finish(receipt, 'blocked', `skill bundle: ${check.reason}`);
@@ -210,7 +257,6 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
   const bundle = check.bundle;
   receipt.bundle = { kind: bundle.kind, repository: bundle.repository, commit: bundle.commit, pluginVersion: bundle.pluginVersion, path: bundle.path };
   const name = receipt.client!;
-
   for (;;) {
     const client = inspectClient(name, opts.env);
     printReadiness(io, receipt, bundle, client, opts.env);
@@ -576,6 +622,7 @@ async function resumeRun(io: Prompter, receipt: Receipt, opts: JourneyOptions, c
     if (!go) { io.say('Cancelled. The saved run is unchanged.'); return 130; }
   }
   receipt.wizardPid = process.pid;
+  if (opts.client && opts.client !== receipt.client) { receipt.client = opts.client; receipt.pluginLoad = null; }
   if (!receipt.client) {
     receipt.client = await chooseClient(io, opts.env);
     if (!receipt.client) return finish(receipt, 'aborted', 'developer cancelled at agent choice');
@@ -649,7 +696,7 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
     receipt.context.choices = choices;
     saveReceipt(receipt);
   }
-  receipt.client = await chooseClient(io, opts.env);
+  receipt.client = opts.client ?? await chooseClient(io, opts.env);
   if (!receipt.client) { io.say('Cancelled.'); return finish(receipt, 'aborted', 'developer cancelled at agent choice'); }
   saveReceipt(receipt);
   return runProgram(io, receipt, opts);

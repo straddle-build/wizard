@@ -1,10 +1,10 @@
 // Guided journey through the real CLI, with Claude Code replaced by a scripted process (tests/fixtures/fake-claude.mjs).
 // This is simulated-adapter evidence. Native client proof is recorded separately.
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { fakeClaude, nextRepo, readReceipt, runWizard, writeFiles } from './helpers.ts';
+import { SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, runWizard, tempDir, writeFiles } from './helpers.ts';
 
 const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENVIRONMENT: 'sandbox' };
 const PLAN = '# Straddle integration plan\n\n## Status\n\n- Plan state: Draft\n\n## File changes\n\n| File | Change |\n| --- | --- |\n| src/straddle.ts | add client |\n\n## Future Sandbox writes\n\n| Write | Tool |\n| --- | --- |\n| create customer | SDK |\n\n## Verification\n';
@@ -71,6 +71,57 @@ test('detected context is a suggestion the developer corrects, and the SDK sugge
   assert.equal(receipt.state, 'aborted');
   assert.deepEqual(receipt.context.language, { value: 'Python', source: 'developer' });
   assert.deepEqual(receipt.context.choices, { products: 'charges', integrationType: 'direct', sdk: 'Python', notificationPath: 'polling endpoint' });
+});
+
+// Maps the public skills URL to the local pinned checkout with Git's own url.<base>.insteadOf, so the real fetch runs offline.
+const OFFLINE_GITHUB = (cache: string) => ({
+  STRADDLE_WIZARD_BUNDLE: '', XDG_CACHE_HOME: cache,
+  GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.file://${SKILLS_SOURCE}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/straddle-build/skills.git',
+});
+
+test('first run without a bundle previews the snapshot fetch, and cancelling it fetches nothing', async () => {
+  const repo = nextRepo();
+  const cache = tempDir('cache');
+  const claude = fakeClaude();
+  claude.setState({ installed: true });
+
+  const r = await runWizard([], { cwd: repo, claude, env: { ...CONFIGURED, ...OFFLINE_GITHUB(cache) }, input: [...CHOOSE_CONTEXT, '2'] });
+
+  assert.equal(r.code, 130, r.stdout + r.stderr);
+  assert.match(r.stdout, /merged-source snapshot straddle-build\/skills@f713fc6 \(plugin 0\.1\.0; not a tagged release\)/);
+  assert.match(r.stdout, /git -C \S+ fetch --depth 1 https:\/\/github\.com\/straddle-build\/skills\.git f713fc6201ad0fd800d23a3ec4c4102b7acee91c/);
+  assert.deepEqual(readdirSync(cache), []);
+  assert.equal(readReceipt(repo).state, 'aborted');
+});
+
+test('first run fetches the pinned snapshot after confirmation, verifies it, and later runs reuse it without asking', async () => {
+  const repo = nextRepo();
+  const cache = tempDir('cache');
+  const claude = fakeClaude();
+  claude.setState({ installed: true });
+  claude.sessions(DEFAULT_SESSIONS);
+  const env = { ...CONFIGURED, ...OFFLINE_GITHUB(cache) };
+
+  const first = await runWizard(['setup'], { cwd: repo, claude, env, input: [...CHOOSE_CONTEXT, '1', '1'] });
+  const status = await runWizard(['status', '--json'], { cwd: repo, claude, env });
+
+  assert.equal(first.code, 0, first.stdout + first.stderr);
+  const snapshot = join(cache, 'straddle-wizard', 'skills-f713fc6201ad0fd800d23a3ec4c4102b7acee91c');
+  assert.equal(readReceipt(repo).bundle.path, snapshot);
+  assert.match(first.stdout, /Skill bundle\s+merged-source snapshot straddle-build\/skills@f713fc6 .*verified/);
+  assert.equal(JSON.parse(status.stdout).bundle.path, snapshot);
+  assert.doesNotMatch(status.stdout, /fetch/);
+});
+
+test('--client picks the agent for a guided run instead of asking', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+
+  // Continue, charges, marketplace, suggested SDK, webhook; no agent question; then "not run yet" at the Cursor handoff.
+  const r = await runWizard(['plan', '--client', 'cursor'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '3', '', '1', '3'] });
+
+  assert.doesNotMatch(r.stdout, /Which coding agent should do the work\?/);
+  assert.equal(readReceipt(repo).client, 'cursor');
 });
 
 test('default journey: readiness repair, plan before edits, observed progress separate from reported handoffs, final report', async () => {
