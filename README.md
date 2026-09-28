@@ -1,2 +1,89 @@
 # wizard
-Local Straddle Developer Kit installer and agent orchestrator
+
+Local Straddle Developer Kit installer and agent orchestrator.
+
+`@straddlecom/wizard` is a guided terminal setup. Run it in your project, confirm what it detected, answer four questions, and it hands the work to your local coding agent (Claude Code, Codex, or Cursor) through the versioned [Straddle skills](https://github.com/straddle-build/skills). Every integration instruction lives in those skills. The Wizard detects, asks, checks readiness, starts the skill in your agent, and reports what it observed.
+
+## Status
+
+- No tagged Straddle plugin release exists yet. The Wizard uses the merged skills source, `straddle-build/skills` at `f713fc6201ad0fd800d23a3ec4c4102b7acee91c` (plugin `0.1.0`), and labels it "merged-source snapshot … not a tagged release" everywhere it appears.
+- The npm package is not published yet. `.github/workflows/release.yml` publishes it with npm provenance when a GitHub release is published.
+
+## Requirements
+
+- Node.js 22.18 or later, and Git.
+- Claude Code or Codex on `PATH` for automated handoff. Cursor always gets a manual handoff.
+
+## Skills bundle
+
+The Wizard needs the pinned skills snapshot on your machine. It checks every bundle by content: the SHA-256 of the plugin's runtime files (`plugin.json`, `mcp.json`, the three client manifests, `assets/`, `skills/`, `references/`, `third_party/`, `LICENSE`, `README.md`) must equal the digest of that commit. It looks, in order, at:
+
+1. `--bundle <path>` or `STRADDLE_WIZARD_BUNDLE`, when you pass one. Nothing else is tried.
+2. The bundle the saved run last used.
+3. Claude Code's `straddle` marketplace, when it holds the same content.
+4. Its own snapshot in `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/skills-<commit>`.
+
+When none matches, the Wizard shows the exact Git commands that fetch that commit from GitHub into its cache, and runs them only after you choose Fetch (or pass `--yes` to `install`, `update`, or `skill list`). It verifies the fetched content before using it and changes nothing else. `wizard status` never fetches.
+
+## Guided run
+
+```sh
+cd your-project
+npx @straddlecom/wizard
+```
+
+1. **Context.** The Wizard shows the directory, detected language, framework, any Straddle SDK and other payment providers, and the program it will run. Choose Continue, Change detected context, Privacy and data, or Cancel. Detected values are suggestions; corrected values are marked "(you)".
+2. **Choices.** It asks what you want to build (charges, payouts, or both), direct, SaaS, or marketplace, which SDK, and which notification path (webhook, FIFO, or polling endpoint). It never infers these from the framework. "Not decided yet" leaves the question to the skill.
+3. **Agent.** Pick an installed agent, or pass `--client`. The menu labels how much progress the Wizard can see for each: Claude Code progress is observed through hooks, Codex progress is unverified, and Cursor is a manual handoff.
+4. **Readiness.** The Wizard finds or fetches the skills bundle, then checks the agent binary and login, the Straddle plugin, the API MCP credential route, `STRADDLE_API_KEY` (presence only), and the declared environment. It prints the exact native commands before running any of them. For Claude Code you can also load the plugin only for sessions the Wizard starts (`claude --plugin-dir`), which installs nothing.
+5. **Steps.** The default program runs Setup, Plan, Integrate, and Test. Each step opens your agent in the same terminal with `/straddle:<skill>`. Answer its questions and approve or deny its actions there; choosing Start in the Wizard is not approval of anything. Exit the agent when the skill prints its handoff.
+6. **Report.** After each step the Wizard shows what it observed separately from what the agent reported. Observed means Claude Code hooks confirmed a step file was read or a file edit completed, or the Wizard's before-and-after file hashes changed; a step entry is not completion or approval. Reported means the skill's printed handoff status. The final report lists changed files, states that the Wizard sent no Straddle request and verified no server-side resource, and prints the skill's "Verify before merging" checklist.
+
+Ctrl-C at a Wizard prompt marks the run aborted and keeps all work. While the agent runs, Ctrl-C belongs to the agent. Nothing is rolled back.
+
+## Commands
+
+| Command | What it does |
+| -- | -- |
+| `wizard` | Guided integration: Setup, Plan, Integrate, Test. |
+| `wizard resume` | Shows the saved run and continues from the first step without an accepted handoff. |
+| `wizard setup`, `plan`, `integrate`, `test` | One step of the integration program. |
+| `wizard get-started`, `migrate`, `go-live`, `audit` | The named program's skill. |
+| `wizard skill list`, `wizard skill run <name>` | Lists the bundle's skills with versions, or runs one directly. |
+| `wizard install`, `update`, `remove` | Installs, updates, or removes the Straddle plugin with the client's own plugin commands. |
+| `wizard mcp add`, `mcp remove` | Registers or removes only `straddle-api` and `straddle-docs` with the client's own MCP commands. |
+| `wizard status` | Bundle, clients, plugin and MCP state, key presence, environment, and the saved run. |
+
+Options: `--dir <path>`, `--client claude|codex|cursor` (for guided runs, `resume`, and configuration commands), `--bundle <path>` (or `STRADDLE_WIZARD_BUNDLE`), `--exclude <glob>` (repeatable, or `STRADDLE_WIZARD_EXCLUDE=a,b`), `--yes` for fetching the skills and for configuration commands, and `--json` for `status` and `skill list`.
+
+`wizard audit` runs the `straddle-audit` skill and prints the findings table from `straddle-audit-report.md`, with `file:line` and confidence for each finding. There is no `diagnose` command.
+
+## Guarantees
+
+- **No code edit before the plan.** Integrate and Test do not start until `straddle-integration-plan.md` (or, for Test, `straddle-migration-plan.md`) exists. In Claude Code, a per-session hook also denies edits to repository files until the plan exists.
+- **No Straddle request without configuration.** A missing `STRADDLE_API_KEY` or an environment other than Sandbox is shown as a configuration error before any step that can send Straddle requests. You can stop or continue with offline work only; the skills refuse every Straddle request until it is fixed.
+- **No secrets.** The Wizard reads dependency manifests and file names in the selected repository only. It never opens `.env*` files, keys, certificates, credential or CLI configuration files, or paths you pass with `--exclude`, and it does not follow symlinks. It never reads, stores, or prints your API key; set it in your own shell.
+- **No stored approval.** `.straddle-wizard/receipt.json` records the program, agent, context, choices, bundle identity, state (`ready`, `running`, `blocked`, `aborted`, `completed`), observed events, and reported markers. It has no approval field. A resumed step starts a fresh agent session that asks for approval again.
+- **Your agent owns the code.** Edits happen in your local agent under its own settings. The Wizard hosts no model and sends no repository content to Straddle.
+- **Other client configuration stays.** Install, update, remove, and MCP commands act only on the `straddle` plugin, its `straddle` marketplace, and the `straddle-api` and `straddle-docs` servers.
+
+## MCP servers
+
+| Server | URL | Credential |
+| -- | -- | -- |
+| `straddle-api` | `https://mcp.scalar.com/mcp/d5d1b1c2-ae5b-432d-b795-4fcb31cfdedd` | Your Straddle API key as a bearer token from `STRADDLE_API_KEY`. No Scalar login. |
+| `straddle-docs` | `https://straddle-build-straddle-openapi.apidocumentation.com/mcp` | None. |
+
+Claude Code gets both from the Straddle plugin. Codex needs a client-level `straddle-api` with `--bearer-token-env-var STRADDLE_API_KEY`, which `wizard install` and `wizard mcp add` add. Cursor configuration is manual; the Wizard prints the JSON to merge.
+
+## Development
+
+```sh
+npm ci
+export STRADDLE_SKILLS_SOURCE=/path/to/straddle-skills   # checkout of straddle-build/skills at f713fc6
+npm run typecheck
+npm test
+npm run build
+```
+
+Tests drive the real CLI against the real pinned bundle. Claude Code is replaced by a scripted process in `tests/fixtures/fake-claude.mjs`, so the test suite is simulated-adapter evidence, not native-client proof.
