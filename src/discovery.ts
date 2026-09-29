@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { field, parseJson } from './json.ts';
 
@@ -20,7 +20,8 @@ export type ExclusionReason =
   | 'credential or CLI configuration'
   | 'configured sensitive path'
   | 'symlink escapes the repository'
-  | 'symlink not followed';
+  | 'symlink not followed'
+  | 'unreadable';
 
 export interface Exclusion { path: string; reason: ExclusionReason }
 
@@ -52,12 +53,16 @@ function walk(repo: string, exclude: readonly string[]): Walk {
   const configured = exclude.map(globToRegExp);
   const result: Walk = { files: [], excluded: [], truncated: false };
   const visit = (dir: string, depth: number) => {
-    for (const name of readdirSync(dir).sort()) {
+    let names: string[];
+    // A directory that cannot be listed, or an entry that disappears while it is walked, is skipped and named.
+    try { names = readdirSync(dir).sort(); } catch { result.excluded.push({ path: relative(root, dir).split(sep).join('/') || '.', reason: 'unreadable' }); return; }
+    for (const name of names) {
       if (result.files.length >= MAX_FILES) { result.truncated = true; return; }
       const abs = join(dir, name);
       const rel = relative(root, abs).split(sep).join('/');
-      const info = lstatSync(abs);
-      if (info.isDirectory() && SKIPPED_DIRS[name]) continue;
+      let info;
+      try { info = lstatSync(abs); } catch { result.excluded.push({ path: rel, reason: 'unreadable' }); continue; }
+      if (info.isDirectory() && Object.hasOwn(SKIPPED_DIRS, name)) continue;
       if (info.isSymbolicLink()) {
         let target: string | null = null;
         try { target = realpathSync(abs); } catch { target = null; }
@@ -77,6 +82,38 @@ function walk(repo: string, exclude: readonly string[]): Walk {
   };
   visit(root, 0);
   return result;
+}
+
+// Opens a regular file without following a symlink, even one swapped in after the walk, and without blocking on a
+// FIFO. Null when it cannot be opened that way.
+function openRegular(abs: string): { fd: number; size: number; mtimeMs: number } | null {
+  let fd: number;
+  try { fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return null; }
+  const info = fstatSync(fd);
+  if (info.isFile()) return { fd, size: info.size, mtimeMs: info.mtimeMs };
+  closeSync(fd);
+  return null;
+}
+
+export type RepoFile = { kind: 'absent' } | { kind: 'skipped'; reason: string } | { kind: 'read'; text: string; sha256: string };
+
+// Reads one top-level repository file under the same boundary as discovery: never a symlink, a sensitive file or
+// a configured sensitive path.
+export function readRepoFile(root: string, name: string, exclude: readonly string[]): RepoFile {
+  const abs = join(root, name);
+  let info;
+  try { info = lstatSync(abs); } catch { return { kind: 'absent' }; }
+  const reason = info.isSymbolicLink() ? 'it is a symlink, which the Wizard never follows'
+    : sensitiveReason(name) ?? (exclude.map(globToRegExp).some((re) => re.test(name)) ? 'it is a configured sensitive path' : null);
+  if (reason) return { kind: 'skipped', reason };
+  const file = openRegular(abs);
+  if (!file) return { kind: 'skipped', reason: 'it is not a regular file the Wizard can open' };
+  try {
+    const bytes = readFileSync(file.fd);
+    return { kind: 'read', text: bytes.toString('utf8'), sha256: createHash('sha256').update(bytes).digest('hex') };
+  } finally {
+    closeSync(file.fd);
+  }
 }
 
 export interface Detected { value: string; evidence: string[] }
@@ -116,12 +153,21 @@ interface Manifest { ecosystem: Ecosystem; language: string; evidence: string[];
 
 function readManifests(root: string, files: readonly string[]): { manifests: Manifest[]; errors: string[] } {
   const has = new Set(files);
-  const read = (rel: string) => readFileSync(join(root, rel), 'utf8');
   const manifests: Manifest[] = [];
   const errors: string[] = [];
+  const read = (rel: string): string | null => {
+    const file = openRegular(join(root, rel));
+    try {
+      if (file) return readFileSync(file.fd, 'utf8');
+    } catch { /* reported below */ } finally {
+      if (file) closeSync(file.fd);
+    }
+    errors.push(`${rel} could not be read`);
+    return null;
+  };
 
-  if (has.has('package.json')) {
-    const raw = read('package.json');
+  const raw = has.has('package.json') ? read('package.json') : null;
+  if (raw !== null) {
     const pkg = parseJson(raw);
     if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) {
       errors.push('package.json is malformed JSON');
@@ -135,26 +181,28 @@ function readManifests(root: string, files: readonly string[]): { manifests: Man
       manifests.push({ ecosystem: 'node', language: ts ? 'TypeScript' : 'JavaScript', evidence: has.has('tsconfig.json') ? ['package.json', 'tsconfig.json'] : ['package.json'], deps, file: 'package.json' });
     }
   }
-  for (const file of ['pyproject.toml', 'requirements.txt', 'Pipfile']) {
-    if (!has.has(file)) continue;
+  const python = ['pyproject.toml', 'requirements.txt', 'Pipfile'].find((f) => has.has(f));
+  const pythonText = python ? read(python) : null;
+  if (python && pythonText !== null) {
     const deps = new Map<string, string>();
-    for (const m of read(file).matchAll(/^\s*"?([A-Za-z0-9_.-]+)\s*(?:\[[^\]]*\])?\s*([=<>~!]=?[^"#,\s]*)?/gm)) deps.set(m[1]!.toLowerCase(), m[2] ?? '');
-    manifests.push({ ecosystem: 'python', language: 'Python', evidence: [file], deps, file });
-    break;
+    for (const m of pythonText.matchAll(/^\s*"?([A-Za-z0-9_.-]+)\s*(?:\[[^\]]*\])?\s*([=<>~!]=?[^"#,\s]*)?/gm)) deps.set(m[1]!.toLowerCase(), m[2] ?? '');
+    manifests.push({ ecosystem: 'python', language: 'Python', evidence: [python], deps, file: python });
   }
-  if (has.has('Gemfile')) {
+  const gemfile = has.has('Gemfile') ? read('Gemfile') : null;
+  if (gemfile !== null) {
     const deps = new Map<string, string>();
-    for (const m of read('Gemfile').matchAll(/^\s*gem\s+['"]([^'"]+)['"](?:\s*,\s*['"]([^'"]+)['"])?/gm)) deps.set(m[1]!, m[2] ?? '');
+    for (const m of gemfile.matchAll(/^\s*gem\s+['"]([^'"]+)['"](?:\s*,\s*['"]([^'"]+)['"])?/gm)) deps.set(m[1]!, m[2] ?? '');
     manifests.push({ ecosystem: 'ruby', language: 'Ruby', evidence: ['Gemfile'], deps, file: 'Gemfile' });
   }
-  if (has.has('go.mod')) {
+  const goMod = has.has('go.mod') ? read('go.mod') : null;
+  if (goMod !== null) {
     const deps = new Map<string, string>();
-    for (const m of read('go.mod').matchAll(/^\s*(?:require\s+)?([a-z0-9.-]+\.[a-z]+\/[^\s]+)\s+(v[^\s]+)/gm)) deps.set(m[1]!, m[2]!);
+    for (const m of goMod.matchAll(/^\s*(?:require\s+)?([a-z0-9.-]+\.[a-z]+\/[^\s]+)\s+(v[^\s]+)/gm)) deps.set(m[1]!, m[2]!);
     manifests.push({ ecosystem: 'go', language: 'Go', evidence: ['go.mod'], deps, file: 'go.mod' });
   }
   const csproj = files.find((f) => f.endsWith('.csproj') && f.split('/').length <= 3);
-  if (csproj) {
-    const text = read(csproj);
+  const text = csproj ? read(csproj) : null;
+  if (csproj && text !== null) {
     const deps = new Map<string, string>();
     for (const m of text.matchAll(/<PackageReference\s+Include="([^"]+)"(?:\s+Version="([^"]+)")?/g)) deps.set(m[1]!, m[2] ?? '');
     const sdk = /<Project\s+Sdk="([^"]+)"/.exec(text)?.[1];
@@ -205,20 +253,32 @@ export function discover(root: string, exclude: readonly string[]): RepoFacts {
   };
 }
 
-export type Snapshot = Record<string, string>;
+// Hashes only files discovery may open, to report what changed during an agent session. `limits` names what the
+// comparison could not cover, so a changed-file list is never presented as exhaustive when it is not.
+export interface Snapshot { hashes: Record<string, string>; limits: string[] }
 
-// Hashes only files discovery may open, to report what changed during an agent session.
 export function snapshot(root: string, exclude: readonly string[]): Snapshot {
-  const snap: Snapshot = {};
-  for (const rel of walk(root, exclude).files) {
-    const abs = join(root, rel);
-    const info = statSync(abs);
-    snap[rel] = info.size > MAX_HASH_BYTES ? `size:${info.size}:mtime:${info.mtimeMs}` : createHash('sha256').update(readFileSync(abs)).digest('hex');
+  const scan = walk(root, exclude);
+  const hashes: Record<string, string> = {};
+  const unreadable = scan.excluded.filter((e) => e.reason === 'unreadable').map((e) => e.path);
+  for (const rel of scan.files) {
+    const file = openRegular(join(root, rel));
+    if (!file) { unreadable.push(rel); continue; }
+    try {
+      hashes[rel] = file.size > MAX_HASH_BYTES ? `size:${file.size}:mtime:${file.mtimeMs}` : createHash('sha256').update(readFileSync(file.fd)).digest('hex');
+    } catch {
+      unreadable.push(rel);
+    } finally {
+      closeSync(file.fd);
+    }
   }
-  return snap;
+  const limits: string[] = [];
+  if (scan.truncated) limits.push(`the file limit (${MAX_FILES} files, ${MAX_DEPTH} directory levels) was reached; files beyond it were not compared`);
+  if (unreadable.length) limits.push(`not readable, so not compared: ${unreadable.sort().join(', ')}`);
+  return { hashes, limits };
 }
 
 export function changedFiles(before: Snapshot, after: Snapshot): string[] {
-  const paths = new Set([...Object.keys(before), ...Object.keys(after)]);
-  return [...paths].filter((p) => before[p] !== after[p]).sort();
+  const paths = new Set([...Object.keys(before.hashes), ...Object.keys(after.hashes)]);
+  return [...paths].filter((p) => before.hashes[p] !== after.hashes[p]).sort();
 }

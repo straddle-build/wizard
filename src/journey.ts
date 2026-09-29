@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +8,7 @@ import {
   type ClientName, type ClientState, type Command, type CommandResult, type ConfigPlan,
 } from './clients.ts';
 import { straddleConfiguration } from './configuration.ts';
-import { changedFiles, discover, snapshot, type RepoFacts } from './discovery.ts';
+import { changedFiles, discover, readRepoFile, snapshot, type RepoFacts } from './discovery.ts';
 import { parseMarkers, readObservedEvents, stepEntries, transcriptAssistantText, verifyChecklist, type ReportedMarker } from './events.ts';
 import { INTEGRATION_PLAN, SKILLS, programFor, programLabel, type ProgramName, type SkillName } from './programs.ts';
 import { WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type Receipt, type RunState, type StepRun } from './receipt.ts';
@@ -50,7 +49,7 @@ function finish(receipt: Receipt, state: RunState, reason: string): number {
 }
 
 function row(io: Prompter, label: string, value: string): void {
-  io.say(`  ${label.padEnd(16)}${value}`);
+  io.say(`  ${label.padEnd(18)}${value}`);
 }
 
 function answerText(answer: Answer, evidence: string[]): string {
@@ -58,8 +57,10 @@ function answerText(answer: Answer, evidence: string[]): string {
   return evidence.length ? `${answer.value} (detected: ${evidence.join(', ')})` : answer.value;
 }
 
-function choicesText(choices: Choices | null): string {
-  return choices ? [choices.products, choices.integrationType, choices.sdk, choices.notificationPath].join(', ') : 'not asked for this program';
+function choicesText(receipt: Receipt): string {
+  const c = receipt.context.choices;
+  if (c) return [c.products, c.integrationType, c.sdk, c.notificationPath].join(', ');
+  return programFor(receipt.program).asksChoices ? 'not answered yet; asked again before the agent starts' : 'not asked for this program';
 }
 
 const LANGUAGES = ['TypeScript', 'JavaScript', 'Python', 'Ruby', 'C#', 'Go', 'Other'] as const;
@@ -82,8 +83,9 @@ function printWelcome(io: Prompter, facts: RepoFacts, context: Receipt['context'
     for (const err of facts.errors) io.say(`  Detection error: ${err}`);
   }
   io.say();
-  io.say('  Your coding agent reads and edits this repository on your machine. The Wizard reads dependency');
-  io.say(`  manifests and file names only, never opens .env files, keys or credential files (${facts.excluded.length} skipped), and sends nothing to Straddle.`);
+  io.say('  Your coding agent reads and edits this repository on your machine. The Wizard reads dependency manifests and');
+  io.say('  file names, and hashes other files locally to report which ones changed. It never opens .env files, keys or');
+  io.say(`  credential files (${facts.excluded.length} skipped), and sends nothing to Straddle.`);
   io.say();
 }
 
@@ -230,28 +232,35 @@ function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: 
   row(io, 'Skill bundle', `${bundleLabel(bundle)}, verified`);
   row(io, 'Agent', client.version ? `${client.label} ${client.version}` : `${client.label}: not found`);
   if (client.loggedIn !== null) row(io, 'Agent login', client.loggedIn ? 'logged in' : 'not logged in');
-  const installed = client.plugin.state === 'installed' ? `installed ${client.plugin.version ?? ''}`.trim() : client.plugin.state === 'missing' ? 'not installed' : 'unverified (the Wizard cannot inspect this client)';
+  const installed = client.plugin.state === 'installed'
+    ? `installed ${client.plugin.version ?? ''}, ${client.plugin.verified ? 'matches the verified snapshot' : 'differs from the verified snapshot'}`
+    : client.plugin.state === 'missing' ? 'not installed' : 'unverified (the Wizard cannot inspect this client)';
   if (receipt.pluginLoad === 'session') {
     row(io, 'Straddle plugin', `loaded into each Wizard session from the verified snapshot with --plugin-dir (your Claude Code: ${installed})`);
     row(io, 'API MCP', 'declared by that plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in');
-    row(io, 'Session settings', 'isolated: your user and project allow rules, hooks, plugins and default mode do not apply; Claude Code asks before edits, commands and MCP calls');
+    row(io, 'Session settings', 'isolated: your user and project allow and deny rules, hooks, plugins, default mode and settings-based login (apiKeyHelper, env) do not apply; Claude Code asks before edits, commands and MCP calls');
   } else {
     row(io, 'Straddle plugin', installed);
     row(io, 'API MCP', client.apiMcp);
+    if (client.name === 'codex') row(io, 'Session settings', 'not isolated: each session sets --sandbox workspace-write and --ask-for-approval on-request; your other Codex configuration, hooks, MCP servers and plugins still apply');
   }
   row(io, 'Straddle key', config.key === 'present' ? 'STRADDLE_API_KEY is set (value not read)' : 'STRADDLE_API_KEY is not set');
   row(io, 'Environment', config.environment);
   io.say();
 }
 
-function printCredentialHelp(io: Prompter, env: NodeJS.ProcessEnv): void {
+function printCredentialHelp(io: Prompter, receipt: Receipt, env: NodeJS.ProcessEnv): void {
   const config = straddleConfiguration(env);
   if (!config.errors.length) return;
+  const remaining = programFor(receipt.program).skills.filter((s) => !advanced(receipt, s));
+  const titles = (requests: boolean) => remaining.filter((s) => SKILLS[s].sendsStraddleRequests === requests).map((s) => SKILLS[s].title).join(', ');
   io.say(`Configuration error for Straddle requests: ${config.errors.join('; ')}.`);
-  io.say('  Planning and code changes can continue. Every Straddle request is refused until you set these in your own shell and');
-  io.say('  start again with `wizard resume`:');
+  if (titles(false)) io.say(`  ${titles(false)} can run: the Wizard does not block steps that send no Straddle request.`);
+  io.say(`  ${titles(true) || 'Integrate and Test'} will not start until you fix this in your own shell and run \`wizard resume\`.`);
+  io.say('  The Wizard checks only these shell variables, not a saved Straddle CLI login:');
   io.say('    export STRADDLE_API_KEY=<your Sandbox key>    # type it in your shell, never into the Wizard');
   io.say('    export STRADDLE_ENVIRONMENT=sandbox');
+  if (env.STRADDLE_BASE_URL) io.say('    unset STRADDLE_BASE_URL                       # or set it to https://sandbox.straddle.com');
   io.say();
 }
 
@@ -267,6 +276,7 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
   const name = receipt.client!;
   // Claude Code sessions always load exactly the verified bundle; they ignore user settings, where an install is enabled.
   if (name === 'claude') receipt.pluginLoad = 'session';
+  let repaired = false;
   for (;;) {
     const client = inspectClient(name, opts.env);
     printReadiness(io, receipt, bundle, client, opts.env);
@@ -282,14 +292,19 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
       return finish(receipt, 'blocked', `${client.label} is not logged in`);
     }
     if (receipt.pluginLoad === 'session') return { bundle, client };
-    if (client.plugin.state === 'installed' && client.plugin.version === bundle.pluginVersion) {
+    // Codex loads its own installed copy, so that copy, not just its version, must be the verified snapshot.
+    if (client.plugin.verified) {
       receipt.pluginLoad = 'installed';
       return { bundle, client };
+    }
+    if (repaired) {
+      io.say(`The Straddle plugin ${client.label} would load still differs from the verified snapshot after the repair.`);
+      return finish(receipt, 'blocked', `the Straddle plugin in ${client.label} differs from the verified snapshot`);
     }
 
     const outdated = client.plugin.state === 'installed';
     const plan = outdated ? updatePlan(client, bundle) : installPlan(client, bundle);
-    io.say(outdated ? `The Straddle plugin in ${client.label} is ${client.plugin.version}, not ${bundle.pluginVersion}.` : `The Straddle plugin is not installed in ${client.label}.`);
+    io.say(outdated ? `The Straddle plugin ${client.label} would load (${client.plugin.version ?? 'unknown version'}) differs from the verified snapshot.` : `The Straddle plugin is not installed in ${client.label}.`);
     type Repair = 'apply' | 'manual' | 'cancel';
     const options: Array<{ label: string; value: Repair }> = [];
     if (plan.kind === 'commands') options.push({ label: outdated ? 'Update it with these commands' : 'Install it with these commands', value: 'apply' });
@@ -300,6 +315,7 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
     if (repair === 'apply' && plan.kind === 'commands') {
       if (!printCommandResults(io, runCommands(plan.commands, opts.env))) return finish(receipt, 'blocked', 'plugin installation failed');
       io.say();
+      repaired = true;
       continue;
     }
     if (repair === 'manual') {
@@ -314,10 +330,6 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
 
 // ---------- Steps ----------
 
-function sha256(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
-
 function section(textContent: string, heading: string): string[] {
   const lines = textContent.split('\n');
   const start = lines.findIndex((l) => l.trim() === `## ${heading}`);
@@ -327,15 +339,20 @@ function section(textContent: string, heading: string): string[] {
 }
 
 function showPlan(io: Prompter, receipt: Receipt): void {
-  const path = join(receipt.repo, INTEGRATION_PLAN);
-  if (!existsSync(path)) return;
-  const content = readFileSync(path, 'utf8');
-  const state = /Plan state:\s*([^\n]+)/.exec(content)?.[1]?.trim() ?? 'not recorded';
+  const plan = readRepoFile(receipt.repo, INTEGRATION_PLAN, receipt.exclude);
+  if (plan.kind === 'absent') return;
+  if (plan.kind === 'skipped') {
+    io.say(io.bold(`Plan: ${INTEGRATION_PLAN}`));
+    io.say(`  Not shown: the Wizard does not open it because ${plan.reason}. Review it in your coding agent.`);
+    io.say();
+    return;
+  }
+  const state = /Plan state:\s*([^\n]+)/.exec(plan.text)?.[1]?.trim() ?? 'not recorded';
   io.say(io.bold(`Plan: ${INTEGRATION_PLAN} (Plan state: ${state})`));
-  if (receipt.planSha256 && receipt.planSha256 !== sha256(path)) io.say('  The plan changed after the Plan step. Integrate reviews the current file.');
+  if (receipt.planSha256 && receipt.planSha256 !== plan.sha256) io.say('  The plan changed after the Plan step. Integrate reviews the current file.');
   for (const heading of ['File changes', 'Future Sandbox writes']) {
     io.say(`  ${heading}`);
-    const lines = section(content, heading);
+    const lines = section(plan.text, heading);
     for (const line of lines.length ? lines : ['(section not found)']) io.say(`    ${line}`);
   }
   io.say('  Approve or change the plan in your coding agent. Integrate asks for approval of the current plan, and every');
@@ -343,22 +360,25 @@ function showPlan(io: Prompter, receipt: Receipt): void {
   io.say();
 }
 
-function showAuditFindings(io: Prompter, repo: string): void {
-  const path = join(repo, 'straddle-audit-report.md');
-  if (!existsSync(path)) { io.say('  straddle-audit-report.md was not written.'); return; }
-  const content = readFileSync(path, 'utf8');
+function showAuditFindings(io: Prompter, receipt: Receipt): void {
+  const report = readRepoFile(receipt.repo, 'straddle-audit-report.md', receipt.exclude);
+  if (report.kind === 'absent') { io.say('  straddle-audit-report.md was not written.'); return; }
+  if (report.kind === 'skipped') { io.say(`  straddle-audit-report.md is not shown: the Wizard does not open it because ${report.reason}.`); return; }
   io.say(io.bold('Findings (straddle-audit-report.md)'));
-  const table = section(content, 'Findings').filter((l) => l.trim().startsWith('|'));
+  const table = section(report.text, 'Findings').filter((l) => l.trim().startsWith('|'));
   for (const line of table.length ? table : ['(no findings table in the report)']) io.say(`  ${line.trim()}`);
   io.say();
 }
 
+// Everything the developer confirmed in the Wizard, with where each value came from. Skill instructions stay in the skill.
 function contextForAgent(receipt: Receipt): string {
-  const c = receipt.context.choices;
-  if (!c) return '';
+  const { language, framework, choices: c } = receipt.context;
+  const origin = (a: Answer) => (a.source === 'developer' ? 'corrected by the developer' : 'detected');
+  const context = `Repository context confirmed in the Straddle Wizard: language ${language.value} (${origin(language)}); framework ${framework.value} (${origin(framework)}).`;
+  if (!c) return context;
   const decided = ([['products', c.products], ['integration type', c.integrationType], ['SDK', c.sdk], ['notification path', c.notificationPath]] as const)
     .map(([k, v]) => `${k} ${v}`);
-  return `Developer choices from the Straddle Wizard: ${decided.join('; ')}.`;
+  return `${context} Developer choices from the Straddle Wizard: ${decided.join('; ')}.`;
 }
 
 interface ClientExit { code: number | null; signal: string | null; error: string | null }
@@ -441,7 +461,7 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
 
   const step: StepRun = {
     skill, skillVersion: version, startedAt: new Date().toISOString(), endedAt: null, exit: null,
-    eventSurface: EVENT_SURFACE[receipt.client!], observedSteps: [], observedEvents: [], reportedMarkers: [], changedFiles: [], checklist: [],
+    eventSurface: EVENT_SURFACE[receipt.client!], observedSteps: [], observedEvents: [], reportedMarkers: [], changedFiles: [], evidenceLimits: [], checklist: [], advanced: false,
   };
   const before = snapshot(repo, receipt.exclude);
   receipt.steps.push(step);
@@ -460,8 +480,13 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
   const output = [...new Set(transcripts)].map(transcriptAssistantText).join('\n');
   step.reportedMarkers = receipt.client === 'codex' && !exit.error ? await developerReported(io, skill, 'Codex') : parseMarkers(output).filter((m) => m.skill === skill);
   step.checklist = verifyChecklist(output);
-  step.changedFiles = changedFiles(before, snapshot(repo, receipt.exclude));
-  if (skill === 'straddle-plan' && existsSync(join(repo, INTEGRATION_PLAN))) receipt.planSha256 = sha256(join(repo, INTEGRATION_PLAN));
+  const after = snapshot(repo, receipt.exclude);
+  step.changedFiles = changedFiles(before, after);
+  step.evidenceLimits = [...new Set([...before.limits, ...after.limits])];
+  if (skill === 'straddle-plan') {
+    const plan = readRepoFile(repo, INTEGRATION_PLAN, receipt.exclude);
+    receipt.planSha256 = plan.kind === 'read' ? plan.sha256 : null;
+  }
 
   const handoff = step.reportedMarkers.findLast((m) => m.kind === 'handoff');
   const abort = step.reportedMarkers.findLast((m) => m.kind === 'abort');
@@ -478,13 +503,17 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
   io.say(`  Reported by ${reporter} (not verified by the Wizard): ${handoff ? `handoff ${handoff.status}${handoff.report ? `: ${handoff.report}` : ''}` : 'no handoff'}`);
   if (abort) io.say(`  Reported abort: ${abort.reason ?? 'no reason given'}`);
   io.say(`  Files changed: ${step.changedFiles.length ? step.changedFiles.join(', ') : 'none'}`);
+  for (const limit of step.evidenceLimits) io.say(`  Changed-file check incomplete: ${limit}`);
   io.say();
-  if (skill === 'straddle-audit') showAuditFindings(io, repo);
+  if (skill === 'straddle-audit') showAuditFindings(io, receipt);
 
+  // The Wizard's own evidence of a failed or stopped session wins over any handoff the model printed.
   if (exit.error) return finish(receipt, 'blocked', ended);
-  if (signal && !handoff) return interrupted(io, receipt, step, `${ended} before the skill's handoff`);
   if (abort) return interrupted(io, receipt, step, `the agent reported STRADDLE_ABORT: ${abort.reason ?? 'no reason'}`);
+  if (signal) return interrupted(io, receipt, step, handoff ? `${ended} after a reported handoff; the Wizard does not advance past an interrupted session` : `${ended} before the skill's handoff`);
+  if (exit.code !== 0) return finish(receipt, 'blocked', `${ended}; the Wizard does not advance past a failed session`);
   if (handoff?.status && (route.advanceOn as readonly string[]).includes(handoff.status)) {
+    step.advanced = true;
     return 'advance';
   }
   if (handoff) return finish(receipt, 'blocked', `${route.title} reported ${handoff.status ?? 'no status'}`);
@@ -502,7 +531,8 @@ function interrupted(io: Prompter, receipt: Receipt, step: StepRun, reason: stri
 async function manualHandoff(io: Prompter, receipt: Receipt, skill: SkillName, version: string): Promise<StepOutcome> {
   const step: StepRun = {
     skill, skillVersion: version, startedAt: new Date().toISOString(), endedAt: null, exit: null,
-    eventSurface: 'unsupported', observedSteps: [], observedEvents: [], reportedMarkers: [], changedFiles: [], checklist: [],
+    eventSurface: 'unsupported', observedSteps: [], observedEvents: [], reportedMarkers: [], changedFiles: [],
+    evidenceLimits: ['the Wizard does not observe Cursor and compared no files for this step'], checklist: [], advanced: false,
   };
   receipt.steps.push(step);
   io.say('  Cursor automation is not supported by the Wizard. Manual handoff:');
@@ -514,7 +544,10 @@ async function manualHandoff(io: Prompter, receipt: Receipt, skill: SkillName, v
   step.reportedMarkers = await developerReported(io, skill, 'Cursor');
   step.endedAt = new Date().toISOString();
   const handoff = step.reportedMarkers.at(-1);
-  if (handoff?.status && (SKILLS[skill].advanceOn as readonly string[]).includes(handoff.status)) return 'advance';
+  if (handoff?.status && (SKILLS[skill].advanceOn as readonly string[]).includes(handoff.status)) {
+    step.advanced = true;
+    return 'advance';
+  }
   return finish(receipt, 'blocked', handoff ? `${SKILLS[skill].title} reported ${handoff.status} in Cursor` : `manual handoff to Cursor for ${SKILLS[skill].title}; run \`wizard resume\` when it has run`);
 }
 
@@ -524,9 +557,9 @@ function latestRun(receipt: Receipt, skill: SkillName): StepRun | undefined {
   return receipt.steps.findLast((s) => s.skill === skill);
 }
 
+// Read from the decision runStep saved, so a resumed run never skips a step whose session failed or was aborted.
 function advanced(receipt: Receipt, skill: SkillName): boolean {
-  const status = latestRun(receipt, skill)?.reportedMarkers.findLast((m) => m.kind === 'handoff')?.status;
-  return status !== undefined && (SKILLS[skill].advanceOn as readonly string[]).includes(status);
+  return latestRun(receipt, skill)?.advanced === true;
 }
 
 function checklistFromBundle(bundle: Bundle, skill: SkillName): string[] {
@@ -558,6 +591,7 @@ function printReport(io: Prompter, receipt: Receipt, bundle: Bundle | null): num
   const changed = [...new Set(receipt.steps.flatMap((s) => s.changedFiles))].sort();
   io.say(io.bold('Changed files (observed by the Wizard)'));
   for (const file of changed.length ? changed : ['none']) io.say(`  ${file}`);
+  for (const limit of new Set(receipt.steps.flatMap((s) => s.evidenceLimits))) io.say(`  Not a complete list: ${limit}`);
   io.say();
   io.say(io.bold('Server-side resources'));
   io.say('  The Wizard created or enabled none. Resources the agent reports creating are in its handoff reports and evidence files;');
@@ -589,7 +623,7 @@ async function runProgram(io: Prompter, receipt: Receipt, opts: JourneyOptions):
   active.receipt = receipt;
   const ready = await ensureReady(io, receipt, opts);
   if (typeof ready === 'number') return printReport(io, receipt, null);
-  if (receipt.client !== 'cursor' && straddleConfiguration(opts.env).errors.length) printCredentialHelp(io, opts.env);
+  if (receipt.client !== 'cursor' && straddleConfiguration(opts.env).errors.length) printCredentialHelp(io, receipt, opts.env);
   saveReceipt(receipt);
 
   const skills = programFor(receipt.program).skills;
@@ -597,6 +631,7 @@ async function runProgram(io: Prompter, receipt: Receipt, opts: JourneyOptions):
     if (advanced(receipt, skill)) continue;
     const outcome = await runStep(io, receipt, skill, i + 1, skills.length, { bundle: ready.bundle, client: ready.client, opts });
     if (outcome !== 'advance') return printReport(io, receipt, ready.bundle);
+    saveReceipt(receipt);
   }
   finish(receipt, 'completed', `all ${skills.length} steps reached their handoff`);
   return printReport(io, receipt, ready.bundle);
@@ -608,7 +643,8 @@ function printSaved(io: Prompter, receipt: Receipt): void {
   row(io, 'Agent', receipt.client ? CLIENT_LABEL[receipt.client] : 'not chosen');
   row(io, 'Language', answerText(receipt.context.language, []));
   row(io, 'Framework', answerText(receipt.context.framework, []));
-  row(io, 'Choices', choicesText(receipt.context.choices));
+  row(io, 'Choices', choicesText(receipt));
+  if (receipt.exclude.length) row(io, 'Never opened', receipt.exclude.join(', '));
   for (const skill of programFor(receipt.program).skills) {
     row(io, SKILLS[skill].title, advanced(receipt, skill) ? `handoff ${latestRun(receipt, skill)?.reportedMarkers.findLast((m) => m.kind === 'handoff')?.status}` : latestRun(receipt, skill) ? 'incomplete' : 'not started');
   }
@@ -629,7 +665,14 @@ async function resumeRun(io: Prompter, receipt: Receipt, opts: JourneyOptions, c
     io.say();
     if (!go) { io.say('Cancelled. The saved run is unchanged.'); return 130; }
   }
+  active.receipt = receipt;
   receipt.wizardPid = process.pid;
+  // Setup the first run did not finish is finished now, before any readiness check or agent session.
+  if (programFor(receipt.program).asksChoices && !receipt.context.choices) {
+    receipt.context.choices = await askChoices(io, receipt.context.language.value);
+    if (!receipt.context.choices) return finish(receipt, 'aborted', 'developer cancelled while choosing');
+    saveReceipt(receipt);
+  }
   if (opts.client && opts.client !== receipt.client) { receipt.client = opts.client; receipt.pluginLoad = null; }
   if (!receipt.client) {
     receipt.client = await chooseClient(io, opts.env);
@@ -647,26 +690,37 @@ export async function resume(opts: JourneyOptions): Promise<number> {
     io.say('Start a new run with `wizard`; the unreadable file is kept beside it.');
     return 1;
   }
-  if (loaded.receipt.state === 'completed') { io.say(`The saved ${loaded.receipt.program} run is complete. Nothing to resume.`); return 0; }
+  // Paths excluded now are added to the saved ones before anything is inspected; saved exclusions stay.
+  loaded.receipt.exclude = [...new Set([...loaded.receipt.exclude, ...opts.exclude])];
+  if (loaded.receipt.state === 'completed') {
+    printSaved(io, loaded.receipt);
+    io.say(`The saved ${loaded.receipt.program} run is complete. Nothing to resume.`);
+    return 0;
+  }
   return resumeRun(io, loaded.receipt, opts, true);
 }
 
 export async function start(program: ProgramName, opts: JourneyOptions): Promise<number> {
   const { io, repo } = opts;
   const loaded = loadReceipt(repo);
-  if (loaded.kind === 'found' && loaded.receipt.state !== 'completed') {
-    printSaved(io, loaded.receipt);
-    const next = await io.choose('There is unfinished work here.', [
-      { label: `Resume the ${loaded.receipt.program} program from ${nextTitle(loaded.receipt)}`, value: 'resume' as const },
-      { label: `Start a new ${program} run (the saved run is replaced)`, value: 'new' as const },
+  if (loaded.kind === 'found') {
+    const saved = loaded.receipt;
+    saved.exclude = [...new Set([...saved.exclude, ...opts.exclude])];
+    printSaved(io, saved);
+    const done = saved.state === 'completed';
+    const next = await io.choose(done ? 'A completed run is saved here.' : 'There is unfinished work here.', [
+      ...(done ? [] : [{ label: `Resume the ${saved.program} program from ${nextTitle(saved)}`, value: 'resume' as const }]),
+      { label: `Start a new ${program} run (the saved run's record is kept beside it)`, value: 'new' as const },
       { label: 'Cancel', value: 'cancel' as const },
     ], 0);
     io.say();
-    if (next === 'resume') return resumeRun(io, loaded.receipt, opts, false);
+    if (next === 'resume') return resumeRun(io, saved, opts, false);
     if (next !== 'new') { io.say('Cancelled. The saved run is unchanged.'); return 130; }
   }
 
-  const facts = discover(repo, opts.exclude);
+  // A new run over a saved one keeps its exclusions too; nothing here removes a protection the developer added.
+  const exclude = loaded.kind === 'found' ? loaded.receipt.exclude : opts.exclude;
+  const facts = discover(repo, exclude);
   const context: Receipt['context'] = {
     language: { value: facts.language.value, source: 'detected' },
     framework: { value: facts.framework.value, source: 'detected' },
@@ -687,14 +741,14 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
     else { io.say('Cancelled. Nothing was saved or changed.'); return 130; }
   }
 
-  if (loaded.kind === 'invalid') {
-    const aside = `${receiptPath(repo)}.invalid-${Date.now()}`;
+  if (loaded.kind !== 'none') {
+    const aside = `${receiptPath(repo)}.${loaded.kind === 'found' ? loaded.receipt.state : 'invalid'}-${Date.now()}`;
     renameSync(receiptPath(repo), aside);
-    io.say(`The unreadable saved receipt was kept as ${aside}.`);
+    io.say(`The saved receipt was kept as ${aside}.`);
   }
   const receipt = newReceipt({ repo, program, pid: process.pid });
   receipt.context = context;
-  receipt.exclude = opts.exclude;
+  receipt.exclude = exclude;
   saveReceipt(receipt);
   active.receipt = receipt;
 

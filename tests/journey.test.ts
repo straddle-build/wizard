@@ -1,7 +1,7 @@
 // Guided journey through the real CLI, with Claude Code replaced by a scripted process (tests/fixtures/fake-claude.mjs).
 // This is simulated-adapter evidence. Native client proof is recorded separately.
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, runWizard, tempDir, writeFiles } from './helpers.ts';
@@ -228,6 +228,45 @@ test('Integrate stops with a configuration error when credentials are missing', 
   assert.match(r.stdout, /zero Straddle requests/);
   assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
   assert.match(readReceipt(repo).stateReason, /configuration error/);
+  // Integrate is the only step here, so the help promises no step that could continue.
+  assert.match(r.stdout, /Integrate will not start until you fix this in your own shell/);
+  assert.doesNotMatch(r.stdout, /can continue|can run:/);
+});
+
+test('an explicit non-Sandbox base URL is a configuration error even when STRADDLE_ENVIRONMENT says sandbox', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+  const claude = fakeClaude();
+  const env = { ...CONFIGURED, STRADDLE_BASE_URL: 'https://production.straddle.com' };
+
+  const status = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, claude, env })).stdout);
+  const r = await runWizard(['test'], { cwd: repo, claude, env, input: ['1', '1'] });
+
+  assert.equal(status.environment, 'conflicting: STRADDLE_ENVIRONMENT is sandbox, STRADDLE_BASE_URL is https://production.straddle.com');
+  assert.deepEqual(status.configurationErrors, [
+    'STRADDLE_BASE_URL is https://production.straddle.com, not the Sandbox host',
+    'STRADDLE_ENVIRONMENT (sandbox) and STRADDLE_BASE_URL (https://production.straddle.com) disagree',
+  ]);
+  assert.equal(r.code, 1);
+  assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
+});
+
+test('a plan that is a symlink, or an excluded plan, is never opened or printed', async () => {
+  const outside = tempDir('outside');
+  writeFiles(outside, { '.env': `## File changes\n\nSYNTHETIC_SECRET_SENTINEL\n` });
+  const linked = nextRepo();
+  symlinkSync(join(outside, '.env'), join(linked, 'straddle-integration-plan.md'));
+  const excluded = nextRepo();
+  writeFiles(excluded, { 'straddle-integration-plan.md': PLAN.replace('add client', 'SYNTHETIC_PRIVATE_PLAN_ROW') });
+  const claude = fakeClaude();
+
+  const a = await runWizard(['integrate', '--client', 'claude'], { cwd: linked, claude, input: ['1'] });
+  const b = await runWizard(['integrate', '--client', 'claude', '--exclude', 'straddle-integration-plan.md'], { cwd: excluded, claude, input: ['1'] });
+
+  assert.doesNotMatch(a.stdout, /SYNTHETIC_SECRET_SENTINEL/);
+  assert.match(a.stdout, /Not shown: the Wizard does not open it because it is a symlink/);
+  assert.doesNotMatch(b.stdout, /SYNTHETIC_PRIVATE_PLAN_ROW/);
+  assert.match(b.stdout, /Not shown: the Wizard does not open it because it is a configured sensitive path/);
 });
 
 test('client login loss blocks the handoff with a repair, and resume rechecks it without reusing any approval', async () => {
@@ -276,6 +315,76 @@ test('an interrupted agent session is recorded as aborted with preserved work, a
   assert.equal(readReceipt(repo).state, 'completed');
 });
 
+test('a reported handoff never outranks a reported abort or a failed session, on the first run or on resume', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  const draftThenAbort = `${handoff('straddle-plan', 'draft', [])}\nSTRADDLE_ABORT {"skill":"straddle-plan","reason":"developer stopped"}`;
+  claude.sessions({ 'straddle-plan': { steps: ['01-decisions'], writes: [{ path: 'straddle-integration-plan.md', content: PLAN }], text: draftThenAbort } });
+
+  const aborted = await runWizard(['plan', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT.slice(0, -1), '1'] });
+  claude.sessions({ 'straddle-plan': { steps: ['01-decisions'], text: handoff('straddle-plan', 'draft', []), exit: 42 } });
+  const failed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+  const afterFailure = readReceipt(repo);
+  claude.sessions(DEFAULT_SESSIONS);
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+
+  assert.equal(aborted.code, 130, aborted.stdout);
+  assert.equal(failed.code, 1, failed.stdout);
+  assert.match(failed.stdout, /exited with code 42; the Wizard does not advance past a failed session/);
+  assert.equal(afterFailure.state, 'blocked');
+  assert.deepEqual(afterFailure.steps.map((s) => s.advanced), [false, false]);
+  assert.equal(resumed.code, 0, resumed.stdout);
+  assert.equal(claude.calls().filter((c) => c.includes('/straddle:straddle-plan')).length, 3);
+  assert.deepEqual(readReceipt(repo).steps.map((s) => s.advanced), [false, false, true]);
+});
+
+test('resume finishes cancelled upfront choices, applies new exclusions before inspecting, and hands corrected context to the agent', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'src/private-data.txt': 'before' });
+  const claude = fakeClaude();
+  claude.sessions({ 'straddle-plan': {
+    steps: ['01-decisions'],
+    writes: [{ path: 'straddle-integration-plan.md', content: PLAN }, { path: 'src/private-data.txt', content: 'after' }],
+    text: handoff('straddle-plan', 'draft', []),
+  } });
+
+  // Change > Framework > CUSTOM_FRAMEWORK, Continue, then Cancel at the first product question.
+  const first = await runWizard(['plan', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['2', '2', 'CUSTOM_FRAMEWORK', '1', '5'] });
+  // Resume, then the four choices, then Start.
+  const resumed = await runWizard(['resume', '--client', 'claude', '--exclude', 'src/private-data.txt'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '3', '', '1', '1'] });
+
+  assert.equal(first.code, 130, first.stdout);
+  assert.match(resumed.stdout, /Choices\s+not answered yet; asked again before the agent starts/);
+  assert.match(resumed.stdout, /Never opened\s+src\/private-data\.txt/);
+  assert.equal(resumed.code, 0, resumed.stdout);
+  const launch = claude.calls().find((c) => c.includes('/straddle:straddle-plan'));
+  assert.equal((JSON.parse(launch!) as string[]).at(-1), '/straddle:straddle-plan Repository context confirmed in the Straddle Wizard: language TypeScript (detected); '
+    + 'framework CUSTOM_FRAMEWORK (corrected by the developer). Developer choices from the Straddle Wizard: products charges; integration type marketplace; '
+    + 'SDK TypeScript; notification path webhook endpoint.');
+  const receipt = readReceipt(repo);
+  assert.deepEqual(receipt.exclude, ['src/private-data.txt']);
+  assert.deepEqual(receipt.steps[0]?.changedFiles, ['straddle-integration-plan.md']);
+});
+
+test('a completed run is shown and kept beside the next run instead of being overwritten', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions(DEFAULT_SESSIONS);
+  await runWizard(['setup', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT.slice(0, -1), '1'] });
+  const completed = readReceipt(repo);
+
+  // Start a new run, Continue, then stop before Audit starts.
+  const r = await runWizard(['audit', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '2'] });
+
+  assert.equal(completed.state, 'completed');
+  assert.match(r.stdout, /Saved run: setup program, completed/);
+  assert.match(r.stdout, /A completed run is saved here\./);
+  const kept = readdirSync(join(repo, '.straddle-wizard')).filter((f) => f.startsWith('receipt.json.completed-'));
+  assert.equal(kept.length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(join(repo, '.straddle-wizard', kept[0]!), 'utf8')).steps, completed.steps);
+  assert.equal(readReceipt(repo).program, 'audit');
+});
+
 test('a corrupted receipt is reported on resume and left untouched', async () => {
   const repo = nextRepo();
   writeFiles(repo, { '.straddle-wizard/receipt.json': '{broken' });
@@ -310,7 +419,9 @@ test('wizard skill run <name> launches that versioned skill in the chosen agent'
 
   assert.equal(r.code, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /Step 1 of 1: Go Live \(straddle-go-live /);
-  assert.deepEqual(claude.calls().filter((c) => c.includes('--settings')).map((c) => (JSON.parse(c) as string[]).at(-1)), ['/straddle:straddle-go-live']);
+  assert.deepEqual(claude.calls().filter((c) => c.includes('--settings')).map((c) => (JSON.parse(c) as string[]).at(-1)), [
+    '/straddle:straddle-go-live Repository context confirmed in the Straddle Wizard: language TypeScript (detected); framework Next.js (detected).',
+  ]);
   assert.equal(readReceipt(repo).program, 'skill:straddle-go-live');
 });
 
@@ -335,11 +446,11 @@ test('install, status, update and remove use native plugin commands and report d
   assert.match(install.stdout, /ok\s+claude plugin install straddle@straddle/);
   const parsed = JSON.parse(status.stdout);
   assert.equal(parsed.bundle.commit, 'f713fc6201ad0fd800d23a3ec4c4102b7acee91c');
-  assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'claude').plugin, { state: 'installed', version: '0.1.0' });
-  assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'cursor').plugin, { state: 'unverified', version: null });
+  assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'claude').plugin, { state: 'installed', version: '0.1.0', verified: true });
+  assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'cursor').plugin, { state: 'unverified', version: null, verified: false });
   assert.equal(parsed.credentials.STRADDLE_API_KEY, 'missing');
-  assert.equal(update.code, 0);
-  assert.match(update.stdout, /ok\s+claude plugin update straddle@straddle/);
+  assert.equal(update.code, 0, update.stdout);
+  assert.match(update.stdout, /ok\s+claude plugin uninstall straddle@straddle\nok\s+claude plugin install straddle@straddle\nStraddle plugin in Claude Code: installed 0\.1\.0, matches the verified snapshot/);
   assert.equal(remove.code, 0);
   assert.equal(JSON.parse(after.stdout).clients.find((c: { name: string }) => c.name === 'claude').plugin.state, 'missing');
 });

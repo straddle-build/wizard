@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { discover, snapshot, changedFiles } from '../src/discovery.ts';
@@ -69,7 +69,7 @@ test('never opens secrets, keys, CLI configuration or configured sensitive paths
   assert.equal(excluded['.straddle'], 'credential or CLI configuration');
   assert.equal(excluded['secrets'], 'credential or CLI configuration');
   assert.equal(excluded['internal/customers.csv'], 'configured sensitive path');
-  assert.ok(!Object.keys(snap).some((p) => p.startsWith('.env') || p.startsWith('internal/')));
+  assert.ok(!Object.keys(snap.hashes).some((p) => p.startsWith('.env') || p.startsWith('internal/')));
 });
 
 test('does not follow symlinks, and names the ones that escape the repository', () => {
@@ -88,7 +88,7 @@ test('does not follow symlinks, and names the ones that escape the repository', 
   assert.equal(excluded['notes.txt'], 'symlink escapes the repository');
   assert.equal(excluded['src-alias'], 'symlink not followed');
   assert.equal(facts.language.value, 'TypeScript');
-  assert.ok(!('notes.txt' in snap));
+  assert.ok(!('notes.txt' in snap.hashes));
 });
 
 test('changed files compare two snapshots, including created and deleted files', () => {
@@ -97,4 +97,19 @@ test('changed files compare two snapshots, including created and deleted files',
   writeFiles(repo, { 'src/app/page.tsx': 'changed', 'src/straddle.ts': 'new' });
 
   assert.deepEqual(changedFiles(before, snapshot(repo, [])), ['src/app/page.tsx', 'src/straddle.ts']);
+});
+
+test('an unreadable directory is skipped and named, and the snapshot says which paths it could not compare', () => {
+  const repo = nextRepo();
+  mkdirSync(join(repo, 'locked'));
+  writeFiles(repo, { 'locked/build.log': 'x' });
+  chmodSync(join(repo, 'locked'), 0o000);
+
+  const facts = discover(repo, []);
+  const snap = snapshot(repo, []);
+
+  assert.deepEqual(facts.excluded, [{ path: 'locked', reason: 'unreadable' }]);
+  assert.equal(facts.language.value, 'TypeScript');
+  assert.deepEqual(snap.limits, ['not readable, so not compared: locked']);
+  chmodSync(join(repo, 'locked'), 0o755);
 });

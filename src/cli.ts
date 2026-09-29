@@ -123,9 +123,11 @@ async function configure(kind: 'install' | 'update' | 'remove' | 'mcp add' | 'mc
   if (!bundle) return 1;
   const plan = kind === 'install' ? installPlan(state, bundle) : updatePlan(state, bundle);
   const code = await confirmAndRun(plan, `${kind === 'install' ? 'Install' : 'Update'} the Straddle plugin in ${state.label} from the ${bundleLabel(bundle)}:`);
+  if (client === 'cursor' || code !== 0) return code;
+  // Success means the copy the client loads is the verified snapshot, not only that the native commands exited 0.
   const after = inspectClient(client, env);
-  say(`Straddle plugin in ${after.label}: ${after.plugin.state}${after.plugin.version ? ` ${after.plugin.version}` : ''}`);
-  return code;
+  say(`Straddle plugin in ${after.label}: ${after.plugin.state}${after.plugin.version ? ` ${after.plugin.version}` : ''}, ${after.plugin.verified ? 'matches the verified snapshot' : 'does not match the verified snapshot'}`);
+  return after.plugin.verified ? 0 : 1;
 }
 
 function status(): number {
@@ -153,7 +155,7 @@ function status(): number {
   say(`  Repository     ${repo}`);
   say(`  Skill bundle   ${check.ok ? bundleLabel(check.bundle) : check.reason}`);
   for (const c of clients) {
-    const plugin = c.plugin.state === 'installed' ? `plugin ${c.plugin.version}` : `plugin ${c.plugin.state}`;
+    const plugin = c.plugin.state === 'installed' ? `plugin ${c.plugin.version}${c.plugin.verified ? '' : ' (differs from the verified snapshot)'}` : `plugin ${c.plugin.state}`;
     say(`  ${c.label.padEnd(15)}${c.version ?? 'not found'}${c.version ? `, ${plugin}, API MCP ${c.apiMcp}, progress ${EVENT_SURFACE[c.name]}` : ''}`);
   }
   say(`  Straddle key   STRADDLE_API_KEY ${config.key === 'present' ? 'is set (value not read)' : 'is not set'}`);

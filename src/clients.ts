@@ -1,5 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import type { Bundle } from './bundle.ts';
+import { realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { loadBundle, type Bundle } from './bundle.ts';
 import { field, parseJson, text } from './json.ts';
 
 export type ClientName = 'claude' | 'codex' | 'cursor';
@@ -57,7 +60,8 @@ export function runCommands(commands: readonly Command[], env: NodeJS.ProcessEnv
   return results;
 }
 
-export interface PluginState { state: 'installed' | 'missing' | 'unverified'; version: string | null }
+// `verified`: every copy the client reports loading the plugin from has exactly the pinned snapshot's content.
+export interface PluginState { state: 'installed' | 'missing' | 'unverified'; version: string | null; verified: boolean }
 
 export interface ClientState {
   name: ClientName;
@@ -76,18 +80,27 @@ export function claudeMarketplacePath(env: NodeJS.ProcessEnv): string | null {
   return text(field(market, 'installLocation')) ?? text(field(market, 'path')) ?? null;
 }
 
+function pluginState(listed: boolean, entry: unknown, loadedFrom: ReadonlyArray<string | null>): PluginState {
+  if (!listed) return { state: 'unverified', version: null, verified: false };
+  if (!entry) return { state: 'missing', version: null, verified: false };
+  const paths = loadedFrom.filter((p) => p !== null);
+  return { state: 'installed', version: text(field(entry, 'version')) ?? null, verified: paths.length > 0 && paths.every((p) => loadBundle(p).ok) };
+}
+
 function inspectClaude(env: NodeJS.ProcessEnv, version: string): ClientState {
   const auth = native('claude', ['auth', 'status', '--json'], env);
   const loggedIn = field(parseJson(auth.out), 'loggedIn');
   const listed = parseJson(native('claude', ['plugin', 'list', '--json'], env).out);
   const entry = Array.isArray(listed) ? listed.find((p) => field(p, 'id') === PLUGIN_ID) : undefined;
+  const marketplacePath = claudeMarketplacePath(env);
   return {
     name: 'claude',
     label: CLIENT_LABEL.claude,
     version,
     loggedIn: typeof loggedIn === 'boolean' ? loggedIn : null,
-    plugin: !Array.isArray(listed) ? { state: 'unverified', version: null } : entry ? { state: 'installed', version: text(field(entry, 'version')) ?? null } : { state: 'missing', version: null },
-    marketplacePath: claudeMarketplacePath(env),
+    // Claude Code loads a directory marketplace's plugin in place, and reports its cached copy as installPath.
+    plugin: pluginState(Array.isArray(listed), entry, [marketplacePath, text(field(entry, 'installPath')) ?? null]),
+    marketplacePath,
     apiMcp: entry
       ? 'declared by the Straddle plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in'
       : 'not declared (install the plugin, or `wizard mcp add --client claude`)',
@@ -99,6 +112,11 @@ function inspectCodex(env: NodeJS.ProcessEnv, version: string): ClientState {
   const listed = parseJson(native('codex', ['plugin', 'list', '--json'], env).out);
   const installed = field(listed, 'installed');
   const entry = Array.isArray(installed) ? installed.find((p) => field(p, 'pluginId') === PLUGIN_ID) : undefined;
+  const markets = field(parseJson(native('codex', ['plugin', 'marketplace', 'list', '--json'], env).out), 'marketplaces');
+  const market = Array.isArray(markets) ? markets.find((m) => field(m, 'name') === 'straddle') : undefined;
+  // Codex loads the copy `codex plugin add` makes in its plugin cache, not the marketplace directory.
+  const pluginVersion = text(field(entry, 'version'));
+  const cached = pluginVersion ? join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'plugins', 'cache', 'straddle', 'straddle', pluginVersion) : null;
   const servers = parseJson(native('codex', ['mcp', 'list', '--json'], env).out);
   const api = Array.isArray(servers) ? servers.find((s) => field(s, 'name') === 'straddle-api') : undefined;
   const bearer = text(field(field(api, 'transport'), 'bearer_token_env_var'));
@@ -107,8 +125,8 @@ function inspectCodex(env: NodeJS.ProcessEnv, version: string): ClientState {
     label: CLIENT_LABEL.codex,
     version,
     loggedIn: login.status === 0,
-    plugin: !Array.isArray(installed) ? { state: 'unverified', version: null } : entry ? { state: 'installed', version: text(field(entry, 'version')) ?? null } : { state: 'missing', version: null },
-    marketplacePath: null,
+    plugin: pluginState(Array.isArray(installed), entry, [cached]),
+    marketplacePath: text(field(market, 'root')) ?? null,
     apiMcp: bearer
       ? `straddle-api reads ${bearer} (codex mcp)`
       : api
@@ -121,7 +139,7 @@ export function inspectClient(name: ClientName, env: NodeJS.ProcessEnv): ClientS
   const probe = native(BINARY[name], ['--version'], env);
   const version = probe.status === 0 ? (/(\d+\.\d+\.\d+\S*)/.exec(probe.out)?.[1] ?? probe.out) : null;
   if (version === null || name === 'cursor') {
-    return { name, label: CLIENT_LABEL[name], version, loggedIn: null, plugin: { state: name === 'cursor' ? 'unverified' : 'missing', version: null }, marketplacePath: null, apiMcp: 'unverified' };
+    return { name, label: CLIENT_LABEL[name], version, loggedIn: null, plugin: { state: name === 'cursor' ? 'unverified' : 'missing', version: null, verified: false }, marketplacePath: null, apiMcp: 'unverified' };
   }
   return name === 'claude' ? inspectClaude(env, version) : inspectCodex(env, version);
 }
@@ -136,33 +154,39 @@ const cursorPluginSteps = (bundle: Bundle | null) => [
 
 export function installPlan(state: ClientState, bundle: Bundle): ConfigPlan {
   if (state.name === 'cursor') return { kind: 'manual', steps: cursorPluginSteps(bundle) };
+  // A "straddle" marketplace registered from another place is the developer's; the Wizard never replaces it.
+  const real = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+  if (state.marketplacePath && real(state.marketplacePath) !== real(bundle.path)) {
+    return { kind: 'manual', steps: [`${state.label} already has a marketplace named "straddle" at ${state.marketplacePath}, not the verified ${bundle.path}. The Wizard does not replace it. Remove it with \`${state.name} plugin marketplace remove straddle\` if it is stale, then run \`wizard install\` again.`] };
+  }
+  const commands: Command[] = [];
+  if (!state.marketplacePath) commands.push({ bin: state.name, args: ['plugin', 'marketplace', 'add', bundle.path] });
   if (state.name === 'claude') {
-    if (state.marketplacePath && state.marketplacePath !== bundle.path) {
-      return { kind: 'manual', steps: [`Claude Code already has a marketplace named "straddle" at ${state.marketplacePath}. The Wizard does not replace it. Remove it with \`claude plugin marketplace remove straddle\` if it is stale, then run \`wizard install\` again.`] };
-    }
-    const commands: Command[] = [];
-    if (!state.marketplacePath) commands.push({ bin: 'claude', args: ['plugin', 'marketplace', 'add', bundle.path] });
     commands.push({ bin: 'claude', args: ['plugin', 'install', PLUGIN_ID] });
     return { kind: 'commands', commands, note: 'User scope. Other plugins, marketplaces and MCP servers stay as they are.' };
   }
+  commands.push(
+    { bin: 'codex', args: ['plugin', 'add', PLUGIN_ID] },
+    { bin: 'codex', args: ['mcp', 'add', 'straddle-api', '--url', API_MCP_URL, '--bearer-token-env-var', 'STRADDLE_API_KEY'] },
+  );
   return {
     kind: 'commands',
-    commands: [
-      { bin: 'codex', args: ['plugin', 'marketplace', 'add', bundle.path] },
-      { bin: 'codex', args: ['plugin', 'add', PLUGIN_ID] },
-      { bin: 'codex', args: ['mcp', 'add', 'straddle-api', '--url', API_MCP_URL, '--bearer-token-env-var', 'STRADDLE_API_KEY'] },
-    ],
+    commands,
     note: 'The last command lets straddle-api read STRADDLE_API_KEY from the environment Codex starts in; the plugin alone cannot carry a credential. Other plugins and MCP servers stay as they are.',
   };
 }
 
+// Claude Code keeps an installed same-version copy as it is, so its update reinstalls; `codex plugin add` copies again.
 export function updatePlan(state: ClientState, bundle: Bundle): ConfigPlan {
   if (state.name === 'cursor') return { kind: 'manual', steps: ['Update the "straddle" plugin from its team marketplace in Cursor.'] };
-  if (state.name === 'claude') {
-    return { kind: 'commands', commands: [{ bin: 'claude', args: ['plugin', 'marketplace', 'update', 'straddle'] }, { bin: 'claude', args: ['plugin', 'update', PLUGIN_ID] }], note: 'Restart Claude Code sessions to load the update.' };
-  }
-  // Codex refreshes only Git marketplaces; adding again copies the pinned local bundle into its cache.
-  return { kind: 'commands', commands: [{ bin: 'codex', args: ['plugin', 'add', PLUGIN_ID] }], note: `Codex has no update for local marketplaces; adding the plugin again copies ${bundle.path} into its cache.` };
+  const install = installPlan(state, bundle);
+  if (install.kind !== 'commands') return install;
+  if (state.name === 'codex') return { ...install, note: `Adding the plugin again copies the verified ${bundle.path} into Codex's plugin cache. ${install.note}` };
+  return {
+    kind: 'commands',
+    commands: [{ bin: 'claude', args: ['plugin', 'uninstall', PLUGIN_ID], already: /not_installed|not found in installed plugins/ }, ...install.commands],
+    note: `Reinstalls from the verified ${bundle.path}. Restart Claude Code sessions to load it. ${install.note}`,
+  };
 }
 
 export function removePlan(state: ClientState): ConfigPlan {
@@ -245,9 +269,11 @@ export function launchCommand(req: LaunchRequest): Command {
   if (req.client === 'claude') {
     const prompt = [`/straddle:${req.skill}`, req.context].filter(Boolean).join(' ');
     // `--setting-sources ''` leaves out user, project and local settings, so none of the developer's allow rules,
-    // hooks, plugins or default mode approve the step's tool calls; login is not a settings source and stays.
+    // hooks, plugins or default mode approve the step's tool calls. OAuth or keychain login is not a settings source
+    // and stays; settings-based authentication (apiKeyHelper, an env block) does not apply in these sessions.
     return { bin: 'claude', args: ['--setting-sources', '', '--settings', req.settingsPath, '--plugin-dir', req.pluginDir, prompt] };
   }
-  // on-request overrides a developer's `never` default, so Codex keeps asking before it acts outside its sandbox.
-  return { bin: 'codex', args: ['-C', req.repo, '--ask-for-approval', 'on-request', [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join(' ')] };
+  // These two flags override a developer's `danger-full-access` sandbox or `never` approval default for this session.
+  // The rest of the Codex configuration (profiles, hooks, MCP servers, other plugins) still applies.
+  return { bin: 'codex', args: ['-C', req.repo, '--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join(' ')] };
 }

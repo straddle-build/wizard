@@ -19,6 +19,12 @@ export const PINNED_BUNDLE = {
 
 // What the clients load. Everything else in the repository (evals, tests, scripts) is not part of the plugin.
 const RUNTIME_PATHS = ['plugin.json', 'mcp.json', '.claude-plugin', '.codex-plugin', '.cursor-plugin', 'assets', 'skills', 'references', 'third_party', 'LICENSE', 'README.md'];
+// The pinned commit's other top-level entries, plus Git metadata. No client loads them. Any other top-level entry
+// (hooks/, commands/, agents/, .mcp.json, settings.json, ...) could be discovered and run by a client, so a bundle
+// holding one is rejected rather than trusted.
+const INERT_PATHS: Record<string, true> = {
+  '.git': true, '.github': true, '.gitignore': true, '.markdownlint-cli2.jsonc': true, docs: true, evals: true, fixtures: true, scripts: true, tests: true,
+};
 
 export interface SkillInfo { version: string; description: string }
 
@@ -59,6 +65,10 @@ function contentSha256(root: string): string | null {
 export function loadBundle(path: string): BundleCheck {
   const root = resolve(path);
   if (!existsSync(join(root, 'plugin.json'))) return { ok: false, reason: `${root} is not a Straddle skills bundle (no plugin.json).` };
+  const unexpected = readdirSync(root).filter((name) => !RUNTIME_PATHS.includes(name) && !Object.hasOwn(INERT_PATHS, name)).sort();
+  if (unexpected.length) {
+    return { ok: false, reason: `${root} has files outside the pinned ${PINNED_BUNDLE.repository}@${PINNED_BUNDLE.commit.slice(0, 7)} snapshot that a client could load: ${unexpected.join(', ')}.` };
+  }
   if (contentSha256(root) !== PINNED_BUNDLE.contentSha256) {
     return { ok: false, reason: `${root} does not match the pinned ${PINNED_BUNDLE.repository}@${PINNED_BUNDLE.commit.slice(0, 7)} snapshot.` };
   }
