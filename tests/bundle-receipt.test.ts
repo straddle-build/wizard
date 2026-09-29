@@ -38,6 +38,16 @@ test('accepts a kit release checkout: the kit/ manifest directory is inert metad
   assert.equal(loadBundle(copy).ok, true);
 });
 
+test('accepts Claude Code\'s installed cache copy while a session holds it and after it was orphaned', () => {
+  const copy = tempDir('bundle');
+  cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/.git') && !src.includes('/node_modules') });
+  mkdirSync(join(copy, '.in_use'));
+  writeFileSync(join(copy, '.in_use', '83499'), '');
+  writeFileSync(join(copy, '.orphaned_at'), '1790644848894');
+
+  assert.equal(loadBundle(copy).ok, true);
+});
+
 test('rejects a bundle whose runtime files differ from the pinned snapshot, one with an extra loadable component, and one that is missing', () => {
   const copy = tempDir('bundle');
   cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/.git') && !src.includes('/node_modules') });
