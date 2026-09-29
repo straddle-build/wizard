@@ -423,7 +423,9 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
   const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
   const hookCommand = [process.execPath, HOOK_SCRIPT, '--events', eventsFile, '--repo', repo, '--gate', route.editGate.join(',')].map(quote).join(' ');
   const hook = [{ type: 'command', command: hookCommand }];
-  writeFileSync(settingsPath, JSON.stringify({ hooks: {
+  // Flag settings override the developer's user settings, so an auto or accept-edits default mode never approves
+  // a step's tool calls: each one is asked in the client. Managed policy still wins, as it should.
+  writeFileSync(settingsPath, JSON.stringify({ permissions: { defaultMode: 'default' }, hooks: {
     SessionStart: [{ hooks: hook }],
     SessionEnd: [{ hooks: hook }],
     Stop: [{ hooks: hook }],

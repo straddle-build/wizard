@@ -156,6 +156,9 @@ test('default journey: readiness repair, plan before edits, observed progress se
   assert.deepEqual(launches.map((a) => a.at(-1)?.split(' ')[0]), ['/straddle:straddle-setup', '/straddle:straddle-plan', '/straddle:straddle-integrate', '/straddle:straddle-test']);
   for (const args of launches) {
     assert.ok(!args.some((a) => /--resume|--continue|dangerously|bypass|--permission-mode/.test(a)), `native approvals stay interactive: ${args}`);
+    // A developer's auto or accept-edits default never approves a Wizard step's tool calls.
+    const settings = JSON.parse(readFileSync(args[args.indexOf('--settings') + 1]!, 'utf8'));
+    assert.equal(settings.permissions?.defaultMode, 'default');
   }
 });
 

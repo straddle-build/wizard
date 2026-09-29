@@ -245,5 +245,6 @@ export function launchCommand(req: LaunchRequest): Command {
     const prompt = [`/straddle:${req.skill}`, req.context].filter(Boolean).join(' ');
     return { bin: 'claude', args: ['--settings', req.settingsPath, ...(req.pluginDir ? ['--plugin-dir', req.pluginDir] : []), prompt] };
   }
-  return { bin: 'codex', args: ['-C', req.repo, [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join(' ')] };
+  // on-request overrides a developer's `never` default, so Codex keeps asking before it acts outside its sandbox.
+  return { bin: 'codex', args: ['-C', req.repo, '--ask-for-approval', 'on-request', [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join(' ')] };
 }
