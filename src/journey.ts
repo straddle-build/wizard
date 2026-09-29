@@ -77,6 +77,10 @@ function printWelcome(io: Prompter, facts: RepoFacts, context: Receipt['context'
   row(io, 'Provider code', facts.providers.length ? facts.providers.join(', ') : 'none found in manifests');
   row(io, 'Program', `${program}: ${programLabel(program)}`);
   row(io, 'Purpose', programFor(program).purpose);
+  if (facts.errors.length) {
+    io.say();
+    for (const err of facts.errors) io.say(`  Detection error: ${err}`);
+  }
   io.say();
   io.say('  Your coding agent reads and edits this repository on your machine. The Wizard reads dependency');
   io.say(`  manifests and file names only, never opens .env files, keys or credential files (${facts.excluded.length} skipped), and sends nothing to Straddle.`);
@@ -403,10 +407,8 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
   if (route.sendsStraddleRequests && config.errors.length) {
     io.say(`Configuration error: ${config.errors.join('; ')}.`);
     io.say(`  ${route.title} can send Straddle requests. The skill refuses every one of them until this is fixed, so zero Straddle requests`);
-    io.say('  are sent. Set the values in your own shell and run `wizard resume`, or continue with offline work only.');
-    const next = await io.choose('Next', [{ label: 'Continue with offline work only', value: 'continue' as const }, { label: 'Stop here', value: 'stop' as const }]);
-    io.say();
-    if (next !== 'continue') return finish(receipt, 'blocked', `configuration error: ${config.errors.join('; ')}`);
+    io.say('  are sent. Set the values in your own shell and run `wizard resume`.');
+    return finish(receipt, 'blocked', `configuration error: ${config.errors.join('; ')}`);
   }
 
   const version = ctx.bundle.skills[skill]?.version ?? 'unknown';

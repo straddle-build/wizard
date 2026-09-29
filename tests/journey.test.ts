@@ -206,10 +206,25 @@ test('a missing key or environment is an explicit configuration error before any
   const claude = fakeClaude();
   claude.setState({ marketplace: '/b', installed: true });
 
-  const r = await runWizard(['test'], { cwd: repo, claude, env: { STRADDLE_ENVIRONMENT: 'production' }, input: ['1', '1', '2'] });
+  const r = await runWizard(['test'], { cwd: repo, claude, env: { STRADDLE_ENVIRONMENT: 'production' }, input: ['1', '1'] });
 
   assert.equal(r.code, 1);
   assert.match(r.stdout, /Configuration error: STRADDLE_API_KEY is not set; STRADDLE_ENVIRONMENT is production, not sandbox\./);
+  assert.match(r.stdout, /zero Straddle requests/);
+  assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
+  assert.match(readReceipt(repo).stateReason, /configuration error/);
+});
+
+test('Integrate stops with a configuration error when credentials are missing', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+  const claude = fakeClaude();
+  claude.setState({ marketplace: '/b', installed: true });
+
+  const r = await runWizard(['integrate'], { cwd: repo, claude, env: {}, input: ['1', '1'] });
+
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /Configuration error: STRADDLE_API_KEY is not set/);
   assert.match(r.stdout, /zero Straddle requests/);
   assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
   assert.match(readReceipt(repo).stateReason, /configuration error/);
@@ -299,11 +314,11 @@ test('wizard skill run <name> launches that versioned skill in the chosen agent'
   assert.equal(readReceipt(repo).program, 'skill:straddle-go-live');
 });
 
-test('there is no diagnose command', async () => {
+test('unknown command exits with usage error', async () => {
   const r = await runWizard(['diagnose'], { cwd: nextRepo() });
 
   assert.equal(r.code, 2);
-  assert.match(r.stderr, /Unknown command "diagnose"\. Audit replaces Diagnose: run `wizard audit`\./);
+  assert.match(r.stderr, /Unknown command "diagnose"\./);
 });
 
 test('install, status, update and remove use native plugin commands and report deterministic results', async () => {

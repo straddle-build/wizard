@@ -28,6 +28,18 @@ test('reports unknown instead of guessing when no manifest names a language', ()
   assert.equal(facts.straddleSdk, null);
 });
 
+test('malformed package.json yields detection error without false detection', () => {
+  const repo = tempDir('malformed');
+  writeFiles(repo, { 'package.json': '{ invalid json: }', 'tsconfig.json': '{}' });
+
+  const facts = discover(repo, []);
+
+  assert.equal(facts.language.value, 'unknown');
+  assert.equal(facts.framework.value, 'unknown');
+  assert.equal(facts.straddleSdk, null);
+  assert.deepEqual(facts.errors, ['package.json is malformed JSON']);
+});
+
 test('never opens secrets, keys, CLI configuration or configured sensitive paths', () => {
   const repo = nextRepo();
   writeFiles(repo, {

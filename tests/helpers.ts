@@ -9,9 +9,9 @@ export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const CLI = join(ROOT, 'src', 'cli.ts');
 
 // The merged skills source at the pinned commit. Tests verify the real bundle, never a copy.
-export const SKILLS_SOURCE = process.env.STRADDLE_SKILLS_SOURCE ?? '/Users/js/.herdr/worktrees/skills/main';
+export const SKILLS_SOURCE = process.env.STRADDLE_SKILLS_SOURCE ?? join(ROOT, '.straddle-skills');
 if (!existsSync(join(SKILLS_SOURCE, 'plugin.json'))) {
-  throw new Error(`Set STRADDLE_SKILLS_SOURCE to a straddle-build/skills checkout at the pinned commit (missing ${SKILLS_SOURCE})`);
+  throw new Error('Set STRADDLE_SKILLS_SOURCE to a straddle-build/skills checkout at the pinned commit');
 }
 
 export function tempDir(label: string): string {

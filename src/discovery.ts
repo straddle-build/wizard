@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { field } from './json.ts';
+import { field, parseJson } from './json.ts';
 
 // Bounds keep discovery predictable in large repositories.
 const MAX_FILES = 5000;
@@ -91,6 +91,7 @@ export interface RepoFacts {
   files: number;
   excluded: Exclusion[];
   truncated: boolean;
+  errors: string[];
 }
 
 type Ecosystem = 'node' | 'python' | 'ruby' | 'go' | 'csharp';
@@ -113,20 +114,26 @@ const PROVIDERS: Array<[RegExp, string]> = [
 
 interface Manifest { ecosystem: Ecosystem; language: string; evidence: string[]; deps: Map<string, string>; file: string }
 
-function readManifests(root: string, files: readonly string[]): Manifest[] {
+function readManifests(root: string, files: readonly string[]): { manifests: Manifest[]; errors: string[] } {
   const has = new Set(files);
   const read = (rel: string) => readFileSync(join(root, rel), 'utf8');
   const manifests: Manifest[] = [];
+  const errors: string[] = [];
 
   if (has.has('package.json')) {
-    const pkg: unknown = JSON.parse(read('package.json'));
-    const deps = new Map<string, string>();
-    for (const key of ['dependencies', 'devDependencies']) {
-      const block = field(pkg, key);
-      if (block && typeof block === 'object') for (const [name, version] of Object.entries(block)) deps.set(name, String(version));
+    const raw = read('package.json');
+    const pkg = parseJson(raw);
+    if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) {
+      errors.push('package.json is malformed JSON');
+    } else {
+      const deps = new Map<string, string>();
+      for (const key of ['dependencies', 'devDependencies']) {
+        const block = field(pkg, key);
+        if (block && typeof block === 'object') for (const [name, version] of Object.entries(block)) deps.set(name, String(version));
+      }
+      const ts = has.has('tsconfig.json') || deps.has('typescript');
+      manifests.push({ ecosystem: 'node', language: ts ? 'TypeScript' : 'JavaScript', evidence: has.has('tsconfig.json') ? ['package.json', 'tsconfig.json'] : ['package.json'], deps, file: 'package.json' });
     }
-    const ts = has.has('tsconfig.json') || deps.has('typescript');
-    manifests.push({ ecosystem: 'node', language: ts ? 'TypeScript' : 'JavaScript', evidence: has.has('tsconfig.json') ? ['package.json', 'tsconfig.json'] : ['package.json'], deps, file: 'package.json' });
   }
   for (const file of ['pyproject.toml', 'requirements.txt', 'Pipfile']) {
     if (!has.has(file)) continue;
@@ -154,7 +161,7 @@ function readManifests(root: string, files: readonly string[]): Manifest[] {
     if (sdk) deps.set(sdk, '');
     manifests.push({ ecosystem: 'csharp', language: 'C#', evidence: [csproj], deps, file: csproj });
   }
-  return manifests;
+  return { manifests, errors };
 }
 
 const SDK_PACKAGES: Record<Ecosystem, string[]> = {
@@ -167,7 +174,7 @@ const SDK_PACKAGES: Record<Ecosystem, string[]> = {
 
 export function discover(root: string, exclude: readonly string[]): RepoFacts {
   const scan = walk(root, exclude);
-  const manifests = readManifests(root, scan.files);
+  const { manifests, errors } = readManifests(root, scan.files);
   const primary = manifests[0];
   const unknown: Detected = { value: 'unknown', evidence: [] };
 
@@ -194,6 +201,7 @@ export function discover(root: string, exclude: readonly string[]): RepoFacts {
     files: scan.files.length,
     excluded: scan.excluded,
     truncated: scan.truncated,
+    errors,
   };
 }
 

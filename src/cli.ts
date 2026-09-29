@@ -187,7 +187,6 @@ async function main(): Promise<number> {
   const extra = command === 'skill' && sub === 'run' ? rest : [name, ...rest].filter((a) => a !== undefined);
   if (extra.length) fail(`Unexpected arguments: ${extra.join(' ')}\n\n${USAGE}`);
   if (command === undefined) return journey((opts) => start('integration', opts));
-  if (command === 'diagnose') fail('Unknown command "diagnose". Audit replaces Diagnose: run `wizard audit`.');
   if (Object.hasOwn(PROGRAMS, command) && sub === undefined) return journey((opts) => start(command as ProgramName, opts));
   if (command === 'resume' && sub === undefined) return journey(resume);
   if ((command === 'install' || command === 'update' || command === 'remove') && sub === undefined) return configure(command);
