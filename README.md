@@ -16,7 +16,7 @@ Local Straddle Developer Kit installer and agent orchestrator.
 
 ## Skills bundle
 
-The Wizard needs the pinned skills snapshot on your machine. It checks every bundle by content: the SHA-256 of the plugin's runtime files (`plugin.json`, `mcp.json`, the three client manifests, `assets/`, `skills/`, `references/`, `third_party/`, `LICENSE`, `README.md`) must equal the digest of that commit, and the bundle's top level may hold nothing else except the commit's own non-plugin files (`docs/`, `evals/`, `fixtures/`, `scripts/`, `tests/`, `.github/`, `.gitignore`, `.markdownlint-cli2.jsonc`) and `.git`. Anything else there, such as `hooks/`, `commands/`, `agents/` or `.mcp.json`, is something a client could load, so the bundle is rejected. It looks, in order, at:
+The Wizard needs the pinned skills snapshot on your machine. It checks every bundle by content: the SHA-256 of the plugin's runtime files (`plugin.json`, `mcp.json`, the three client manifests, `assets/`, `skills/`, `references/`, `third_party/`, `LICENSE`, `README.md`) must equal the digest of that commit, and the bundle's top level may hold nothing else except the commit's own non-plugin files (`docs/`, `evals/`, `fixtures/`, `scripts/`, `tests/`, `.github/`, `.gitignore`, `.markdownlint-cli2.jsonc`), the kit release metadata in `kit/`, and `.git`. Anything else there, such as `hooks/`, `commands/`, `agents/` or `.mcp.json`, is something a client could load, so the bundle is rejected. It looks, in order, at:
 
 1. `--bundle <path>` or `STRADDLE_WIZARD_BUNDLE`, when you pass one. Nothing else is tried.
 2. The bundle the saved run last used.

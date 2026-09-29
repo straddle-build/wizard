@@ -19,11 +19,11 @@ export const PINNED_BUNDLE = {
 
 // What the clients load. Everything else in the repository (evals, tests, scripts) is not part of the plugin.
 const RUNTIME_PATHS = ['plugin.json', 'mcp.json', '.claude-plugin', '.codex-plugin', '.cursor-plugin', 'assets', 'skills', 'references', 'third_party', 'LICENSE', 'README.md'];
-// The pinned commit's other top-level entries, plus Git metadata. No client loads them. Any other top-level entry
-// (hooks/, commands/, agents/, .mcp.json, settings.json, ...) could be discovered and run by a client, so a bundle
-// holding one is rejected rather than trusted.
+// The pinned commit's other top-level entries, the kit release manifest directory (kit/, metadata no client loads),
+// plus Git metadata. Any other top-level entry (hooks/, commands/, agents/, .mcp.json, settings.json, ...) could be
+// discovered and run by a client, so a bundle holding one is rejected rather than trusted.
 const INERT_PATHS: Record<string, true> = {
-  '.git': true, '.github': true, '.gitignore': true, '.markdownlint-cli2.jsonc': true, docs: true, evals: true, fixtures: true, scripts: true, tests: true,
+  '.git': true, '.github': true, '.gitignore': true, '.markdownlint-cli2.jsonc': true, docs: true, evals: true, fixtures: true, kit: true, scripts: true, tests: true,
 };
 
 export interface SkillInfo { version: string; description: string }

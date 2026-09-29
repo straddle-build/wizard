@@ -28,6 +28,16 @@ test('accepts the same content without Git metadata, as a native marketplace cop
   assert.equal(loadBundle(copy).ok, true);
 });
 
+test('accepts a kit release checkout: the kit/ manifest directory is inert metadata beside the pinned runtime files', () => {
+  const copy = tempDir('bundle');
+  cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/node_modules') });
+  mkdirSync(join(copy, 'kit'));
+  writeFileSync(join(copy, 'kit', 'manifest.yaml'), 'plugin:\n  content_sha256: e9a5db1d995e5798681e04d9d7f840000b6e0861f3e4b76ae3a31b881ad00b7c\n');
+  writeFileSync(join(copy, 'kit', 'release-inputs.json'), '{}\n');
+
+  assert.equal(loadBundle(copy).ok, true);
+});
+
 test('rejects a bundle whose runtime files differ from the pinned snapshot, one with an extra loadable component, and one that is missing', () => {
   const copy = tempDir('bundle');
   cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/.git') && !src.includes('/node_modules') });
