@@ -124,15 +124,16 @@ test('--client picks the agent for a guided run instead of asking', async () => 
   assert.equal(readReceipt(repo).client, 'cursor');
 });
 
-test('default journey: readiness repair, plan before edits, observed progress separate from reported handoffs, final report', async () => {
+test('default journey: isolated sessions from the verified bundle, plan before edits, observed progress separate from reported handoffs, final report', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
   claude.sessions(DEFAULT_SESSIONS);
 
-  const r = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '1', '1', '1', '1'] });
+  const r = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '1', '1', '1'] });
 
   assert.equal(r.code, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /claude plugin marketplace add .*\n.*claude plugin install straddle@straddle/);
+  assert.match(r.stdout, /Straddle plugin\s+loaded into each Wizard session from the verified snapshot/);
+  assert.doesNotMatch(r.stdout, /claude plugin install/);
   assert.match(r.stdout, /Choosing Start is not approval/);
   assert.match(r.stdout, /Observed \(Claude Code hooks\): entered 01-decisions, 02-sources, 03-write-plan, 04-review, 05-handoff/);
   assert.match(r.stdout, /Reported by the agent \(not verified by the Wizard\): handoff draft/);
@@ -156,7 +157,9 @@ test('default journey: readiness repair, plan before edits, observed progress se
   assert.deepEqual(launches.map((a) => a.at(-1)?.split(' ')[0]), ['/straddle:straddle-setup', '/straddle:straddle-plan', '/straddle:straddle-integrate', '/straddle:straddle-test']);
   for (const args of launches) {
     assert.ok(!args.some((a) => /--resume|--continue|dangerously|bypass|--permission-mode/.test(a)), `native approvals stay interactive: ${args}`);
-    // A developer's auto or accept-edits default never approves a Wizard step's tool calls.
+    // The developer's allow rules, hooks, plugins and auto or accept-edits default never approve a Wizard step's tool calls.
+    assert.equal(args[args.indexOf('--setting-sources') + 1], '');
+    assert.equal(args[args.indexOf('--plugin-dir') + 1], SKILLS_SOURCE);
     const settings = JSON.parse(readFileSync(args[args.indexOf('--settings') + 1]!, 'utf8'));
     assert.equal(settings.permissions?.defaultMode, 'default');
   }

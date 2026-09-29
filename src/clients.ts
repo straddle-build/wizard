@@ -236,14 +236,17 @@ export interface LaunchRequest {
   repo: string;
   context: string;
   settingsPath: string;
-  pluginDir: string | null;
+  // The verified bundle directory.
+  pluginDir: string;
 }
 
 // The skill is invoked by name; everything the skill does comes from the versioned bundle.
 export function launchCommand(req: LaunchRequest): Command {
   if (req.client === 'claude') {
     const prompt = [`/straddle:${req.skill}`, req.context].filter(Boolean).join(' ');
-    return { bin: 'claude', args: ['--settings', req.settingsPath, ...(req.pluginDir ? ['--plugin-dir', req.pluginDir] : []), prompt] };
+    // `--setting-sources ''` leaves out user, project and local settings, so none of the developer's allow rules,
+    // hooks, plugins or default mode approve the step's tool calls; login is not a settings source and stays.
+    return { bin: 'claude', args: ['--setting-sources', '', '--settings', req.settingsPath, '--plugin-dir', req.pluginDir, prompt] };
   }
   // on-request overrides a developer's `never` default, so Codex keeps asking before it acts outside its sandbox.
   return { bin: 'codex', args: ['-C', req.repo, '--ask-for-approval', 'on-request', [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join(' ')] };

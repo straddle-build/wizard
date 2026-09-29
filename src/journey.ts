@@ -226,11 +226,15 @@ function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: 
   row(io, 'Skill bundle', `${bundleLabel(bundle)}, verified`);
   row(io, 'Agent', client.version ? `${client.label} ${client.version}` : `${client.label}: not found`);
   if (client.loggedIn !== null) row(io, 'Agent login', client.loggedIn ? 'logged in' : 'not logged in');
-  const pluginText = receipt.pluginLoad === 'session'
-    ? 'loaded for each session with --plugin-dir (not installed)'
-    : client.plugin.state === 'installed' ? `installed ${client.plugin.version ?? ''}`.trim() : client.plugin.state === 'missing' ? 'not installed' : 'unverified (the Wizard cannot inspect this client)';
-  row(io, 'Straddle plugin', pluginText);
-  row(io, 'API MCP', receipt.pluginLoad === 'session' ? 'declared by the Straddle plugin loaded with --plugin-dir; Claude Code sends STRADDLE_API_KEY from the environment it starts in' : client.apiMcp);
+  const installed = client.plugin.state === 'installed' ? `installed ${client.plugin.version ?? ''}`.trim() : client.plugin.state === 'missing' ? 'not installed' : 'unverified (the Wizard cannot inspect this client)';
+  if (receipt.pluginLoad === 'session') {
+    row(io, 'Straddle plugin', `loaded into each Wizard session from the verified snapshot with --plugin-dir (your Claude Code: ${installed})`);
+    row(io, 'API MCP', 'declared by that plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in');
+    row(io, 'Session settings', 'isolated: your user and project allow rules, hooks, plugins and default mode do not apply; Claude Code asks before edits, commands and MCP calls');
+  } else {
+    row(io, 'Straddle plugin', installed);
+    row(io, 'API MCP', client.apiMcp);
+  }
   row(io, 'Straddle key', config.key === 'present' ? 'STRADDLE_API_KEY is set (value not read)' : 'STRADDLE_API_KEY is not set');
   row(io, 'Environment', config.environment);
   io.say();
@@ -257,6 +261,8 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
   const bundle = check.bundle;
   receipt.bundle = { kind: bundle.kind, repository: bundle.repository, commit: bundle.commit, pluginVersion: bundle.pluginVersion, path: bundle.path };
   const name = receipt.client!;
+  // Claude Code sessions always load exactly the verified bundle; they ignore user settings, where an install is enabled.
+  if (name === 'claude') receipt.pluginLoad = 'session';
   for (;;) {
     const client = inspectClient(name, opts.env);
     printReadiness(io, receipt, bundle, client, opts.env);
@@ -280,10 +286,9 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
     const outdated = client.plugin.state === 'installed';
     const plan = outdated ? updatePlan(client, bundle) : installPlan(client, bundle);
     io.say(outdated ? `The Straddle plugin in ${client.label} is ${client.plugin.version}, not ${bundle.pluginVersion}.` : `The Straddle plugin is not installed in ${client.label}.`);
-    type Repair = 'apply' | 'session' | 'manual' | 'cancel';
+    type Repair = 'apply' | 'manual' | 'cancel';
     const options: Array<{ label: string; value: Repair }> = [];
     if (plan.kind === 'commands') options.push({ label: outdated ? 'Update it with these commands' : 'Install it with these commands', value: 'apply' });
-    if (name === 'claude') options.push({ label: 'Load it for Claude Code sessions started by the Wizard only (claude --plugin-dir; nothing is installed)', value: 'session' });
     options.push({ label: 'Show manual steps and stop', value: 'manual' }, { label: 'Cancel', value: 'cancel' });
     printPlan((line) => io.say(line), plan);
     const repair = await io.choose('How should the Wizard get the plugin?', options, 0);
@@ -293,7 +298,6 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
       io.say();
       continue;
     }
-    if (repair === 'session') { receipt.pluginLoad = 'session'; saveReceipt(receipt); continue; }
     if (repair === 'manual') {
       io.say('Manual steps:');
       if (plan.kind === 'commands') for (const command of plan.commands) io.say(`  ${displayCommand(command)}`);
@@ -443,7 +447,7 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
   receipt.stateReason = `${route.title} running in ${label}`;
   saveReceipt(receipt);
 
-  const command = launchCommand({ client: receipt.client as 'claude' | 'codex', skill, repo, context: contextForAgent(receipt), settingsPath, pluginDir: receipt.pluginLoad === 'session' ? ctx.bundle.path : null });
+  const command = launchCommand({ client: receipt.client as 'claude' | 'codex', skill, repo, context: contextForAgent(receipt), settingsPath, pluginDir: ctx.bundle.path });
   const exit = await runInteractive(command, repo, ctx.opts.env);
 
   step.endedAt = new Date().toISOString();
