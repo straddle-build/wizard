@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The Wizard's tests verify the real skills bundle it pins (src/bundle.ts).
+      - uses: actions/checkout@v5
+        with:
+          repository: straddle-build/skills
+          ref: f713fc6201ad0fd800d23a3ec4c4102b7acee91c
+          path: .straddle-skills
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Lint Markdown
+        uses: DavidAnson/markdownlint-cli2-action@v24.2.0
+        with:
+          globs: "*.md"
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          STRADDLE_SKILLS_SOURCE: ${{ github.workspace }}/.straddle-skills
+      - run: npm run build
+      - run: npm pack --dry-run
