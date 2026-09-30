@@ -165,6 +165,19 @@ test('default journey: isolated sessions from the verified bundle, plan before e
   }
 });
 
+test('readiness does not promise Claude Code permission prompts that a managed policy can switch off', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+  const claude = fakeClaude();
+
+  // Continue, then stop at Start: only the readiness screen matters.
+  const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '2'] });
+
+  assert.match(r.stdout, /Session settings\s+isolated: /);
+  assert.doesNotMatch(r.stdout, /asks before edits/);
+  assert.match(r.stdout, /managed policy still applies and can allow edits, commands or MCP calls without asking/);
+});
+
 test('Integrate never starts before the durable plan exists', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();

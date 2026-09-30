@@ -238,7 +238,7 @@ function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: 
   if (receipt.pluginLoad === 'session') {
     row(io, 'Straddle plugin', `loaded into each Wizard session from the verified snapshot with --plugin-dir (your Claude Code: ${installed})`);
     row(io, 'API MCP', 'declared by that plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in');
-    row(io, 'Session settings', 'isolated: your user and project allow and deny rules, hooks, plugins, default mode and settings-based login (apiKeyHelper, env) do not apply; Claude Code asks before edits, commands and MCP calls');
+    row(io, 'Session settings', "isolated: your user and project allow and deny rules, hooks, plugins, default mode and settings-based login (apiKeyHelper, env) do not apply; each session starts in Claude Code's default permission mode, but your organization's managed policy still applies and can allow edits, commands or MCP calls without asking (the Wizard does not read it)");
   } else {
     row(io, 'Straddle plugin', installed);
     row(io, 'API MCP', client.apiMcp);
@@ -450,7 +450,7 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
   const hookCommand = [process.execPath, HOOK_SCRIPT, '--events', eventsFile, '--repo', repo, '--gate', route.editGate.join(',')].map(quote).join(' ');
   const hook = [{ type: 'command', command: hookCommand }];
   // Flag settings override the developer's user settings, so an auto or accept-edits default mode never approves
-  // a step's tool calls: each one is asked in the client. Managed policy still wins, as it should.
+  // a step's tool calls. Managed policy still wins, as it should, and can allow them without a prompt.
   writeFileSync(settingsPath, JSON.stringify({ permissions: { defaultMode: 'default' }, hooks: {
     SessionStart: [{ hooks: hook }],
     SessionEnd: [{ hooks: hook }],
