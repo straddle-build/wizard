@@ -103,11 +103,11 @@ export function readRepoFile(root: string, name: string, exclude: readonly strin
   const abs = join(root, name);
   let info;
   try { info = lstatSync(abs); } catch { return { kind: 'absent' }; }
-  const reason = info.isSymbolicLink() ? 'it is a symlink, which the Wizard never follows'
-    : sensitiveReason(name) ?? (exclude.map(globToRegExp).some((re) => re.test(name)) ? 'it is a configured sensitive path' : null);
+  const reason = info.isSymbolicLink() ? "it's a symlink, and I never follow symlinks"
+    : sensitiveReason(name) ?? (exclude.map(globToRegExp).some((re) => re.test(name)) ? "it's a configured sensitive path" : null);
   if (reason) return { kind: 'skipped', reason };
   const file = openRegular(abs);
-  if (!file) return { kind: 'skipped', reason: 'it is not a regular file the Wizard can open' };
+  if (!file) return { kind: 'skipped', reason: "it isn't a regular file I can open" };
   try {
     const bytes = readFileSync(file.fd);
     return { kind: 'read', text: bytes.toString('utf8'), sha256: createHash('sha256').update(bytes).digest('hex') };
@@ -162,7 +162,7 @@ function readManifests(root: string, files: readonly string[]): { manifests: Man
     } catch { /* reported below */ } finally {
       if (file) closeSync(file.fd);
     }
-    errors.push(`${rel} could not be read`);
+    errors.push(`I couldn't read ${rel}`);
     return null;
   };
 

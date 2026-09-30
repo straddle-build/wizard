@@ -8,7 +8,7 @@ import {
   type ClientName, type ConfigPlan,
 } from './clients.ts';
 import { straddleConfiguration } from './configuration.ts';
-import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, start, type JourneyOptions } from './journey.ts';
+import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, savedStatusLine, start, type JourneyOptions } from './journey.ts';
 import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
 import { loadReceipt } from './receipt.ts';
 import { Prompter } from './ui.ts';
@@ -16,10 +16,10 @@ import { WIZARD_VERSION } from './version.ts';
 
 const USAGE = `Straddle Wizard ${WIZARD_VERSION}
 
-Guided setup that hands your Straddle integration to your local coding agent.
+Sets up Straddle in your repo with your own coding agent, in one guided session.
 
-  wizard                       Guided integration: Setup, Plan, Integrate, Test (resumable)
-  wizard resume                Continue the saved run in this repository
+  wizard                       Guided integration in one agent session: Setup, Plan, Integrate, Test, Go Live
+  wizard resume                Pick up at the first unfinished step, from the files the skills wrote
   wizard setup | plan | integrate | test
   wizard get-started | migrate | go-live | audit
   wizard skill list | skill run <name>
@@ -28,10 +28,10 @@ Guided setup that hands your Straddle integration to your local coding agent.
   wizard status [--json]
 
 Options
-  --dir <path>        Repository to work in (default: current directory)
+  --dir <path>        Repo to work in (default: current directory)
   --client <name>     claude, codex or cursor
   --bundle <path>     Use this local Straddle skills directory instead of a plugin release, for testing (or STRADDLE_WIZARD_BUNDLE)
-  --exclude <glob>    Extra sensitive path the Wizard never opens (repeatable, or STRADDLE_WIZARD_EXCLUDE=a,b)
+  --exclude <glob>    Extra sensitive path I never open (repeatable, or STRADDLE_WIZARD_EXCLUDE=a,b)
   --yes               Download the skills and run install/update/remove/mcp commands without asking
   --json              Machine-readable output for status and skill list`;
 
@@ -90,7 +90,7 @@ const io = () => (prompter ??= new Prompter(process.stdin, process.stdout));
 
 async function preparedBundle() {
   const check = await prepareBundle(io(), { override: bundlePath, env }, Boolean(values.yes));
-  if (check === null) say('Cancelled. Nothing was downloaded.');
+  if (check === null) say("Cancelled. I didn't download anything.");
   else if (!check.ok) say(check.reason);
   return check?.ok ? check.bundle : null;
 }
@@ -99,10 +99,10 @@ async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number>
   say(heading);
   printPlan(say, plan);
   if (plan.kind === 'nothing') return 0;
-  if (plan.kind === 'manual') { say('The Wizard changed nothing; follow the steps above in the client.'); return 1; }
+  if (plan.kind === 'manual') { say("I didn't change anything; follow the steps above in the client."); return 1; }
   if (!values.yes) {
     const go = await io().choose('Run these commands?', [{ label: 'Run them', value: true }, { label: 'Cancel', value: false }], 0);
-    if (!go) { say('Cancelled. Nothing was changed.'); return 130; }
+    if (!go) { say("Cancelled. I didn't change anything."); return 130; }
   }
   let ok = true;
   for (const r of runCommands(plan.commands, env)) {
@@ -115,7 +115,7 @@ async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number>
 async function configure(kind: 'install' | 'update' | 'remove' | 'mcp add' | 'mcp remove'): Promise<number> {
   const client = pickClient();
   const state = inspectClient(client, env);
-  if (client !== 'cursor' && state.version === null) { say(`${CLIENT_LABEL[client]} is not installed or not on PATH.`); return 1; }
+  if (client !== 'cursor' && state.version === null) { say(`${CLIENT_LABEL[client]} isn't installed or isn't on your PATH.`); return 1; }
   if (kind === 'remove') return confirmAndRun(removePlan(state), `Remove the Straddle plugin from ${state.label}:`);
   if (kind === 'mcp add') return confirmAndRun(mcpAddPlan(state), `Register the Straddle API MCP and Docs MCP in ${state.label}:`);
   if (kind === 'mcp remove') return confirmAndRun(mcpRemovePlan(state), `Remove the Straddle MCP servers from ${state.label}:`);
@@ -136,7 +136,7 @@ function status(): number {
   const clients = CLIENT_NAMES.map((name) => inspectClient(name, env, check.ok ? check.bundle : null));
   const config = straddleConfiguration(env);
   const run = loaded.kind === 'found'
-    ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client }
+    ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client, progress: savedStatusLine(loaded.receipt) }
     : loaded.kind === 'invalid' ? { error: `unreadable receipt: ${loaded.reason}` } : null;
   const report = {
     wizard: WIZARD_VERSION,
@@ -158,10 +158,11 @@ function status(): number {
     const plugin = c.plugin.state === 'installed' ? `plugin ${c.plugin.version}${c.plugin.verified ? '' : " (differs from the Wizard's bundle)"}` : `plugin ${c.plugin.state}`;
     say(`  ${c.label.padEnd(15)}${c.version ?? 'not found'}${c.version ? `, ${plugin}, API MCP ${c.apiMcp}, progress ${EVENT_SURFACE[c.name]}` : ''}`);
   }
-  say(`  Straddle key   STRADDLE_API_KEY ${config.key === 'present' ? 'is set (value not read)' : 'is not set'}`);
+  say(`  Straddle key   STRADDLE_API_KEY ${config.key === 'present' ? "is set (I didn't read the value)" : 'is not set'}`);
   say(`  Environment    ${config.environment}`);
   if (config.errors.length) say(`  Configuration error for Straddle requests: ${config.errors.join('; ')}`);
   say(`  Saved run      ${run === null ? 'none' : 'error' in run ? run.error : `${run.program} program, ${run.state}: ${run.reason}`}`);
+  if (run && 'progress' in run) say(`  Progress       ${run.progress}`);
   return 0;
 }
 

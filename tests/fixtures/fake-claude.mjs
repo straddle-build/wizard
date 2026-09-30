@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Simulated Claude Code at the process boundary. Journey tests use it; it is not native evidence.
-// State lives in FAKE_CLAUDE_STATE. Sessions are scripted per skill in FAKE_CLAUDE_STATE/sessions.json.
+// State lives in FAKE_CLAUDE_STATE. Each program step is scripted per skill in FAKE_CLAUDE_STATE/sessions.json; one
+// session runs the prompt's `Straddle Wizard program:` steps from its `Start at` skill, like the skills do.
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -54,52 +56,68 @@ if (args[0] === 'mcp' && args[1] === 'remove') {
   delete state.mcp[name]; save(); out(`Removed MCP server ${name}`); process.exit(0);
 }
 
-// Interactive session: `--settings <file>` plus a prompt that starts with /straddle:<skill>.
+// Interactive session: `--settings <file>`, optionally `--resume <id>`, and a prompt that starts with /straddle:<skill>.
 const settingsPath = args[args.indexOf('--settings') + 1];
 const prompt = args[args.length - 1];
-const skill = /^\/straddle:(straddle-[a-z-]+)/.exec(prompt)?.[1];
+const first = /^\/straddle:(straddle-[a-z-]+)/.exec(prompt)?.[1];
+const program = /Straddle Wizard program: (.*?)\. Start at/.exec(prompt)?.[1].split(' → ') ?? [first];
 const sessions = JSON.parse(readFileSync(join(stateDir, 'sessions.json'), 'utf8'));
-const script = sessions[skill] ?? { steps: [], text: '', exit: 0 };
 const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-const transcript = join(stateDir, `transcript-${skill}.jsonl`);
+const sessionId = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : randomUUID();
+const transcript = join(stateDir, `transcript-${sessionId}.jsonl`);
 mkdirSync(stateDir, { recursive: true });
-writeFileSync(transcript, '');
+if (!existsSync(transcript)) writeFileSync(transcript, '');
 
 function hook(event, payload) {
   for (const group of settings.hooks[event] ?? []) {
     if (group.matcher && !new RegExp(`^(${group.matcher})$`).test(payload.tool_name ?? '')) continue;
     for (const h of group.hooks) {
-      const r = spawnSync('/bin/sh', ['-c', h.command], { input: JSON.stringify({ hook_event_name: event, session_id: 's1', transcript_path: transcript, cwd: process.cwd(), ...payload }), encoding: 'utf8' });
+      const r = spawnSync('/bin/sh', ['-c', h.command], { input: JSON.stringify({ hook_event_name: event, session_id: sessionId, transcript_path: transcript, cwd: process.cwd(), ...payload }), encoding: 'utf8' });
       if (r.stdout.includes('"deny"') || r.status === 2) return 'deny';
     }
   }
   return 'allow';
 }
 
-hook('SessionStart', { source: 'startup' });
-// Like Claude Code: PreToolUse before the permission decision, PostToolUse only after the tool completed.
-// `denied` lists tool targets the developer refuses at the client's own permission prompt.
-// `shellSteps` are step files the agent opens with a Bash command instead of the Read tool.
-const deniedByDeveloper = new Set(script.denied ?? []);
-const stepFile = (step) => `${process.env.FAKE_PLUGIN_ROOT ?? '/plugin'}/skills/${skill}/steps/${step}.md`;
-for (const step of script.steps) {
-  const call = { tool_name: 'Read', tool_input: { file_path: stepFile(step) } };
-  if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
+// What Claude Code shows in its status line: the settings' command, given the session JSON on stdin.
+function statusLine() {
+  const r = spawnSync('/bin/sh', ['-c', settings.statusLine.command], { input: JSON.stringify({ session_id: sessionId, transcript_path: transcript, cwd: process.cwd() }), encoding: 'utf8' });
+  appendFileSync(join(stateDir, 'statusline.log'), r.stdout);
 }
-for (const step of script.shellSteps ?? []) {
-  const call = { tool_name: 'Bash', tool_input: { command: `cat ${stepFile(step)}` } };
-  if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
+
+hook('SessionStart', { source: args.includes('--resume') ? 'resume' : 'startup' });
+appendFileSync(transcript, JSON.stringify({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: prompt } }) + '\n');
+statusLine();
+let script = { exit: 0 };
+for (const skill of program.slice(program.indexOf(first))) {
+  script = sessions[skill];
+  if (!script) break;
+  // Like Claude Code: PreToolUse before the permission decision, PostToolUse only after the tool completed.
+  // `denied` lists tool targets the developer refuses at the client's own permission prompt.
+  // `shellSteps` are step files the agent opens with a Bash command instead of the Read tool.
+  const deniedByDeveloper = new Set(script.denied ?? []);
+  const stepFile = (step) => `${process.env.FAKE_PLUGIN_ROOT ?? '/plugin'}/skills/${skill}/steps/${step}.md`;
+  for (const step of script.steps ?? []) {
+    const call = { tool_name: 'Read', tool_input: { file_path: stepFile(step) } };
+    if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
+  }
+  for (const step of script.shellSteps ?? []) {
+    const call = { tool_name: 'Bash', tool_input: { command: `cat ${stepFile(step)}` } };
+    if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
+  }
+  for (const w of script.writes ?? []) {
+    const call = { tool_name: 'Write', tool_input: { file_path: join(process.cwd(), w.path), content: w.content } };
+    let decision = hook('PreToolUse', call);
+    if (decision === 'allow' && deniedByDeveloper.has(w.path)) decision = 'denied by developer';
+    if (decision === 'allow') { writeFileSync(join(process.cwd(), w.path), w.content); hook('PostToolUse', call); }
+    log(`write ${w.path} ${decision}`);
+  }
+  appendFileSync(transcript, JSON.stringify({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', content: [{ type: 'text', text: script.text ?? '' }] } }) + '\n');
+  hook('Stop', {});
+  statusLine();
+  // `stop`: the developer exits after this step; `exit` or `signal`: the session ends abnormally here.
+  if (script.stop || script.signal || script.exit) break;
 }
-for (const w of script.writes ?? []) {
-  const call = { tool_name: 'Write', tool_input: { file_path: join(process.cwd(), w.path), content: w.content } };
-  let decision = hook('PreToolUse', call);
-  if (decision === 'allow' && deniedByDeveloper.has(w.path)) decision = 'denied by developer';
-  if (decision === 'allow') { writeFileSync(join(process.cwd(), w.path), w.content); hook('PostToolUse', call); }
-  log(`write ${w.path} ${decision}`);
-}
-appendFileSync(transcript, JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n');
-appendFileSync(transcript, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: script.text }] } }) + '\n');
-hook('Stop', {});
 hook('SessionEnd', { reason: 'prompt_input_exit' });
-if (script.signal) process.kill(process.pid, script.signal);
-process.exit(script.exit ?? 0);
+if (script?.signal) process.kill(process.pid, script.signal);
+process.exit(script?.exit ?? 0);

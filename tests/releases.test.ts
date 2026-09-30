@@ -59,7 +59,7 @@ test('a cached release is re-verified on every use: an edited copy is refused, a
   const refreshed = await skillList([{ tag: 'v0.1.2' }], first.cache);
 
   assert.equal(offline.code, 0, offline.stdout);
-  assert.match(offline.stdout, /Could not check for a newer Straddle plugin release \(.*\); using the plugin release v0\.1\.2 of straddle-build\/skills .* already on this machine\./);
+  assert.match(offline.stdout, /I couldn't check for a newer Straddle plugin release \(.*\), so I'm using the plugin release v0\.1\.2 of straddle-build\/skills .* already on this machine\./);
   assert.match(JSON.parse(edited.stdout).bundle.error, /no longer matches plugin release v0\.1\.2 as the Wizard verified it/);
   assert.equal(refreshed.code, 0, refreshed.stdout);
   assert.deepEqual(refreshed.requests.filter((path) => path.endsWith('.zip')), ['/v0.1.2/straddle-plugin-0.1.2.zip']);

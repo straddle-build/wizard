@@ -4,35 +4,57 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type ReleaseServer } from './helpers.ts';
+import { approvalHash } from '../src/progress.ts';
+import { SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
 
 const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENVIRONMENT: 'sandbox' };
-const PLAN = '# Straddle integration plan\n\n## Status\n\n- Plan state: Draft\n\n## File changes\n\n| File | Change |\n| --- | --- |\n| src/straddle.ts | add client |\n\n## Future Sandbox writes\n\n| Write | Tool |\n| --- | --- |\n| create customer | SDK |\n\n## Verification\n';
+const PLAN = '# Straddle integration plan\n\n## Status\n\n- Plan state: Draft\n- Approval: none\n\n## File changes\n\n| File | Change |\n| --- | --- |\n| src/straddle.ts | add client |\n\n## Future Sandbox writes\n\n| Write | Tool |\n| --- | --- |\n| create customer | SDK |\n\n## Verification\n';
+const APPROVED_PLAN = PLAN.replace('- Plan state: Draft', '- Plan state: Approved')
+  .replace('- Approval: none', `- Approval: 2026-09-30, "approved", recorded by straddle-plan, sha256 ${approvalHash(PLAN)}`);
+const PLAN_HASH = approvalHash(APPROVED_PLAN);
+const CHARGE = '0b6f3c0e-8a51-4c6f-9d0e-5b1f2a3c4d5e';
+const SETUP_FILE = '# Straddle setup\n\nStatus: complete\nEnvironment: sandbox\nIntegration type: marketplace\nAPI key present: yes\nSDK: TypeScript\nActing account: platform\n';
+const report = (status: string) => `# Straddle integration report\n\nStatus: ${status}\nPlan: straddle-integration-plan.md\nPlan hash: ${PLAN_HASH}\n\n## Changed files\n`;
+const EVIDENCE = `# Straddle test evidence\n\nStatus: complete\nPlan: straddle-integration-plan.md\nPlan hash: ${PLAN_HASH}\nLatest run: r1\nTest charge: ${CHARGE}\n\n## Run r1, 2026-09-30\n\n- Status: passed\n`;
 
-const handoff = (skill: string, status: string, checklist: string[]) =>
+const handoff = (skill: string, status: string, checklist: string[] = []) =>
   [...checklist.length ? ['## Verify before merging', '', ...checklist, ''] : [], `STRADDLE_HANDOFF {"skill":"${skill}","status":"${status}","report":"${skill} ${status}"}`].join('\n');
 
 const DEFAULT_SESSIONS = {
-  'straddle-setup': { steps: ['01-begin', '02-repository', '03-cli-and-context', '04-mcp', '05-report'], text: handoff('straddle-setup', 'ready_with_warnings', ['- [ ] The environment is Sandbox.']) },
+  'straddle-setup': {
+    steps: ['01-begin', '02-repository', '03-cli-and-context', '04-mcp', '05-report'],
+    writes: [{ path: 'straddle-setup.md', content: SETUP_FILE }],
+    text: handoff('straddle-setup', 'ready_with_warnings', ['- [ ] The environment is Sandbox.']),
+  },
   'straddle-plan': {
-    steps: ['01-decisions', '02-sources', '03-write-plan', '04-review', '05-handoff'],
-    writes: [{ path: 'src/early.ts', content: 'too early' }, { path: 'straddle-integration-plan.md', content: PLAN }],
-    text: handoff('straddle-plan', 'draft', ['- [ ] No secret appears in the plan.']),
+    steps: ['01-decisions', '02-sources', '03-write-plan', '04-review', '05-handoff', '06-show-me'],
+    writes: [{ path: 'src/early.ts', content: 'too early' }, { path: 'straddle-integration-plan.md', content: APPROVED_PLAN }],
+    text: `${handoff('straddle-plan', 'draft', ['- [ ] No secret appears in the plan.'])}\nSTRADDLE_PROGRESS {"skill":"straddle-plan","step":"06-show-me"}`,
   },
   'straddle-integrate': {
     steps: ['01-begin', '02-sources', '03-code', '04-preview', '05-execute', '06-review', '07-handoff'],
-    writes: [{ path: 'src/straddle.ts', content: 'export {}' }],
+    writes: [{ path: 'src/straddle.ts', content: 'export {}' }, { path: 'straddle-integration-report.md', content: report('complete') }],
     text: handoff('straddle-integrate', 'complete', ['- [ ] Only the approved files changed, and existing provider code is intact.']),
   },
   'straddle-test': {
     steps: ['01-begin', '02-offline', '03-preview', '04-sandbox', '05-verify', '06-evidence'],
-    writes: [{ path: 'straddle-test-evidence.md', content: '# evidence' }],
-    text: handoff('straddle-test', 'partial', ['- [ ] Evidence names only scenarios that ran.']),
+    writes: [{ path: 'straddle-test-evidence.md', content: EVIDENCE }],
+    text: handoff('straddle-test', 'passed', ['- [ ] Evidence names only scenarios that ran.']),
+  },
+  'straddle-go-live': {
+    steps: ['01-begin', '02-configuration', '03-code', '04-sandbox-evidence', '05-production-setup', '06-report'],
+    writes: [{ path: 'straddle-go-live-report.md', content: `# Straddle Go Live review\n\nStatus: ready\nPlan: straddle-integration-plan.md\nPlan hash: ${PLAN_HASH}\nResult: ready\n` }],
+    text: handoff('straddle-go-live', 'ready'),
   },
 };
+const PROGRAM_LINE = 'Straddle Wizard program: straddle-setup → straddle-plan → straddle-integrate → straddle-test → straddle-go-live. Start at straddle-setup.';
 
 // Continue, charges, marketplace, suggested SDK, webhook endpoint, Claude Code.
 const CHOOSE_CONTEXT = ['1', '1', '3', '', '1', '1'];
+
+const launches = (claude: FakeClaude) => claude.calls().filter((c) => c.includes('--settings')).map((c) => JSON.parse(c) as string[]);
+// Status lines with step counts masked, since the bundle decides how many step files each skill has.
+const statusLines = (claude: FakeClaude) => claude.statusLines().map((l) => l.replace(/▶ (\d+)\/\d+/g, '▶ $1/n'));
 
 test('cancel on the first screen stops before anything is saved', async () => {
   const repo = nextRepo();
@@ -43,7 +65,8 @@ test('cancel on the first screen stops before anything is saved', async () => {
   assert.equal(r.code, 130);
   assert.match(r.stdout, /Directory\s+.*wizard-repo-/);
   assert.match(r.stdout, /Language\s+TypeScript \(detected: package\.json, tsconfig\.json\)/);
-  assert.match(r.stdout, /Cancelled\. Nothing was saved or changed\./);
+  assert.match(r.stdout, /Program\s+Setup → Plan → Integrate → Test → Go Live\n/);
+  assert.match(r.stdout, /Cancelled\. I haven't saved or changed anything\./);
   assert.equal(existsSync(join(repo, '.straddle-wizard')), false);
 });
 
@@ -54,7 +77,7 @@ test('privacy screen shows the source boundary before any agent work', async () 
   const r = await runWizard([], { cwd: repo, claude: fakeClaude(), input: ['3', '4'] });
 
   assert.match(r.stdout, /Skipped without opening: \.env \(environment file\)/);
-  assert.match(r.stdout, /The Wizard sends nothing to Straddle/);
+  assert.match(r.stdout, /I send nothing to Straddle and host no model/);
 });
 
 test('detected context is a suggestion the developer corrects, and the SDK suggestion follows the correction', async () => {
@@ -122,52 +145,174 @@ test('--client picks the agent for a guided run instead of asking', async () => 
   const repo = nextRepo();
   const claude = fakeClaude();
 
-  // Continue, charges, marketplace, suggested SDK, webhook; no agent question; then "not run yet" at the Cursor handoff.
-  const r = await runWizard(['plan', '--client', 'cursor'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '3', '', '1', '3'] });
+  // Continue, charges, marketplace, suggested SDK, webhook; no agent question; then stop at the Cursor handoff.
+  const r = await runWizard(['plan', '--client', 'cursor'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '3', '', '1', '2'] });
 
   assert.doesNotMatch(r.stdout, /Which coding agent should do the work\?/);
   assert.equal(readReceipt(repo).client, 'cursor');
 });
 
-test('default journey: isolated sessions from the verified bundle, plan before edits, observed progress separate from reported handoffs, final report', async () => {
+test('default journey: one isolated agent session walks the whole program, with a live checklist that ticks only what is on file and reported', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
   claude.sessions(DEFAULT_SESSIONS);
 
-  const r = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '1', '1', '1'] });
+  const r = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+  const status = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, claude, env: CONFIGURED })).stdout);
 
   assert.equal(r.code, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /Straddle plugin\s+loaded into each Wizard session from that bundle/);
+  assert.match(r.stdout, /Straddle plugin\s+loaded into the Wizard's session from that bundle/);
   assert.doesNotMatch(r.stdout, /claude plugin install/);
-  assert.match(r.stdout, /Choosing Start is not approval/);
-  assert.match(r.stdout, /Observed \(Claude Code hooks\): entered 01-decisions, 02-sources, 03-write-plan, 04-review, 05-handoff/);
-  assert.match(r.stdout, /Reported by the agent \(not verified by the Wizard\): handoff draft/);
-  assert.match(r.stdout, /Blocked edit before the plan existed: src\/early\.ts/);
-  assert.match(r.stdout, /Plan: straddle-integration-plan\.md \(Plan state: Draft\)/);
-  assert.match(r.stdout, /\| src\/straddle\.ts \| add client \|/);
-  assert.match(r.stdout, /Changed files \(observed by the Wizard\)\n\s+src\/straddle\.ts\n\s+straddle-integration-plan\.md\n\s+straddle-test-evidence\.md/);
-  assert.match(r.stdout, /Verify before merging \(printed by the agent for straddle-test\)\n\s+- \[ \] Evidence names only scenarios that ran\./);
+  assert.match(r.stdout, /Your session in Claude Code: Setup → Plan → Integrate → Test → Go Live/);
+  assert.match(r.stdout, /Starting isn't approval of anything\./);
+  assert.match(r.stdout, /Blocked an edit before the plan existed: src\/early\.ts/);
+  assert.match(r.stdout, /✓ Setup\s+straddle-setup\.md: Status: complete · reported ready_with_warnings · 5 of \d+ step files opened/);
+  assert.match(r.stdout, /✓ Plan\s+straddle-integration-plan\.md: Plan state: Approved, and the plan is unchanged since · reported draft · 6 of \d+ step files opened/);
+  assert.match(r.stdout, /✓ Test\s+straddle-test-evidence\.md: Status: complete, for the current approved plan · reported passed/);
+  assert.match(r.stdout, /Changed files \(I compared them before and after each session\)\n\s+src\/straddle\.ts\n\s+straddle-go-live-report\.md\n\s+straddle-integration-plan\.md\n\s+straddle-integration-report\.md\n\s+straddle-setup\.md\n\s+straddle-test-evidence\.md\n/);
+  assert.match(r.stdout, new RegExp(`Test charge\\s+https://dashboard\\.straddle\\.com/charges/${CHARGE}`));
+  assert.match(r.stdout, /Turn on Sandbox in the dashboard if it opens in Production/);
+  assert.match(r.stdout, /Verify before merging \(as your agent last printed it\)\n\s+- \[ \] Evidence names only scenarios that ran\./);
+  assert.match(r.stdout, /That's the whole program/);
   assert.equal(existsSync(join(repo, 'src', 'early.ts')), false);
+
+  // One launch, in isolated settings, naming the whole program.
+  const [launch, ...others] = launches(claude);
+  assert.equal(others.length, 0);
+  assert.ok(launch!.at(-1)!.startsWith(`/straddle:straddle-setup ${PROGRAM_LINE} `), launch!.at(-1));
+  assert.ok(!launch!.some((a) => /--resume|--continue|dangerously|bypass|--permission-mode/.test(a)), `native approvals stay interactive: ${launch}`);
+  // The developer's allow rules, hooks, plugins and auto or accept-edits default never approve the session's tool calls.
+  assert.equal(launch![launch!.indexOf('--setting-sources') + 1], '');
+  assert.equal(launch![launch!.indexOf('--plugin-dir') + 1], SKILLS_SOURCE);
+  const settings = JSON.parse(readFileSync(launch![launch!.indexOf('--settings') + 1]!, 'utf8'));
+  assert.equal(settings.permissions?.defaultMode, 'default');
+  assert.equal(settings.statusLine?.type, 'command');
+
+  // The status line Claude Code showed at the start and after each step.
+  assert.deepEqual(statusLines(claude), [
+    'Straddle: Setup ▶ 0/n · Plan · Integrate · Test · Go Live',
+    'Straddle: Setup ✓ · Plan ▶ 0/n · Integrate · Test · Go Live',
+    'Straddle: Setup ✓ · Plan ✓ · Integrate ▶ 0/n · Test · Go Live',
+    'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ▶ 0/n · Go Live',
+    'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ▶ 0/n',
+    'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓',
+  ]);
+  assert.equal(status.run.progress, 'Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓');
 
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'completed');
   assert.equal(receipt.client, 'claude');
   assert.deepEqual([receipt.bundle?.kind, receipt.bundle?.pluginVersion, receipt.bundle?.path], ['local', '0.1.0', SKILLS_SOURCE]);
-  assert.deepEqual(receipt.steps.map((s) => [s.skill, s.reportedMarkers.at(-1)?.status]), [
-    ['straddle-setup', 'ready_with_warnings'], ['straddle-plan', 'draft'], ['straddle-integrate', 'complete'], ['straddle-test', 'partial'],
-  ]);
-  assert.ok(!JSON.stringify(receipt).includes('sk_test_value_in_test_env'), 'receipt never stores the key');
+  assert.equal(receipt.sessions.length, 1);
+  assert.match(receipt.sessions[0]!.sessionId ?? '', /^[0-9a-f-]{36}$/);
+  const events = readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8');
+  for (const secret of [JSON.stringify(receipt), events]) assert.ok(!secret.includes('sk_test_value_in_test_env'), 'no record holds the key');
+});
 
-  const launches = claude.calls().filter((c) => c.includes('--settings')).map((c) => JSON.parse(c) as string[]);
-  assert.deepEqual(launches.map((a) => a.at(-1)?.split(' ')[0]), ['/straddle:straddle-setup', '/straddle:straddle-plan', '/straddle:straddle-integrate', '/straddle:straddle-test']);
-  for (const args of launches) {
-    assert.ok(!args.some((a) => /--resume|--continue|dangerously|bypass|--permission-mode/.test(a)), `native approvals stay interactive: ${args}`);
-    // The developer's allow rules, hooks, plugins and auto or accept-edits default never approve a Wizard step's tool calls.
-    assert.equal(args[args.indexOf('--setting-sources') + 1], '');
-    assert.equal(args[args.indexOf('--plugin-dir') + 1], SKILLS_SOURCE);
-    const settings = JSON.parse(readFileSync(args[args.indexOf('--settings') + 1]!, 'utf8'));
-    assert.equal(settings.permissions?.defaultMode, 'default');
-  }
+test('interrupted mid-program: resume reopens the same session at the first unfinished step, from the files', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions({
+    ...DEFAULT_SESSIONS,
+    'straddle-integrate': { steps: ['01-begin', '02-sources', '03-code'], writes: [{ path: 'straddle-integration-report.md', content: report('partial (webhook route not written yet)') }], text: '', signal: 'SIGTERM' },
+  });
+
+  const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+  const aborted = readReceipt(repo);
+  claude.sessions(DEFAULT_SESSIONS);
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+
+  assert.equal(first.code, 130, first.stdout);
+  assert.match(first.stdout, /Claude Code ended by signal SIGTERM during Integrate\./);
+  assert.match(first.stdout, /Nothing is rolled back/);
+  assert.match(first.stdout, /Integrate\s+straddle-integration-report\.md: Status: partial \(webhook route not written yet\) · no handoff reported · 3 of/);
+  assert.equal(aborted.state, 'aborted');
+  assert.equal(statusLines(claude).find((l) => l.includes('Integrate ▶ 3/n')), 'Straddle: Setup ✓ · Plan ✓ · Integrate ▶ 3/n · Test · Go Live');
+
+  assert.equal(resumed.code, 0, resumed.stdout);
+  assert.match(resumed.stdout, /Resume at Integrate/);
+  const [, second] = launches(claude);
+  assert.equal(second![second!.indexOf('--resume') + 1], aborted.sessions[0]!.sessionId);
+  assert.ok(second!.at(-1)!.startsWith('/straddle:straddle-integrate Straddle Wizard program: straddle-integrate → straddle-test → straddle-go-live. Start at straddle-integrate.'), second!.at(-1));
+  const receipt = readReceipt(repo);
+  assert.equal(receipt.state, 'completed');
+  assert.equal(receipt.sessions.length, 2);
+  assert.equal(statusLines(claude).at(-1), 'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓');
+});
+
+test('resume trusts the files over the session: a finished report moves on to Test, and a plan edited after approval goes back to Plan', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions({ ...DEFAULT_SESSIONS, 'straddle-integrate': { ...DEFAULT_SESSIONS['straddle-integrate'], stop: true } });
+
+  const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+  const toTest = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+  writeFiles(repo, { 'straddle-integration-plan.md': APPROVED_PLAN.replace('add client', 'add client and payouts') });
+  const toPlan = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+
+  assert.equal(first.code, 0, first.stdout);
+  assert.equal(readReceipt(repo).stateReason, 'next: Test');
+  assert.match(first.stdout, /Next: run `wizard resume` and I'll reopen the session at Test\./);
+  assert.match(toTest.stdout, /Resume at Test/);
+  assert.match(toPlan.stdout, /Plan\s+straddle-integration-plan\.md: the plan changed after you approved it/);
+  assert.match(toPlan.stdout, /Integrate\s+straddle-integration-report\.md: Status: complete, but straddle-integration-plan\.md is not approved as it stands/);
+  assert.match(toPlan.stdout, /Resume at Plan/);
+});
+
+test('with Straddle files already here, the Wizard asks to start fresh or resume: fresh keeps them beside the new ones, resume starts at the first unfinished step', async () => {
+  const fresh = nextRepo();
+  writeFiles(fresh, { 'straddle-setup.md': SETUP_FILE, 'straddle-integration-plan.md': APPROVED_PLAN });
+
+  // Start fresh, Continue, the four choices, then Cancel at the agent choice.
+  const r = await runWizard([], { cwd: fresh, claude: fakeClaude(), env: CONFIGURED, input: ['2', '1', '1', '3', '', '1', '3'] });
+
+  assert.match(r.stdout, /This repo already has Straddle files from an earlier run/);
+  assert.match(r.stdout, /Start fresh or resume\?\n\s+1\) Resume at Integrate\n\s+2\) Start fresh/);
+  const kept = readdirSync(fresh).filter((f) => f.includes('.previous-')).sort();
+  assert.deepEqual(kept.map((f) => f.replace(/\d+$/, 'N')), ['straddle-integration-plan.md.previous-N', 'straddle-setup.md.previous-N']);
+  assert.equal(existsSync(join(fresh, 'straddle-setup.md')), false);
+
+  // Without any receipt, `wizard resume` confirms the details and starts at the first unfinished step.
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-setup.md': SETUP_FILE, 'straddle-integration-plan.md': APPROVED_PLAN });
+  const claude = fakeClaude();
+  claude.sessions(DEFAULT_SESSIONS);
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+
+  assert.equal(resumed.code, 0, resumed.stdout);
+  assert.match(resumed.stdout, /I'll pick up from the Straddle files in this repo/);
+  assert.match(resumed.stdout, /Setup and Plan are done; I read that from their files\. I'll start at Integrate\./);
+  assert.ok(launches(claude)[0]!.at(-1)!.startsWith('/straddle:straddle-integrate Straddle Wizard program: straddle-integrate → straddle-test → straddle-go-live.'));
+  assert.equal(readFileSync(join(repo, 'straddle-setup.md'), 'utf8'), SETUP_FILE);
+});
+
+test('without a Sandbox configuration the session stops before the first step that can send Straddle requests, and resume continues there', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions(DEFAULT_SESSIONS);
+
+  const first = await runWizard([], { cwd: repo, claude, env: {}, input: [...CHOOSE_CONTEXT, '1'] });
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+
+  assert.equal(first.code, 1, first.stdout);
+  assert.match(first.stdout, /Configuration error: STRADDLE_API_KEY is not set; no environment is declared \(STRADDLE_ENVIRONMENT=sandbox\)\./);
+  assert.match(first.stdout, /Setup and Plan send no Straddle request, so they can run now\. I'll end the session before Integrate\./);
+  assert.match(first.stdout, /zero Straddle requests are sent/);
+  const [one, two] = launches(claude);
+  assert.ok(one!.at(-1)!.startsWith('/straddle:straddle-setup Straddle Wizard program: straddle-setup → straddle-plan. Start at straddle-setup.'), one!.at(-1));
+  assert.equal(resumed.code, 0, resumed.stdout);
+  assert.ok(two!.at(-1)!.startsWith('/straddle:straddle-integrate Straddle Wizard program: straddle-integrate → straddle-test → straddle-go-live.'), two!.at(-1));
+  assert.equal(readReceipt(repo).state, 'completed');
+});
+
+test('another payment provider in the repo adds Migrate to the program', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'package.json': JSON.stringify({ dependencies: { next: '15.0.0', stripe: '17.0.0' }, devDependencies: { typescript: '5.6.0' } }) });
+
+  const r = await runWizard([], { cwd: repo, claude: fakeClaude(), env: CONFIGURED, input: [...CHOOSE_CONTEXT, '2'] });
+
+  assert.match(r.stdout, /Program\s+Setup → Plan → Migrate → Integrate → Test → Go Live \(Migrate, because you already use stripe\)/);
+  assert.match(r.stdout, /Your session in Claude Code: Setup → Plan → Migrate → Integrate → Test → Go Live/);
 });
 
 test('readiness does not promise Claude Code permission prompts that a managed policy can switch off', async () => {
@@ -178,7 +323,7 @@ test('readiness does not promise Claude Code permission prompts that a managed p
   // Continue, then stop at Start: only the readiness screen matters.
   const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '2'] });
 
-  assert.match(r.stdout, /Session settings\s+isolated: /);
+  assert.match(r.stdout, /Session settings\s+Isolated\. /);
   assert.doesNotMatch(r.stdout, /asks before edits/);
   assert.match(r.stdout, /managed policy still applies and can allow edits, commands or MCP calls without asking/);
 });
@@ -188,11 +333,11 @@ test('Integrate never starts before the durable plan exists', async () => {
   const claude = fakeClaude();
   claude.setState({ marketplace: '/b', installed: true });
 
-  const r = await runWizard(['integrate'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '1', '', '1', '1'] });
+  const r = await runWizard(['integrate'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
 
   assert.equal(r.code, 1);
   assert.match(r.stdout, /Integrate needs straddle-integration-plan\.md\. Run `wizard plan` first/);
-  assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
+  assert.equal(launches(claude).length, 0);
   assert.equal(readReceipt(repo).state, 'blocked');
 });
 
@@ -207,7 +352,6 @@ test('before Integrate and before Test the Wizard shows the plan state and where
     assert.match(r.stdout, /Plan: straddle-integration-plan\.md \(Plan state: Draft\)/, program);
     assert.match(r.stdout, new RegExp(`${title} runs only an approved plan: an approval recorded in the file that matches the current plan`), program);
     assert.match(r.stdout, /Editing the plan after approval voids the record/, program);
-    assert.doesNotMatch(r.stdout, /Integrate asks for approval/, program);
   }
 
   const migrationRepo = nextRepo();
@@ -221,12 +365,12 @@ test('a step file the agent opens with a shell command is observed as entered, l
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
   const claude = fakeClaude();
-  claude.sessions({ 'straddle-integrate': { steps: ['01-begin', '05-execute'], shellSteps: ['06-review', '07-handoff'], text: handoff('straddle-integrate', 'complete', []) } });
+  claude.sessions({ 'straddle-integrate': { steps: ['01-begin', '05-execute'], shellSteps: ['06-review', '07-handoff'], text: handoff('straddle-integrate', 'complete') } });
 
   const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
 
   assert.equal(r.code, 0, r.stdout);
-  assert.match(r.stdout, /Observed \(Claude Code hooks\): entered 01-begin, 05-execute, 06-review, 07-handoff\n/);
+  assert.match(r.stdout, /Integrate\s+straddle-integration-report\.md: not written yet · reported complete · 4 of \d+ step files opened/);
 });
 
 test('an edit the developer denies in the agent is not reported as a change, and the step stays blocked', async () => {
@@ -236,19 +380,19 @@ test('an edit the developer denies in the agent is not reported as a change, and
   claude.setState({ marketplace: '/b', installed: true });
   claude.sessions({ 'straddle-integrate': {
     steps: ['01-begin', '02-sources', '03-code'], denied: ['03-code', 'src/straddle.ts'],
-    writes: [{ path: 'src/straddle.ts', content: 'export {}' }], text: handoff('straddle-integrate', 'blocked', []),
+    writes: [{ path: 'src/straddle.ts', content: 'export {}' }], text: handoff('straddle-integrate', 'blocked'),
   } });
 
   const r = await runWizard(['integrate'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '1'] });
 
   assert.equal(r.code, 1, r.stdout);
-  assert.match(r.stdout, /Observed \(Claude Code hooks\): entered 01-begin, 02-sources\n/);
-  assert.match(r.stdout, /Files changed: none/);
+  assert.match(r.stdout, /Integrate\s+straddle-integration-report\.md: not written yet · reported blocked · 2 of \d+ step files opened/);
+  assert.match(r.stdout, /Changed files \(I compared them before and after each session\)\n\s+none/);
   assert.equal(existsSync(join(repo, 'src', 'straddle.ts')), false);
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'blocked');
   assert.match(receipt.stateReason, /Integrate reported blocked/);
-  assert.deepEqual(receipt.steps[0]?.observedEvents.filter((e) => e.kind === 'edit'), []);
+  assert.ok(!readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8').includes('"kind":"edit"'));
 });
 
 test('a missing key or environment is an explicit configuration error before any Straddle-request step', async () => {
@@ -262,7 +406,7 @@ test('a missing key or environment is an explicit configuration error before any
   assert.equal(r.code, 1);
   assert.match(r.stdout, /Configuration error: STRADDLE_API_KEY is not set; STRADDLE_ENVIRONMENT is production, not sandbox\./);
   assert.match(r.stdout, /zero Straddle requests/);
-  assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
+  assert.equal(launches(claude).length, 0);
   assert.match(readReceipt(repo).stateReason, /configuration error/);
 });
 
@@ -277,11 +421,11 @@ test('Integrate stops with a configuration error when credentials are missing', 
   assert.equal(r.code, 1);
   assert.match(r.stdout, /Configuration error: STRADDLE_API_KEY is not set/);
   assert.match(r.stdout, /zero Straddle requests/);
-  assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
+  assert.equal(launches(claude).length, 0);
   assert.match(readReceipt(repo).stateReason, /configuration error/);
   // Integrate is the only step here, so the help promises no step that could continue.
-  assert.match(r.stdout, /Integrate will not start until you fix this in your own shell/);
-  assert.doesNotMatch(r.stdout, /can continue|can run:/);
+  assert.match(r.stdout, /Integrate won't start until you fix this in your own shell/);
+  assert.doesNotMatch(r.stdout, /can run now/);
 });
 
 test('an explicit non-Sandbox base URL is a configuration error even when STRADDLE_ENVIRONMENT says sandbox', async () => {
@@ -299,7 +443,7 @@ test('an explicit non-Sandbox base URL is a configuration error even when STRADD
     'STRADDLE_ENVIRONMENT (sandbox) and STRADDLE_BASE_URL (https://production.straddle.com) disagree',
   ]);
   assert.equal(r.code, 1);
-  assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
+  assert.equal(launches(claude).length, 0);
 });
 
 test('a plan that is a symlink, or an excluded plan, is never opened or printed', async () => {
@@ -315,9 +459,9 @@ test('a plan that is a symlink, or an excluded plan, is never opened or printed'
   const b = await runWizard(['integrate', '--client', 'claude', '--exclude', 'straddle-integration-plan.md'], { cwd: excluded, claude, input: ['1'] });
 
   assert.doesNotMatch(a.stdout, /SYNTHETIC_SECRET_SENTINEL/);
-  assert.match(a.stdout, /Not shown: the Wizard does not open it because it is a symlink/);
+  assert.match(a.stdout, /Not shown: I don't open it because it's a symlink/);
   assert.doesNotMatch(b.stdout, /SYNTHETIC_PRIVATE_PLAN_ROW/);
-  assert.match(b.stdout, /Not shown: the Wizard does not open it because it is a configured sensitive path/);
+  assert.match(b.stdout, /Not shown: I don't open it because it's a configured sensitive path/);
 });
 
 test('client login loss blocks the handoff with a repair, and resume rechecks it without reusing any approval', async () => {
@@ -329,7 +473,7 @@ test('client login loss blocks the handoff with a repair, and resume rechecks it
   const first = await runWizard(['setup'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '2'] });
 
   assert.equal(first.code, 1);
-  assert.match(first.stdout, /Claude Code is not logged in\. Run `claude auth login` in your terminal/);
+  assert.match(first.stdout, /Claude Code isn't logged in\. Run `claude auth login` in your terminal/);
   assert.equal(readReceipt(repo).state, 'blocked');
 
   claude.setState({ loggedIn: true });
@@ -338,81 +482,51 @@ test('client login loss blocks the handoff with a repair, and resume rechecks it
   assert.equal(resumed.code, 0, resumed.stdout);
   assert.match(resumed.stdout, /Saved run: setup program, blocked/);
   assert.match(resumed.stdout, /Choices\s+charges, marketplace, TypeScript, webhook endpoint/);
-  assert.match(resumed.stdout, /Sandbox write approvals from earlier sessions do not carry over; a recorded plan approval does while the plan is unchanged/);
+  assert.match(resumed.stdout, /Sandbox write approvals from earlier sessions don't carry over\. A recorded plan approval does, while the plan is unchanged\./);
   assert.equal(readReceipt(repo).state, 'completed');
 });
 
-test('an interrupted agent session is recorded as aborted with preserved work, and resume re-enters that step fresh', async () => {
+test('a failed or aborted session never counts as done: the Wizard stops there, and resume reruns the step', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
-  claude.setState({ marketplace: '/b', installed: true });
-  claude.sessions({ ...DEFAULT_SESSIONS, 'straddle-plan': { steps: ['01-decisions'], text: '', signal: 'SIGTERM' } });
-
-  const first = await runWizard(['plan'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
-
-  assert.equal(first.code, 130);
-  assert.match(first.stdout, /Claude Code ended by signal SIGTERM before the skill's handoff/);
-  assert.match(first.stdout, /Nothing is rolled back/);
-  const aborted = readReceipt(repo);
-  assert.equal(aborted.state, 'aborted');
-  assert.deepEqual(aborted.steps[0]?.observedSteps, ['01-decisions']);
-
-  claude.sessions(DEFAULT_SESSIONS);
-  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
-
-  assert.equal(resumed.code, 0, resumed.stdout);
-  const launches = claude.calls().filter((c) => c.includes('/straddle:straddle-plan'));
-  assert.equal(launches.length, 2);
-  assert.equal(readReceipt(repo).state, 'completed');
-});
-
-test('a reported handoff never outranks a later abort or a failed session, on the first run or on resume', async () => {
-  const repo = nextRepo();
-  const claude = fakeClaude();
-  const draftThenAbort = `${handoff('straddle-plan', 'draft', [])}\nSTRADDLE_ABORT {"skill":"straddle-plan","reason":"developer stopped"}`;
+  const draftThenAbort = `${handoff('straddle-plan', 'draft')}\nSTRADDLE_ABORT {"skill":"straddle-plan","reason":"developer stopped"}`;
   claude.sessions({ 'straddle-plan': { steps: ['01-decisions'], writes: [{ path: 'straddle-integration-plan.md', content: PLAN }], text: draftThenAbort } });
 
   const aborted = await runWizard(['plan', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT.slice(0, -1), '1'] });
-  claude.sessions({ 'straddle-plan': { steps: ['01-decisions'], text: handoff('straddle-plan', 'draft', []), exit: 42 } });
+  claude.sessions({ 'straddle-plan': { steps: ['01-decisions'], text: handoff('straddle-plan', 'draft'), exit: 42 } });
   const failed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
   const afterFailure = readReceipt(repo);
-  claude.sessions(DEFAULT_SESSIONS);
+  claude.sessions({ 'straddle-plan': { steps: ['06-show-me'], writes: [{ path: 'straddle-integration-plan.md', content: APPROVED_PLAN }], text: 'STRADDLE_PROGRESS {"skill":"straddle-plan","step":"06-show-me"}' } });
   const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
 
   assert.equal(aborted.code, 130, aborted.stdout);
+  assert.match(aborted.stdout, /Your agent reported STRADDLE_ABORT for Plan: developer stopped/);
   assert.equal(failed.code, 1, failed.stdout);
-  assert.match(failed.stdout, /exited with code 42; the Wizard does not advance past a failed session/);
+  assert.match(failed.stdout, /exited with code 42 during Plan; I don't advance past a failed session/);
   assert.equal(afterFailure.state, 'blocked');
-  assert.deepEqual(afterFailure.steps.map((s) => s.advanced), [false, false]);
   assert.equal(resumed.code, 0, resumed.stdout);
-  assert.equal(claude.calls().filter((c) => c.includes('/straddle:straddle-plan')).length, 3);
-  assert.deepEqual(readReceipt(repo).steps.map((s) => s.advanced), [false, false, true]);
+  assert.equal(launches(claude).length, 3);
+  assert.equal(readReceipt(repo).state, 'completed');
 });
 
-test('the later of a reported abort and handoff decides the step: a recovered session advances, a later abort still stops', async () => {
+test('the later of a reported abort and handoff decides the tick: a recovered step ticks, a later abort does not', async () => {
   const abort = 'STRADDLE_ABORT {"skill":"straddle-integrate","step":"01-begin","reason":"plan not approved"}';
-  const complete = handoff('straddle-integrate', 'complete', []);
+  const complete = handoff('straddle-integrate', 'complete');
   const run = async (text: string) => {
     const repo = nextRepo();
-    writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+    writeFiles(repo, { 'straddle-integration-plan.md': APPROVED_PLAN });
     const claude = fakeClaude();
-    claude.sessions({ 'straddle-integrate': { steps: ['01-begin', '07-handoff'], text } });
-    const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
-    return { ...r, receipt: readReceipt(repo) };
+    claude.sessions({ 'straddle-integrate': { steps: ['01-begin', '07-handoff'], writes: [{ path: 'straddle-integration-report.md', content: report('complete') }], text } });
+    return runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
   };
 
   const recovered = await run(`${abort}\nThe developer approved the plan in this session.\n${complete}`);
   assert.equal(recovered.code, 0, recovered.stdout);
-  assert.equal(recovered.receipt.state, 'completed');
-  assert.equal(recovered.receipt.steps.at(-1)?.advanced, true);
-  assert.match(recovered.stdout, /Integrate\s+observed 2 step entries; reported: complete/);
+  assert.match(recovered.stdout, /✓ Integrate\s+straddle-integration-report\.md: Status: complete, for the current approved plan · reported complete · 2 of/);
 
   const abortedAfterHandoff = await run(`${complete}\n${abort}`);
-  assert.equal(abortedAfterHandoff.code, 130, abortedAfterHandoff.stdout);
-  assert.match(abortedAfterHandoff.stdout, /the agent reported STRADDLE_ABORT: plan not approved/);
-  assert.equal(abortedAfterHandoff.receipt.steps.at(-1)?.advanced, false);
-  assert.match(abortedAfterHandoff.stdout, /Integrate\s+observed 2 step entries; reported: abort/);
-  assert.doesNotMatch(abortedAfterHandoff.stdout, /reported: complete/);
+  assert.match(abortedAfterHandoff.stdout, /▶ Integrate\s+straddle-integration-report\.md: Status: complete, for the current approved plan · reported STRADDLE_ABORT \(plan not approved\)/);
+  assert.doesNotMatch(abortedAfterHandoff.stdout, /reported complete/);
 });
 
 test('resume finishes cancelled upfront choices, applies new exclusions before inspecting, and hands corrected context to the agent', async () => {
@@ -422,7 +536,7 @@ test('resume finishes cancelled upfront choices, applies new exclusions before i
   claude.sessions({ 'straddle-plan': {
     steps: ['01-decisions'],
     writes: [{ path: 'straddle-integration-plan.md', content: PLAN }, { path: 'src/private-data.txt', content: 'after' }],
-    text: handoff('straddle-plan', 'draft', []),
+    text: handoff('straddle-plan', 'draft'),
   } });
 
   // Change > Framework > CUSTOM_FRAMEWORK, Continue, then Cancel at the first product question.
@@ -431,16 +545,17 @@ test('resume finishes cancelled upfront choices, applies new exclusions before i
   const resumed = await runWizard(['resume', '--client', 'claude', '--exclude', 'src/private-data.txt'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '3', '', '1', '1'] });
 
   assert.equal(first.code, 130, first.stdout);
-  assert.match(resumed.stdout, /Choices\s+not answered yet; asked again before the agent starts/);
+  assert.match(resumed.stdout, /Choices\s+not answered yet; I'll ask before your agent starts/);
   assert.match(resumed.stdout, /Never opened\s+src\/private-data\.txt/);
   assert.equal(resumed.code, 0, resumed.stdout);
-  const launch = claude.calls().find((c) => c.includes('/straddle:straddle-plan'));
-  assert.equal((JSON.parse(launch!) as string[]).at(-1), '/straddle:straddle-plan Repository context confirmed in the Straddle Wizard: language TypeScript (detected); '
+  assert.equal(launches(claude)[0]!.at(-1), '/straddle:straddle-plan Straddle Wizard program: straddle-plan. Start at straddle-plan. Run the steps in order in this one session: '
+    + "after each step's STRADDLE_HANDOFF, continue with the next unfinished step without waiting for the Wizard; stop and ask whenever a step needs the developer "
+    + '(plan approval, each Sandbox write). Repository context confirmed in the Straddle Wizard: language TypeScript (detected); '
     + 'framework CUSTOM_FRAMEWORK (corrected by the developer). Developer choices from the Straddle Wizard: products charges; integration type marketplace; '
     + 'SDK TypeScript; notification path webhook endpoint.');
   const receipt = readReceipt(repo);
   assert.deepEqual(receipt.exclude, ['src/private-data.txt']);
-  assert.deepEqual(receipt.steps[0]?.changedFiles, ['straddle-integration-plan.md']);
+  assert.deepEqual(receipt.sessions[0]?.changedFiles, ['straddle-integration-plan.md']);
 });
 
 test('a completed run is shown and kept beside the next run instead of being overwritten', async () => {
@@ -450,16 +565,18 @@ test('a completed run is shown and kept beside the next run instead of being ove
   await runWizard(['setup', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT.slice(0, -1), '1'] });
   const completed = readReceipt(repo);
 
-  // Start a new run, Continue, then stop before Audit starts.
+  // Start fresh (a completed run offers no resume), Continue, then stop before Audit starts.
   const r = await runWizard(['audit', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '2'] });
 
   assert.equal(completed.state, 'completed');
   assert.match(r.stdout, /Saved run: setup program, completed/);
-  assert.match(r.stdout, /A completed run is saved here\./);
+  assert.match(r.stdout, /Start fresh or resume\?\n\s+1\) Start fresh/);
   const kept = readdirSync(join(repo, '.straddle-wizard')).filter((f) => f.startsWith('receipt.json.completed-'));
   assert.equal(kept.length, 1);
-  assert.deepEqual(JSON.parse(readFileSync(join(repo, '.straddle-wizard', kept[0]!), 'utf8')).steps, completed.steps);
+  assert.deepEqual(JSON.parse(readFileSync(join(repo, '.straddle-wizard', kept[0]!), 'utf8')).sessions, completed.sessions);
   assert.equal(readReceipt(repo).program, 'audit');
+  // Only the integration program sets the skills' files aside.
+  assert.equal(readFileSync(join(repo, 'straddle-setup.md'), 'utf8'), SETUP_FILE);
 });
 
 test('a corrupted receipt is reported on resume and left untouched', async () => {
@@ -469,7 +586,7 @@ test('a corrupted receipt is reported on resume and left untouched', async () =>
   const r = await runWizard(['resume'], { cwd: repo, claude: fakeClaude() });
 
   assert.equal(r.code, 1);
-  assert.match(r.stdout, /The saved Wizard receipt is unreadable/);
+  assert.match(r.stdout, /I can't read the saved Wizard receipt/);
   assert.equal(readFileSync(join(repo, '.straddle-wizard', 'receipt.json'), 'utf8'), '{broken');
 });
 
@@ -477,28 +594,29 @@ test('wizard audit runs straddle-audit and prints the findings table from its re
   const repo = nextRepo();
   const claude = fakeClaude();
   claude.setState({ marketplace: '/b', installed: true });
-  const report = '# Straddle audit\n\nStatus: findings\n\n## Findings\n| # | File:line | Category | Finding | Confidence | Evidence (SDK / contract) | Recovery |\n| --- | --- | --- | --- | --- | --- | --- |\n| 1 | src/pay.ts:12 | idempotency | create without key | high | sdk | add key |\n\n## Checked and dismissed\n';
-  claude.sessions({ 'straddle-audit': { steps: ['01-begin', '05-report'], writes: [{ path: 'straddle-audit-report.md', content: report }], text: handoff('straddle-audit', 'findings', []) } });
+  const auditReport = '# Straddle audit\n\nStatus: findings\n\n## Findings\n| # | File:line | Category | Finding | Confidence | Evidence (SDK / contract) | Recovery |\n| --- | --- | --- | --- | --- | --- | --- |\n| 1 | src/pay.ts:12 | idempotency | create without key | high | sdk | add key |\n\n## Checked and dismissed\n';
+  claude.sessions({ 'straddle-audit': { steps: ['01-begin', '05-report'], writes: [{ path: 'straddle-audit-report.md', content: auditReport }], text: handoff('straddle-audit', 'findings') } });
 
   const r = await runWizard(['audit'], { cwd: repo, claude, input: ['1', '1', '1'] });
 
   assert.equal(r.code, 0, r.stdout);
   assert.match(r.stdout, /Findings \(straddle-audit-report\.md\)\n.*\n.*\n\s+\| 1 \| src\/pay\.ts:12 \| idempotency \| create without key \| high \|/);
+  assert.match(r.stdout, /✓ Audit\s+writes no status file · reported findings · 2 of/);
 });
 
 test('wizard skill run <name> launches that versioned skill in the chosen agent', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
   claude.setState({ marketplace: '/b', installed: true });
-  claude.sessions({ 'straddle-go-live': { steps: ['01-begin'], text: handoff('straddle-go-live', 'not_ready', []) } });
+  claude.sessions({ 'straddle-go-live': { steps: ['01-begin'], text: handoff('straddle-go-live', 'not_ready') } });
 
   const r = await runWizard(['skill', 'run', 'straddle-go-live'], { cwd: repo, claude, input: ['1', '1', '1'] });
 
   assert.equal(r.code, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /Step 1 of 1: Go Live \(straddle-go-live /);
-  assert.deepEqual(claude.calls().filter((c) => c.includes('--settings')).map((c) => (JSON.parse(c) as string[]).at(-1)), [
-    '/straddle:straddle-go-live Repository context confirmed in the Straddle Wizard: language TypeScript (detected); framework Next.js (detected).',
-  ]);
+  assert.match(r.stdout, /Your session in Claude Code: Go Live/);
+  const [launch] = launches(claude);
+  assert.ok(launch!.at(-1)!.startsWith('/straddle:straddle-go-live Straddle Wizard program: straddle-go-live. Start at straddle-go-live.'));
+  assert.ok(launch!.at(-1)!.endsWith('Repository context confirmed in the Straddle Wizard: language TypeScript (detected); framework Next.js (detected).'));
   assert.equal(readReceipt(repo).program, 'skill:straddle-go-live');
 });
 
@@ -551,20 +669,20 @@ test('mcp add registers only Straddle servers through native commands and skips 
   assert.deepEqual(Object.keys(state.mcp), []);
 });
 
-test('Cursor gets a labelled manual handoff, never fake progress', async () => {
+test('Cursor gets a labelled manual handoff, never fake progress, and the files decide what is next', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
 
-  // Continue, charges, marketplace, suggested SDK, webhook, Cursor.
-  const r = await runWizard(['plan'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '3', '', '1', '2'] });
+  // Continue, charges, marketplace, suggested SDK, webhook, Cursor, then "I'm back" without anything written.
+  const r = await runWizard(['plan'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '3', '', '1', '2', '1'] });
 
-  assert.equal(r.code, 1);
-  assert.match(r.stdout, /Cursor automation is not supported by the Wizard\. Manual handoff:/);
-  assert.match(r.stdout, /Use the straddle-plan skill/);
+  assert.equal(r.code, 0, r.stdout);
+  assert.match(r.stdout, /I can't drive Cursor, so here's the handoff:/);
+  assert.match(r.stdout, /Use the straddle-plan skill\. Straddle Wizard program: straddle-plan\. Start at straddle-plan\./);
+  assert.match(r.stdout, /Plan\s+straddle-integration-plan\.md: not written yet · no handoff reported · progress not observable/);
   const receipt = readReceipt(repo);
-  assert.equal(receipt.state, 'blocked');
-  assert.equal(receipt.steps[0]?.eventSurface, 'unsupported');
-  assert.deepEqual(receipt.steps[0]?.observedSteps, []);
+  assert.equal(receipt.state, 'ready');
+  assert.equal(receipt.sessions[0]?.client, 'cursor');
 });
 
 test('receipt removal is configuration loss the next run reports as a fresh start', async () => {
@@ -577,5 +695,5 @@ test('receipt removal is configuration loss the next run reports as a fresh star
   const r = await runWizard(['resume'], { cwd: repo, claude });
 
   assert.equal(r.code, 1);
-  assert.match(r.stdout, /No saved Wizard run in this repository\. Start one with `wizard`\./);
+  assert.match(r.stdout, /There's no saved Wizard run in this repo\. Start one with `wizard`\./);
 });

@@ -15,12 +15,12 @@ export const CONNECT_MCP_GUIDE = 'https://straddle-build-straddle-openapi.apidoc
 const PLUGIN_ID = 'straddle@straddle';
 const NATIVE_TIMEOUT_MS = 60_000;
 
-// How the Wizard learns what happened inside a session. Only Claude Code exposes events it can read (hooks).
-export const EVENT_SURFACE: Record<ClientName, 'observed' | 'unverified' | 'unsupported'> = { claude: 'observed', codex: 'unverified', cursor: 'unsupported' };
+// How the Wizard learns what happens inside a session: Claude Code hooks, the Codex session log, or nothing for Cursor.
+export const EVENT_SURFACE: Record<ClientName, 'observed' | 'unsupported'> = { claude: 'observed', codex: 'observed', cursor: 'unsupported' };
 export const EVENT_SURFACE_NOTE: Record<ClientName, string> = {
-  claude: 'step progress observed through Claude Code hooks',
-  codex: 'step progress unverified: Codex exposes no session event the Wizard reads',
-  cursor: 'manual handoff: Cursor automation is not supported',
+  claude: 'live checklist in its status line, from Claude Code hooks',
+  codex: 'live checklist on a local page, from its session log',
+  cursor: "manual: you run the skills in Cursor, and I read the files they write",
 };
 
 // Cursor has no supported command-line agent the Wizard drives, so it is always a manual handoff.
@@ -148,9 +148,9 @@ export function inspectClient(name: ClientName, env: NodeJS.ProcessEnv, bundle: 
 export type ConfigPlan = { kind: 'commands'; commands: Command[]; note: string } | { kind: 'manual'; steps: string[] } | { kind: 'nothing'; note: string };
 
 const cursorPluginSteps = (bundle: Bundle | null) => [
-  'Cursor automation is not supported by the Wizard; do this in Cursor:',
+  "I can't drive Cursor from here, so do this in Cursor:",
   `Import ${bundle ? bundle.path : 'the straddle-build/skills repository'} as a team marketplace and install the "straddle" plugin.`,
-  'Enter your Straddle API key when Cursor prompts for STRADDLE_API_KEY. Never paste it into the Wizard.',
+  'Enter your Straddle API key when Cursor asks for STRADDLE_API_KEY. Never paste it into the Wizard.',
 ];
 
 export function installPlan(state: ClientState, bundle: Bundle): ConfigPlan {
@@ -158,7 +158,7 @@ export function installPlan(state: ClientState, bundle: Bundle): ConfigPlan {
   // A "straddle" marketplace registered from another place is the developer's; the Wizard never replaces it.
   const real = (p: string) => { try { return realpathSync(p); } catch { return p; } };
   if (state.marketplacePath && real(state.marketplacePath) !== real(bundle.path)) {
-    return { kind: 'manual', steps: [`${state.label} already has a marketplace named "straddle" at ${state.marketplacePath}, not the verified ${bundle.path}. The Wizard does not replace it. Remove it with \`${state.name} plugin marketplace remove straddle\` if it is stale, then run \`wizard install\` again.`] };
+    return { kind: 'manual', steps: [`${state.label} already has a marketplace named "straddle" at ${state.marketplacePath}, not the verified ${bundle.path}. I won't replace it. If it's stale, remove it with \`${state.name} plugin marketplace remove straddle\`, then run \`wizard install\` again.`] };
   }
   const commands: Command[] = [];
   if (!state.marketplacePath) commands.push({ bin: state.name, args: ['plugin', 'marketplace', 'add', bundle.path] });
@@ -217,7 +217,7 @@ export function mcpAddPlan(state: ClientState): ConfigPlan {
     return {
       kind: 'manual',
       steps: [
-        'Cursor MCP configuration is manual and not verified by the Wizard. Add these servers in Cursor (Settings > MCP) or merge them into ~/.cursor/mcp.json:',
+        "I don't configure or check Cursor's MCP servers. Add these in Cursor (Settings > MCP), or merge them into ~/.cursor/mcp.json:",
         JSON.stringify({ mcpServers: { 'straddle-api': { url: API_MCP_URL, headers: { Authorization: 'Bearer ${env:STRADDLE_API_KEY}' } }, 'straddle-docs': { url: DOCS_MCP_URL } } }, null, 2),
         `Guide: ${CONNECT_MCP_GUIDE}`,
       ],
@@ -263,6 +263,8 @@ export interface LaunchRequest {
   settingsPath: string;
   // The verified bundle directory.
   pluginDir: string;
+  // The native session to reopen, or null for a new one.
+  resume: string | null;
 }
 
 // The skill is invoked by name; everything the skill does comes from the versioned bundle.
@@ -270,11 +272,12 @@ export function launchCommand(req: LaunchRequest): Command {
   if (req.client === 'claude') {
     const prompt = [`/straddle:${req.skill}`, req.context].filter(Boolean).join(' ');
     // `--setting-sources ''` leaves out user, project and local settings, so none of the developer's allow rules,
-    // hooks, plugins or default mode approve the step's tool calls. OAuth or keychain login is not a settings source
+    // hooks, plugins or default mode approve the session's tool calls. OAuth or keychain login is not a settings source
     // and stays; settings-based authentication (apiKeyHelper, an env block) does not apply in these sessions.
-    return { bin: 'claude', args: ['--setting-sources', '', '--settings', req.settingsPath, '--plugin-dir', req.pluginDir, prompt] };
+    return { bin: 'claude', args: ['--setting-sources', '', '--settings', req.settingsPath, '--plugin-dir', req.pluginDir, ...(req.resume ? ['--resume', req.resume] : []), prompt] };
   }
   // These two flags override a developer's `danger-full-access` sandbox or `never` approval default for this session.
   // The rest of the Codex configuration (profiles, hooks, MCP servers, other plugins) still applies.
-  return { bin: 'codex', args: ['-C', req.repo, '--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join(' ')] };
+  const prompt = [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join(' ');
+  return { bin: 'codex', args: [...(req.resume ? ['resume'] : []), '-C', req.repo, '--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', ...(req.resume ? [req.resume] : []), prompt] };
 }
