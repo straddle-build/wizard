@@ -346,7 +346,7 @@ function stepRows(items: readonly StepProgress[], observed: boolean): string[] {
     const said = !p.reported ? 'no handoff reported'
       : p.reported.kind === 'abort' ? `reported STRADDLE_ABORT${p.reported.reason ? ` (${p.reported.reason})` : ''}`
         : `reported ${p.reported.status ?? 'a handoff with no status'}`;
-    const seen = observed ? `${p.total ? `${p.entered} of ${p.total}` : p.entered} step files opened` : 'progress not observable';
+    const seen = observed ? `${p.total ? `${p.entered} of ${p.total}` : p.entered} step file${(p.total || p.entered) === 1 ? '' : 's'} opened` : 'progress not observable';
     return `${p.done ? '✓' : p.entered ? '▶' : ' '} ${route.title.padEnd(width)}${[file, said, seen].join(' · ')}`;
   });
 }
