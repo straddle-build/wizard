@@ -10,7 +10,7 @@ import {
 import { straddleConfiguration } from './configuration.ts';
 import { changedFiles, discover, readRepoFile, snapshot, type RepoFacts } from './discovery.ts';
 import { parseMarkers, readObservedEvents, stepEntries, transcriptAssistantText, verifyChecklist, type ReportedMarker } from './events.ts';
-import { INTEGRATION_PLAN, SKILLS, programFor, programLabel, type ProgramName, type SkillName } from './programs.ts';
+import { INTEGRATION_PLAN, SKILLS, programFor, programLabel, type ProgramName, type SkillName, type SkillRoute } from './programs.ts';
 import { WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type Receipt, type RunState, type StepRun } from './receipt.ts';
 import type { Prompter } from './ui.ts';
 import { WIZARD_VERSION } from './version.ts';
@@ -238,7 +238,7 @@ function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: 
   if (receipt.pluginLoad === 'session') {
     row(io, 'Straddle plugin', `loaded into each Wizard session from the verified snapshot with --plugin-dir (your Claude Code: ${installed})`);
     row(io, 'API MCP', 'declared by that plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in');
-    row(io, 'Session settings', 'isolated: your user and project allow and deny rules, hooks, plugins, default mode and settings-based login (apiKeyHelper, env) do not apply; Claude Code asks before edits, commands and MCP calls');
+    row(io, 'Session settings', "isolated: your user and project allow and deny rules, hooks, plugins, default mode and settings-based login (apiKeyHelper, env) do not apply; each session starts in Claude Code's default permission mode, but your organization's managed policy still applies and can allow edits, commands or MCP calls without asking (the Wizard does not read it)");
   } else {
     row(io, 'Straddle plugin', installed);
     row(io, 'API MCP', client.apiMcp);
@@ -338,25 +338,30 @@ function section(textContent: string, heading: string): string[] {
   return lines.slice(start + 1, end < 0 ? undefined : end).filter((l) => l.trim());
 }
 
-function showPlan(io: Prompter, receipt: Receipt): void {
-  const plan = readRepoFile(receipt.repo, INTEGRATION_PLAN, receipt.exclude);
+// Integrate and Test apply the same approval rule to the plan (skills straddle-integrate and straddle-test, step 01-begin).
+function showPlan(io: Prompter, receipt: Receipt, route: SkillRoute): void {
+  const planFile = route.requiresAnyOf.find((f) => existsSync(join(receipt.repo, f))) ?? route.requiresAnyOf[0];
+  if (!planFile) return;
+  const plan = readRepoFile(receipt.repo, planFile, receipt.exclude);
   if (plan.kind === 'absent') return;
   if (plan.kind === 'skipped') {
-    io.say(io.bold(`Plan: ${INTEGRATION_PLAN}`));
+    io.say(io.bold(`Plan: ${planFile}`));
     io.say(`  Not shown: the Wizard does not open it because ${plan.reason}. Review it in your coding agent.`);
     io.say();
     return;
   }
   const state = /Plan state:\s*([^\n]+)/.exec(plan.text)?.[1]?.trim() ?? 'not recorded';
-  io.say(io.bold(`Plan: ${INTEGRATION_PLAN} (Plan state: ${state})`));
-  if (receipt.planSha256 && receipt.planSha256 !== plan.sha256) io.say('  The plan changed after the Plan step. Integrate reviews the current file.');
+  io.say(io.bold(`Plan: ${planFile} (Plan state: ${state})`));
+  if (planFile === INTEGRATION_PLAN && receipt.planSha256 && receipt.planSha256 !== plan.sha256) io.say(`  The plan changed after the Plan step. ${route.title} reviews the current file.`);
   for (const heading of ['File changes', 'Future Sandbox writes']) {
     io.say(`  ${heading}`);
     const lines = section(plan.text, heading);
     for (const line of lines.length ? lines : ['(section not found)']) io.say(`    ${line}`);
   }
-  io.say('  Approve or change the plan in your coding agent. Integrate asks for approval of the current plan, and every');
-  io.say('  Sandbox write gets its own preview and approval there. Nothing here counts as approval.');
+  io.say(`  ${route.title} runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan in`);
+  io.say(`  its own session. Approval given in an earlier session, including Plan's, does not carry over. If ${route.title} stops`);
+  io.say('  because the plan is not approved, approve the current plan there and ask it to continue. Every Sandbox write');
+  io.say('  still gets its own preview and approval there. Nothing here counts as approval.');
   io.say();
 }
 
@@ -412,6 +417,10 @@ async function developerReported(io: Prompter, skill: SkillName, where: string):
 
 type StepOutcome = 'advance' | number;
 
+function lastHandoffOrAbort(step?: StepRun): ReportedMarker | undefined {
+  return step?.reportedMarkers.findLast((m) => m.kind === 'handoff' || m.kind === 'abort');
+}
+
 async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: number, total: number, ctx: { bundle: Bundle; client: ClientState; opts: JourneyOptions }): Promise<StepOutcome> {
   const route = SKILLS[skill];
   const { repo } = receipt;
@@ -421,7 +430,7 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
     io.say(`${route.title} needs ${route.requiresAnyOf.join(' or ')}. Run \`wizard plan\` first; no code edit happens before the plan exists.`);
     return finish(receipt, 'blocked', `${route.title} needs ${route.requiresAnyOf.join(' or ')}`);
   }
-  if (skill === 'straddle-integrate') showPlan(io, receipt);
+  if (skill === 'straddle-integrate' || skill === 'straddle-test') showPlan(io, receipt, route);
 
   const config = straddleConfiguration(ctx.opts.env);
   if (route.sendsStraddleRequests && config.errors.length) {
@@ -450,13 +459,13 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
   const hookCommand = [process.execPath, HOOK_SCRIPT, '--events', eventsFile, '--repo', repo, '--gate', route.editGate.join(',')].map(quote).join(' ');
   const hook = [{ type: 'command', command: hookCommand }];
   // Flag settings override the developer's user settings, so an auto or accept-edits default mode never approves
-  // a step's tool calls: each one is asked in the client. Managed policy still wins, as it should.
+  // a step's tool calls. Managed policy still wins, as it should, and can allow them without a prompt.
   writeFileSync(settingsPath, JSON.stringify({ permissions: { defaultMode: 'default' }, hooks: {
     SessionStart: [{ hooks: hook }],
     SessionEnd: [{ hooks: hook }],
     Stop: [{ hooks: hook }],
     PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: hook }],
-    PostToolUse: [{ matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit', hooks: hook }],
+    PostToolUse: [{ matcher: 'Read|Bash|Edit|Write|MultiEdit|NotebookEdit', hooks: hook }],
   } }, null, 2));
 
   const step: StepRun = {
@@ -488,8 +497,10 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
     receipt.planSha256 = plan.kind === 'read' ? plan.sha256 : null;
   }
 
-  const handoff = step.reportedMarkers.findLast((m) => m.kind === 'handoff');
-  const abort = step.reportedMarkers.findLast((m) => m.kind === 'abort');
+  // The later of an abort and a handoff decides: an agent may abort, recover in the same session, and complete.
+  const last = lastHandoffOrAbort(step);
+  const handoff = last?.kind === 'handoff' ? last : undefined;
+  const abort = last?.kind === 'abort' ? last : undefined;
   const signal = exit.signal;
   const ended = exit.error ? `${label} could not start: ${exit.error}` : signal ? `${label} ended by signal ${signal}` : `${label} exited with code ${exit.code}`;
   io.say(io.bold(`${route.title} ended (${ended})`));
@@ -543,7 +554,7 @@ async function manualHandoff(io: Prompter, receipt: Receipt, skill: SkillName, v
   io.say();
   step.reportedMarkers = await developerReported(io, skill, 'Cursor');
   step.endedAt = new Date().toISOString();
-  const handoff = step.reportedMarkers.at(-1);
+  const handoff = lastHandoffOrAbort(step);
   if (handoff?.status && (SKILLS[skill].advanceOn as readonly string[]).includes(handoff.status)) {
     step.advanced = true;
     return 'advance';
@@ -583,9 +594,11 @@ function printReport(io: Prompter, receipt: Receipt, bundle: Bundle | null): num
   io.say(io.bold('Steps'));
   for (const skill of program.skills) {
     const run = latestRun(receipt, skill);
-    const handoff = run?.reportedMarkers.findLast((m) => m.kind === 'handoff');
+    const last = lastHandoffOrAbort(run);
+    const handoff = last?.kind === 'handoff' ? last : undefined;
+    const reported = handoff?.status ?? (last?.kind === 'abort' ? 'abort' : 'no handoff');
     const observed = !run ? 'not started' : run.eventSurface === 'observed' ? `observed ${run.observedSteps.length} step entries` : `progress ${run.eventSurface}`;
-    io.say(`  ${SKILLS[skill].title.padEnd(12)}${observed}; reported: ${handoff?.status ?? 'no handoff'}`);
+    io.say(`  ${SKILLS[skill].title.padEnd(12)}${observed}; reported: ${reported}`);
   }
   io.say();
   const changed = [...new Set(receipt.steps.flatMap((s) => s.changedFiles))].sort();
@@ -646,7 +659,9 @@ function printSaved(io: Prompter, receipt: Receipt): void {
   row(io, 'Choices', choicesText(receipt));
   if (receipt.exclude.length) row(io, 'Never opened', receipt.exclude.join(', '));
   for (const skill of programFor(receipt.program).skills) {
-    row(io, SKILLS[skill].title, advanced(receipt, skill) ? `handoff ${latestRun(receipt, skill)?.reportedMarkers.findLast((m) => m.kind === 'handoff')?.status}` : latestRun(receipt, skill) ? 'incomplete' : 'not started');
+    const run = latestRun(receipt, skill);
+    const last = lastHandoffOrAbort(run);
+    row(io, SKILLS[skill].title, advanced(receipt, skill) && last?.kind === 'handoff' ? `handoff ${last.status}` : run ? 'incomplete' : 'not started');
   }
   io.say('  Approvals from earlier sessions do not carry over; the agent asks again in a fresh session.');
   io.say('  The Wizard rechecks the bundle, your agent and the plan before continuing.');

@@ -16,7 +16,7 @@ function recorded(events: string) {
   return readFileSync(events, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
 }
 
-test('records step entry only from a completed Read of a skill step file, without file contents or prompts', () => {
+test('records step entry only after a completed read of a skill step file, without file contents or prompts', () => {
   const repo = nextRepo();
   const events = join(tempDir('events'), 'e.jsonl');
   const read = (hook_event_name: string, file_path: string) => ({ hook_event_name, tool_name: 'Read', tool_input: { file_path } });

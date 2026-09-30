@@ -165,6 +165,19 @@ test('default journey: isolated sessions from the verified bundle, plan before e
   }
 });
 
+test('readiness does not promise Claude Code permission prompts that a managed policy can switch off', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+  const claude = fakeClaude();
+
+  // Continue, then stop at Start: only the readiness screen matters.
+  const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '2'] });
+
+  assert.match(r.stdout, /Session settings\s+isolated: /);
+  assert.doesNotMatch(r.stdout, /asks before edits/);
+  assert.match(r.stdout, /managed policy still applies and can allow edits, commands or MCP calls without asking/);
+});
+
 test('Integrate never starts before the durable plan exists', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
@@ -176,6 +189,39 @@ test('Integrate never starts before the durable plan exists', async () => {
   assert.match(r.stdout, /Integrate needs straddle-integration-plan\.md\. Run `wizard plan` first/);
   assert.equal(claude.calls().filter((c) => c.includes('--settings')).length, 0);
   assert.equal(readReceipt(repo).state, 'blocked');
+});
+
+test('before Integrate and before Test the Wizard shows the plan state and where approval must happen, since it does not carry over between sessions', async () => {
+  for (const [program, title] of [['integrate', 'Integrate'], ['test', 'Test']] as const) {
+    const repo = nextRepo();
+    writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+
+    // Continue, then stop at Start.
+    const r = await runWizard([program, '--client', 'claude'], { cwd: repo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '2'] });
+
+    assert.match(r.stdout, /Plan: straddle-integration-plan\.md \(Plan state: Draft\)/, program);
+    assert.match(r.stdout, new RegExp(`${title} runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan`), program);
+    assert.match(r.stdout, /Approval given in an earlier session, including Plan's, does not carry over/, program);
+    assert.doesNotMatch(r.stdout, /Integrate asks for approval/, program);
+  }
+
+  const migrationRepo = nextRepo();
+  writeFiles(migrationRepo, { 'straddle-migration-plan.md': PLAN });
+  const mr = await runWizard(['test', '--client', 'claude'], { cwd: migrationRepo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '2'] });
+  assert.match(mr.stdout, /Plan: straddle-migration-plan\.md \(Plan state: Draft\)/);
+  assert.match(mr.stdout, /Test runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan/);
+});
+
+test('a step file the agent opens with a shell command is observed as entered, like one opened with Read', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+  const claude = fakeClaude();
+  claude.sessions({ 'straddle-integrate': { steps: ['01-begin', '05-execute'], shellSteps: ['06-review', '07-handoff'], text: handoff('straddle-integrate', 'complete', []) } });
+
+  const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+
+  assert.equal(r.code, 0, r.stdout);
+  assert.match(r.stdout, /Observed \(Claude Code hooks\): entered 01-begin, 05-execute, 06-review, 07-handoff\n/);
 });
 
 test('an edit the developer denies in the agent is not reported as a change, and the step stays blocked', async () => {
@@ -315,7 +361,7 @@ test('an interrupted agent session is recorded as aborted with preserved work, a
   assert.equal(readReceipt(repo).state, 'completed');
 });
 
-test('a reported handoff never outranks a reported abort or a failed session, on the first run or on resume', async () => {
+test('a reported handoff never outranks a later abort or a failed session, on the first run or on resume', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
   const draftThenAbort = `${handoff('straddle-plan', 'draft', [])}\nSTRADDLE_ABORT {"skill":"straddle-plan","reason":"developer stopped"}`;
@@ -336,6 +382,32 @@ test('a reported handoff never outranks a reported abort or a failed session, on
   assert.equal(resumed.code, 0, resumed.stdout);
   assert.equal(claude.calls().filter((c) => c.includes('/straddle:straddle-plan')).length, 3);
   assert.deepEqual(readReceipt(repo).steps.map((s) => s.advanced), [false, false, true]);
+});
+
+test('the later of a reported abort and handoff decides the step: a recovered session advances, a later abort still stops', async () => {
+  const abort = 'STRADDLE_ABORT {"skill":"straddle-integrate","step":"01-begin","reason":"plan not approved"}';
+  const complete = handoff('straddle-integrate', 'complete', []);
+  const run = async (text: string) => {
+    const repo = nextRepo();
+    writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+    const claude = fakeClaude();
+    claude.sessions({ 'straddle-integrate': { steps: ['01-begin', '07-handoff'], text } });
+    const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+    return { ...r, receipt: readReceipt(repo) };
+  };
+
+  const recovered = await run(`${abort}\nThe developer approved the plan in this session.\n${complete}`);
+  assert.equal(recovered.code, 0, recovered.stdout);
+  assert.equal(recovered.receipt.state, 'completed');
+  assert.equal(recovered.receipt.steps.at(-1)?.advanced, true);
+  assert.match(recovered.stdout, /Integrate\s+observed 2 step entries; reported: complete/);
+
+  const abortedAfterHandoff = await run(`${complete}\n${abort}`);
+  assert.equal(abortedAfterHandoff.code, 130, abortedAfterHandoff.stdout);
+  assert.match(abortedAfterHandoff.stdout, /the agent reported STRADDLE_ABORT: plan not approved/);
+  assert.equal(abortedAfterHandoff.receipt.steps.at(-1)?.advanced, false);
+  assert.match(abortedAfterHandoff.stdout, /Integrate\s+observed 2 step entries; reported: abort/);
+  assert.doesNotMatch(abortedAfterHandoff.stdout, /reported: complete/);
 });
 
 test('resume finishes cancelled upfront choices, applies new exclusions before inspecting, and hands corrected context to the agent', async () => {

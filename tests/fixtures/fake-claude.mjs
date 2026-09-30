@@ -79,9 +79,15 @@ function hook(event, payload) {
 hook('SessionStart', { source: 'startup' });
 // Like Claude Code: PreToolUse before the permission decision, PostToolUse only after the tool completed.
 // `denied` lists tool targets the developer refuses at the client's own permission prompt.
+// `shellSteps` are step files the agent opens with a Bash command instead of the Read tool.
 const deniedByDeveloper = new Set(script.denied ?? []);
+const stepFile = (step) => `${process.env.FAKE_PLUGIN_ROOT ?? '/plugin'}/skills/${skill}/steps/${step}.md`;
 for (const step of script.steps) {
-  const call = { tool_name: 'Read', tool_input: { file_path: `${process.env.FAKE_PLUGIN_ROOT ?? '/plugin'}/skills/${skill}/steps/${step}.md` } };
+  const call = { tool_name: 'Read', tool_input: { file_path: stepFile(step) } };
+  if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
+}
+for (const step of script.shellSteps ?? []) {
+  const call = { tool_name: 'Bash', tool_input: { command: `cat ${stepFile(step)}` } };
   if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
 }
 for (const w of script.writes ?? []) {
