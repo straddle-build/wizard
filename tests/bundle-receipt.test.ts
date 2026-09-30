@@ -12,7 +12,7 @@ test('verifies the pinned merged-source snapshot by content and reads skill vers
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.bundle.kind, 'merged-source-snapshot');
-  assert.equal(result.bundle.commit, '4bb8afe20b72448e0f1b12a42257075a5d53e26b');
+  assert.equal(result.bundle.commit, '643632e78654a4fa929873d0e1ec0ba15525a9e8');
   assert.equal(result.bundle.pluginVersion, '0.1.0');
   assert.deepEqual(Object.keys(result.bundle.skills).sort(), [
     'straddle-audit', 'straddle-best-practices', 'straddle-get-started', 'straddle-go-live', 'straddle-integrate',
@@ -32,7 +32,7 @@ test('accepts a kit release checkout: the kit/ manifest directory is inert metad
   const copy = tempDir('bundle');
   cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/node_modules') });
   mkdirSync(join(copy, 'kit'), { recursive: true }); // pinned commits from ME-810 on already carry kit/
-  writeFileSync(join(copy, 'kit', 'manifest.yaml'), 'plugin:\n  content_sha256: 1056487cca08a0783b34048228381dbf907806057969c9811f919dad2c8c5074\n');
+  writeFileSync(join(copy, 'kit', 'manifest.yaml'), 'plugin:\n  content_sha256: 9e9f46c34fe5bb97d6b75d849506c31c1412c61b147855ff523c96ae1e7a3833\n');
   writeFileSync(join(copy, 'kit', 'release-inputs.json'), '{}\n');
 
   assert.equal(loadBundle(copy).ok, true);
@@ -63,9 +63,9 @@ test('rejects a bundle whose runtime files differ from the pinned snapshot, one 
   const missing = loadBundle(tempDir('empty'));
 
   assert.equal(drifted.ok, false);
-  assert.match(drifted.ok ? '' : drifted.reason, /does not match the pinned straddle-build\/skills@4bb8afe snapshot/);
+  assert.match(drifted.ok ? '' : drifted.reason, /does not match the pinned straddle-build\/skills@643632e snapshot/);
   assert.equal(extra.ok, false);
-  assert.match(extra.ok ? '' : extra.reason, /outside the pinned straddle-build\/skills@4bb8afe snapshot that a client could load: hooks/);
+  assert.match(extra.ok ? '' : extra.reason, /outside the pinned straddle-build\/skills@643632e snapshot that a client could load: hooks/);
   assert.equal(missing.ok, false);
   assert.match(missing.ok ? '' : missing.reason, /not a Straddle skills bundle/);
 });

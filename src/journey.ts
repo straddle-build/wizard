@@ -358,8 +358,8 @@ function showPlan(io: Prompter, receipt: Receipt, route: SkillRoute): void {
     const lines = section(plan.text, heading);
     for (const line of lines.length ? lines : ['(section not found)']) io.say(`    ${line}`);
   }
-  io.say(`  ${route.title} runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan in`);
-  io.say(`  its own session. Approval given in an earlier session, including Plan's, does not carry over. If ${route.title} stops`);
+  io.say(`  ${route.title} runs only an approved plan: an approval recorded in the file that matches the current plan, or your`);
+  io.say(`  approval of the current plan in its own session. Editing the plan after approval voids the record. If ${route.title} stops`);
   io.say('  because the plan is not approved, approve the current plan there and ask it to continue. Every Sandbox write');
   io.say('  still gets its own preview and approval there. Nothing here counts as approval.');
   io.say();
@@ -663,7 +663,7 @@ function printSaved(io: Prompter, receipt: Receipt): void {
     const last = lastHandoffOrAbort(run);
     row(io, SKILLS[skill].title, advanced(receipt, skill) && last?.kind === 'handoff' ? `handoff ${last.status}` : run ? 'incomplete' : 'not started');
   }
-  io.say('  Approvals from earlier sessions do not carry over; the agent asks again in a fresh session.');
+  io.say('  Sandbox write approvals from earlier sessions do not carry over; a recorded plan approval does while the plan is unchanged.');
   io.say('  The Wizard rechecks the bundle, your agent and the plan before continuing.');
   io.say();
 }

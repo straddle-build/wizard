@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: straddle-build/skills
-          ref: 4bb8afe20b72448e0f1b12a42257075a5d53e26b
+          ref: 643632e78654a4fa929873d0e1ec0ba15525a9e8
           path: .straddle-skills
 
       - uses: actions/setup-node@v5

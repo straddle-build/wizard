@@ -88,8 +88,8 @@ test('first run without a bundle previews the snapshot fetch, and cancelling it 
   const r = await runWizard([], { cwd: repo, claude, env: { ...CONFIGURED, ...OFFLINE_GITHUB(cache) }, input: [...CHOOSE_CONTEXT, '2'] });
 
   assert.equal(r.code, 130, r.stdout + r.stderr);
-  assert.match(r.stdout, /merged-source snapshot straddle-build\/skills@4bb8afe \(plugin 0\.1\.0; not a tagged release\)/);
-  assert.match(r.stdout, /git -C \S+ fetch --depth 1 https:\/\/github\.com\/straddle-build\/skills\.git 4bb8afe20b72448e0f1b12a42257075a5d53e26b/);
+  assert.match(r.stdout, /merged-source snapshot straddle-build\/skills@643632e \(plugin 0\.1\.0; not a tagged release\)/);
+  assert.match(r.stdout, /git -C \S+ fetch --depth 1 https:\/\/github\.com\/straddle-build\/skills\.git 643632e78654a4fa929873d0e1ec0ba15525a9e8/);
   assert.deepEqual(readdirSync(cache), []);
   assert.equal(readReceipt(repo).state, 'aborted');
 });
@@ -106,9 +106,9 @@ test('first run fetches the pinned snapshot after confirmation, verifies it, and
   const status = await runWizard(['status', '--json'], { cwd: repo, claude, env });
 
   assert.equal(first.code, 0, first.stdout + first.stderr);
-  const snapshot = join(cache, 'straddle-wizard', 'skills-4bb8afe20b72448e0f1b12a42257075a5d53e26b');
+  const snapshot = join(cache, 'straddle-wizard', 'skills-643632e78654a4fa929873d0e1ec0ba15525a9e8');
   assert.equal(readReceipt(repo).bundle.path, snapshot);
-  assert.match(first.stdout, /Skill bundle\s+merged-source snapshot straddle-build\/skills@4bb8afe .*verified/);
+  assert.match(first.stdout, /Skill bundle\s+merged-source snapshot straddle-build\/skills@643632e .*verified/);
   assert.equal(JSON.parse(status.stdout).bundle.path, snapshot);
   assert.doesNotMatch(status.stdout, /fetch/);
 });
@@ -147,7 +147,7 @@ test('default journey: isolated sessions from the verified bundle, plan before e
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'completed');
   assert.equal(receipt.client, 'claude');
-  assert.equal(receipt.bundle.commit, '4bb8afe20b72448e0f1b12a42257075a5d53e26b');
+  assert.equal(receipt.bundle.commit, '643632e78654a4fa929873d0e1ec0ba15525a9e8');
   assert.deepEqual(receipt.steps.map((s) => [s.skill, s.reportedMarkers.at(-1)?.status]), [
     ['straddle-setup', 'ready_with_warnings'], ['straddle-plan', 'draft'], ['straddle-integrate', 'complete'], ['straddle-test', 'partial'],
   ]);
@@ -191,7 +191,7 @@ test('Integrate never starts before the durable plan exists', async () => {
   assert.equal(readReceipt(repo).state, 'blocked');
 });
 
-test('before Integrate and before Test the Wizard shows the plan state and where approval must happen, since it does not carry over between sessions', async () => {
+test('before Integrate and before Test the Wizard shows the plan state and where approval must happen, including that only a recorded approval of the current plan carries over', async () => {
   for (const [program, title] of [['integrate', 'Integrate'], ['test', 'Test']] as const) {
     const repo = nextRepo();
     writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
@@ -200,8 +200,8 @@ test('before Integrate and before Test the Wizard shows the plan state and where
     const r = await runWizard([program, '--client', 'claude'], { cwd: repo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '2'] });
 
     assert.match(r.stdout, /Plan: straddle-integration-plan\.md \(Plan state: Draft\)/, program);
-    assert.match(r.stdout, new RegExp(`${title} runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan`), program);
-    assert.match(r.stdout, /Approval given in an earlier session, including Plan's, does not carry over/, program);
+    assert.match(r.stdout, new RegExp(`${title} runs only an approved plan: an approval recorded in the file that matches the current plan`), program);
+    assert.match(r.stdout, /Editing the plan after approval voids the record/, program);
     assert.doesNotMatch(r.stdout, /Integrate asks for approval/, program);
   }
 
@@ -209,7 +209,7 @@ test('before Integrate and before Test the Wizard shows the plan state and where
   writeFiles(migrationRepo, { 'straddle-migration-plan.md': PLAN });
   const mr = await runWizard(['test', '--client', 'claude'], { cwd: migrationRepo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '2'] });
   assert.match(mr.stdout, /Plan: straddle-migration-plan\.md \(Plan state: Draft\)/);
-  assert.match(mr.stdout, /Test runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan/);
+  assert.match(mr.stdout, /Test runs only an approved plan: an approval recorded in the file that matches the current plan/);
 });
 
 test('a step file the agent opens with a shell command is observed as entered, like one opened with Read', async () => {
@@ -333,7 +333,7 @@ test('client login loss blocks the handoff with a repair, and resume rechecks it
   assert.equal(resumed.code, 0, resumed.stdout);
   assert.match(resumed.stdout, /Saved run: setup program, blocked/);
   assert.match(resumed.stdout, /Choices\s+charges, marketplace, TypeScript, webhook endpoint/);
-  assert.match(resumed.stdout, /Approvals from earlier sessions do not carry over/);
+  assert.match(resumed.stdout, /Sandbox write approvals from earlier sessions do not carry over; a recorded plan approval does while the plan is unchanged/);
   assert.equal(readReceipt(repo).state, 'completed');
 });
 
@@ -517,7 +517,7 @@ test('install, status, update and remove use native plugin commands and report d
   assert.equal(install.code, 0, install.stdout + install.stderr);
   assert.match(install.stdout, /ok\s+claude plugin install straddle@straddle/);
   const parsed = JSON.parse(status.stdout);
-  assert.equal(parsed.bundle.commit, '4bb8afe20b72448e0f1b12a42257075a5d53e26b');
+  assert.equal(parsed.bundle.commit, '643632e78654a4fa929873d0e1ec0ba15525a9e8');
   assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'claude').plugin, { state: 'installed', version: '0.1.0', verified: true });
   assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'cursor').plugin, { state: 'unverified', version: null, verified: false });
   assert.equal(parsed.credentials.STRADDLE_API_KEY, 'missing');
