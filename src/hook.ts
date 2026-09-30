@@ -12,6 +12,8 @@ import { field, parseJson, text } from './json.ts';
 import { SKILL_ARTIFACTS } from './programs.ts';
 
 const STEP_FILE = /\/skills\/(straddle-[a-z-]+)\/steps\/(\d{2}-[a-z0-9-]+)\.md$/;
+// Step files a shell command names, such as `cat <bundle>/skills/straddle-integrate/steps/06-review.md`.
+const STEP_FILES_IN_COMMAND = /\/skills\/(straddle-[a-z-]+)\/steps\/(\d{2}-[a-z0-9-]+)\.md\b/g;
 const EDIT_TOOLS: Record<string, true> = { Edit: true, Write: true, MultiEdit: true, NotebookEdit: true };
 
 const { values } = parseArgs({ options: { events: { type: 'string' }, repo: { type: 'string' }, gate: { type: 'string' } } });
@@ -55,6 +57,9 @@ if (hookEvent === 'SessionStart') {
 } else if (hookEvent === 'PostToolUse' && tool === 'Read') {
   const step = STEP_FILE.exec(text(field(input, 'file_path')) ?? '');
   if (step) record({ at, kind: 'step-entered', skill: step[1]!, step: step[2]! });
+} else if (hookEvent === 'PostToolUse' && tool === 'Bash') {
+  // ponytail: a completed command that names a step file counts as opening it; the skills name one only to read it.
+  for (const step of (text(field(input, 'command')) ?? '').matchAll(STEP_FILES_IN_COMMAND)) record({ at, kind: 'step-entered', skill: step[1]!, step: step[2]! });
 } else if (hookEvent === 'PostToolUse' && EDIT_TOOLS[tool]) {
   const path = text(field(input, 'file_path')) ?? text(field(input, 'notebook_path'));
   const rel = path ? repoRelative(path) : null;

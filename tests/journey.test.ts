@@ -178,6 +178,18 @@ test('Integrate never starts before the durable plan exists', async () => {
   assert.equal(readReceipt(repo).state, 'blocked');
 });
 
+test('a step file the agent opens with a shell command is observed as entered, like one opened with Read', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+  const claude = fakeClaude();
+  claude.sessions({ 'straddle-integrate': { steps: ['01-begin', '05-execute'], shellSteps: ['06-review', '07-handoff'], text: handoff('straddle-integrate', 'complete', []) } });
+
+  const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+
+  assert.equal(r.code, 0, r.stdout);
+  assert.match(r.stdout, /Observed \(Claude Code hooks\): entered 01-begin, 05-execute, 06-review, 07-handoff\n/);
+});
+
 test('an edit the developer denies in the agent is not reported as a change, and the step stays blocked', async () => {
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
