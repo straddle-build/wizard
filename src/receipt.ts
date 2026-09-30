@@ -3,11 +3,10 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 import type { Bundle } from './bundle.ts';
 import { CLIENT_NAMES, type ClientName } from './clients.ts';
-import type { ObservedEvent, ReportedMarker } from './events.ts';
 import { field } from './json.ts';
 import { PROGRAMS, isRunnableSkill, type ProgramName, type SkillName } from './programs.ts';
 
-export const RECEIPT_SCHEMA = 'straddle-wizard/receipt@1';
+export const RECEIPT_SCHEMA = 'straddle-wizard/receipt@2';
 export const WIZARD_DIR = '.straddle-wizard';
 
 export type RunState = 'ready' | 'running' | 'blocked' | 'aborted' | 'completed';
@@ -23,29 +22,26 @@ export const CHOICE_VALUES = {
 
 export type Choices = { [K in keyof typeof CHOICE_VALUES]: (typeof CHOICE_VALUES)[K][number] };
 
-export interface StepRun {
-  skill: SkillName;
-  skillVersion: string;
+// One agent session the Wizard opened. Progress lives in the contract files and events.jsonl, not here.
+export interface SessionRun {
+  client: ClientName;
+  // The client's own session id, so `wizard resume` can reopen it. Null when the client exposed none.
+  sessionId: string | null;
+  // The program steps this session was asked to run, in order.
+  skills: SkillName[];
   startedAt: string;
   endedAt: string | null;
   exit: { code: number | null; signal: string | null } | null;
-  // How the Wizard learns about this session. Only 'observed' comes from client events it reads.
-  eventSurface: 'observed' | 'unverified' | 'unsupported';
-  observedSteps: string[];
-  observedEvents: ObservedEvent[];
-  // Printed by the model. Best-effort, never proof of completion or approval.
-  reportedMarkers: ReportedMarker[];
   changedFiles: string[];
   // What the before-and-after comparison could not cover (file limit, unreadable paths). Empty means it covered
   // every file discovery may open.
   evidenceLimits: string[];
+  // The skill's "Verify before merging" list as the agent last printed it in this session.
   checklist: string[];
-  // The Wizard's own decision, saved once: true only when the session ended normally, did not last report an abort, and printed
-  // a handoff status after which the next step may start. Resume reads this, never the markers alone.
-  advanced: boolean;
 }
 
-// Deliberately no approval field: approvals live in the native client session that asked for them.
+// Deliberately no approval field: approvals live in the native client session that asked for them, and a plan
+// approval lives in the plan file.
 export interface Receipt {
   schema: typeof RECEIPT_SCHEMA;
   runId: string;
@@ -59,10 +55,9 @@ export interface Receipt {
   exclude: string[];
   context: { language: Answer; framework: Answer; choices: Choices | null };
   bundle: Pick<Bundle, 'kind' | 'pluginVersion' | 'contentSha256' | 'path'> | null;
-  planSha256: string | null;
   state: RunState;
   stateReason: string;
-  steps: StepRun[];
+  sessions: SessionRun[];
 }
 
 export function newReceipt(opts: { repo: string; program: ProgramName; pid: number }): Receipt {
@@ -80,10 +75,9 @@ export function newReceipt(opts: { repo: string; program: ProgramName; pid: numb
     exclude: [],
     context: { language: { value: 'unknown', source: 'detected' }, framework: { value: 'unknown', source: 'detected' }, choices: null },
     bundle: null,
-    planSha256: null,
     state: 'ready',
     stateReason: 'context confirmed',
-    steps: [],
+    sessions: [],
   };
 }
 
@@ -105,11 +99,13 @@ export function saveReceipt(receipt: Receipt): void {
 export type LoadedReceipt = { kind: 'none' } | { kind: 'invalid'; reason: string } | { kind: 'found'; receipt: Receipt };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Claude Code and Codex session ids. The id becomes a command argument and part of a file name lookup.
+const SESSION_ID = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
 const RUN_STATES: Record<string, true> = { ready: true, running: true, blocked: true, aborted: true, completed: true };
 const PLUGIN_LOADS: Record<string, true> = { installed: true, session: true, manual: true };
 
-// The receipt sits in the repository, so it is untrusted input: every value that names a path, a program, a skill or
-// a client is checked before the Wizard uses it. The first problem found, or null.
+// The receipt sits in the repository, so it is untrusted input: every value that names a path, a program, a skill, a
+// client or a session is checked before the Wizard uses it. The first problem found, or null.
 function receiptProblem(r: unknown): string | null {
   if (field(r, 'schema') !== RECEIPT_SCHEMA) return `unknown schema ${JSON.stringify(field(r, 'schema'))}`;
   const runId = field(r, 'runId');
@@ -134,19 +130,18 @@ function receiptProblem(r: unknown): string | null {
   if (choices !== null && !Object.entries(CHOICE_VALUES).every(([key, values]) => (values as readonly unknown[]).includes(field(choices, key)))) return 'invalid choices';
   const bundlePath = field(field(r, 'bundle'), 'path');
   if (field(r, 'bundle') !== null && typeof bundlePath !== 'string') return 'invalid bundle';
-  const planSha256 = field(r, 'planSha256');
-  if (planSha256 !== null && typeof planSha256 !== 'string') return 'invalid plan hash';
-  const steps = field(r, 'steps');
-  if (!Array.isArray(steps)) return 'missing steps';
-  for (const step of steps) {
-    const skill = field(step, 'skill');
-    if (typeof skill !== 'string' || !isRunnableSkill(skill)) return 'unknown step skill';
-    for (const key of ['observedSteps', 'changedFiles', 'evidenceLimits', 'checklist']) {
-      const list = field(step, key);
-      if (!Array.isArray(list) || !list.every((s) => typeof s === 'string')) return `invalid step ${key}`;
+  const sessions = field(r, 'sessions');
+  if (!Array.isArray(sessions)) return 'missing sessions';
+  for (const session of sessions) {
+    if (!(CLIENT_NAMES as readonly unknown[]).includes(field(session, 'client'))) return 'unknown session client';
+    const id = field(session, 'sessionId');
+    if (id !== null && !(typeof id === 'string' && SESSION_ID.test(id))) return 'invalid session id';
+    const skills = field(session, 'skills');
+    if (!Array.isArray(skills) || !skills.every((s) => typeof s === 'string' && isRunnableSkill(s))) return 'unknown session skill';
+    for (const key of ['changedFiles', 'evidenceLimits', 'checklist']) {
+      const list = field(session, key);
+      if (!Array.isArray(list) || !list.every((s) => typeof s === 'string')) return `invalid session ${key}`;
     }
-    for (const key of ['observedEvents', 'reportedMarkers']) if (!Array.isArray(field(step, key))) return `invalid step ${key}`;
-    if (typeof field(step, 'advanced') !== 'boolean') return 'invalid step advanced';
   }
   return null;
 }
@@ -175,8 +170,8 @@ export function loadReceipt(repo: string): LoadedReceipt {
   receipt.repo = repo;
   if (receipt.state === 'running' && !pidAlive(receipt.wizardPid)) {
     receipt.state = 'aborted';
-    receipt.stateReason = 'the Wizard stopped while a step was running; work already done is kept';
-    const last = receipt.steps.at(-1);
+    receipt.stateReason = 'the Wizard stopped while your agent was running; the work already done stays';
+    const last = receipt.sessions.at(-1);
     if (last && last.endedAt === null) last.endedAt = receipt.updatedAt;
   }
   return { kind: 'found', receipt };

@@ -61,7 +61,7 @@ test('Codex: a same-version installed copy that differs from the bundle is repor
   assert.equal(repaired.code, 0, repaired.stdout);
   assert.match(repaired.stdout, /Straddle plugin in Codex: installed 0\.1\.0, matches the Wizard's bundle/);
   assert.equal(foreign.code, 1, foreign.stdout);
-  assert.match(foreign.stdout, /Codex already has a marketplace named "straddle" at .*, not the verified .*\. The Wizard does not replace it\./);
+  assert.match(foreign.stdout, /Codex already has a marketplace named "straddle" at .*, not the verified .*\. I won't replace it\./);
 });
 
 test('Claude Code: install, update and removal keep unrelated MCP servers', { skip: !claudeDir }, async () => {

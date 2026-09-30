@@ -30,10 +30,11 @@ export function writeFiles(root: string, files: Record<string, string>): void {
   }
 }
 
+// A Next.js app with no payment provider, so the integration program has no Migrate step.
 export function nextRepo(): string {
   const repo = tempDir('repo');
   writeFiles(repo, {
-    'package.json': JSON.stringify({ name: 'shop', dependencies: { next: '15.0.0', react: '19.0.0', stripe: '17.0.0' }, devDependencies: { typescript: '5.6.0' } }),
+    'package.json': JSON.stringify({ name: 'shop', dependencies: { next: '15.0.0', react: '19.0.0' }, devDependencies: { typescript: '5.6.0' } }),
     'tsconfig.json': '{}',
     'src/app/page.tsx': 'export default function Page() { return null }\n',
   });
@@ -46,6 +47,8 @@ export interface FakeClaude {
   setState(patch: Record<string, unknown>): void;
   sessions(scripts: Record<string, unknown>): void;
   calls(): string[];
+  // Every status line the session rendered, in order.
+  statusLines(): string[];
 }
 
 export function fakeClaude(): FakeClaude {
@@ -53,6 +56,10 @@ export function fakeClaude(): FakeClaude {
   const state = tempDir('claude-state');
   symlinkSync(join(ROOT, 'tests', 'fixtures', 'fake-claude.mjs'), join(bin, 'claude'));
   writeFileSync(join(state, 'sessions.json'), '{}');
+  const lines = (name: string) => {
+    const path = join(state, name);
+    return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n') : [];
+  };
   return {
     bin,
     state,
@@ -64,10 +71,8 @@ export function fakeClaude(): FakeClaude {
     sessions(scripts) {
       writeFileSync(join(state, 'sessions.json'), JSON.stringify(scripts));
     },
-    calls() {
-      const path = join(state, 'calls.log');
-      return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n') : [];
-    },
+    calls: () => lines('calls.log'),
+    statusLines: () => lines('statusline.log'),
   };
 }
 

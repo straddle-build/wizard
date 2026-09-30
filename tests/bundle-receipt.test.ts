@@ -87,7 +87,7 @@ test('a receipt left running by a Wizard that no longer exists loads as aborted'
   assert.equal(loaded.kind, 'found');
   if (loaded.kind !== 'found') return;
   assert.equal(loaded.receipt.state, 'aborted');
-  assert.match(loaded.receipt.stateReason, /Wizard stopped while a step was running/);
+  assert.match(loaded.receipt.stateReason, /the Wizard stopped while your agent was running/);
 });
 
 test('an unreadable receipt is reported, not silently replaced', () => {
@@ -101,14 +101,16 @@ test('an unreadable receipt is reported, not silently replaced', () => {
   assert.equal(loadReceipt(nextRepo()).kind, 'none');
 });
 
-test('a receipt whose run id, program, client or step skill is not the Wizard\'s own is invalid, so it never drives a path or a lookup', () => {
+test('a receipt whose run id, program, client, session skill or session id is not the Wizard\'s own is invalid, so it never drives a path, a lookup or a command', () => {
   const repo = nextRepo();
   const good = newReceipt({ repo, program: 'plan', pid: 1 });
   const cases: Array<[string, Record<string, unknown>]> = [
     ['runId', { runId: '../../..' }],
     ['program', { program: 'constructor' }],
     ['client', { client: 'bash' }],
-    ['step skill', { steps: [{ skill: '../x', observedSteps: [], observedEvents: [], reportedMarkers: [], changedFiles: [], evidenceLimits: [], checklist: [], advanced: false }] }],
+    ['session skill', { sessions: [{ client: 'claude', sessionId: null, skills: ['../x'], changedFiles: [], evidenceLimits: [], checklist: [] }] }],
+    ['session id', { sessions: [{ client: 'claude', sessionId: '--dangerously-skip-permissions', skills: ['straddle-plan'], changedFiles: [], evidenceLimits: [], checklist: [] }] }],
+    ['session client', { sessions: [{ client: 'bash', sessionId: null, skills: ['straddle-plan'], changedFiles: [], evidenceLimits: [], checklist: [] }] }],
     ['choices', { context: { ...good.context, choices: { products: 'x', integrationType: 'direct', sdk: 'Go', notificationPath: 'FIFO endpoint' } } }],
   ];
   saveReceipt(good);

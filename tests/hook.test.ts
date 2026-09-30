@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { ROOT, nextRepo, tempDir, writeFiles } from './helpers.ts';
@@ -21,7 +21,7 @@ test('records step entry only after a completed read of a skill step file, witho
   const events = join(tempDir('events'), 'e.jsonl');
   const read = (hook_event_name: string, file_path: string) => ({ hook_event_name, tool_name: 'Read', tool_input: { file_path } });
 
-  runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'SessionStart', transcript_path: '/t/s.jsonl', source: 'startup' });
+  runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'SessionStart', session_id: 'c0ffee00-1111-2222-3333-444455556666', transcript_path: '/t/s.jsonl', source: 'startup' });
   // An attempted read the developer then denies never reaches PostToolUse, so it is not a step entry.
   runHook(repo, events, 'straddle-integration-plan.md', read('PreToolUse', '/b/skills/straddle-plan/steps/02-sources.md'));
   runHook(repo, events, 'straddle-integration-plan.md', read('PostToolUse', '/b/skills/straddle-plan/steps/03-write-plan.md'));
@@ -30,7 +30,7 @@ test('records step entry only after a completed read of a skill step file, witho
 
   const lines = recorded(events).map(({ at, ...rest }) => rest);
   assert.deepEqual(lines, [
-    { kind: 'session-start', transcript: '/t/s.jsonl' },
+    { kind: 'session-start', session: 'c0ffee00-1111-2222-3333-444455556666', transcript: '/t/s.jsonl' },
     { kind: 'step-entered', skill: 'straddle-plan', step: '03-write-plan' },
   ]);
   assert.ok(!readFileSync(events, 'utf8').includes('sk_test_secret'));
@@ -43,6 +43,8 @@ test('denies code edits in the repository until the durable plan exists, and rec
 
   assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('PreToolUse', 'src/straddle.ts')).decision, 'deny');
   assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('PreToolUse', 'straddle-integration-plan.md')).decision, undefined);
+  // Setup writes its state file before any plan exists.
+  assert.equal(runHook(repo, events, 'straddle-integration-plan.md', write('PreToolUse', 'straddle-setup.md')).decision, undefined);
   runHook(repo, events, 'straddle-integration-plan.md', write('PostToolUse', 'straddle-integration-plan.md'));
 
   writeFiles(repo, { 'straddle-integration-plan.md': '# Straddle integration plan\n' });
@@ -60,4 +62,21 @@ test('fails closed on an edit payload it cannot read', () => {
   const events = join(tempDir('events'), 'e.jsonl');
 
   assert.equal(runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: {} }).decision, 'deny');
+});
+
+test('Stop and SessionEnd record the markers the agent printed, each once however many turns end', () => {
+  const repo = nextRepo();
+  const dir = tempDir('events');
+  const events = join(dir, 'e.jsonl');
+  const transcript = join(dir, 't.jsonl');
+  writeFileSync(transcript, JSON.stringify({ type: 'assistant', uuid: 'a1', message: { content: [{ type: 'text', text: 'STRADDLE_HANDOFF {"skill":"straddle-setup","status":"ready","report":"ready"}' }] } }) + '\n');
+
+  runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'Stop', transcript_path: transcript });
+  runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'SessionEnd', reason: 'prompt_input_exit', transcript_path: transcript });
+
+  assert.deepEqual(recorded(events).map((e) => e.kind === 'marker' ? [e.kind, e.marker.skill, e.marker.status] : [e.kind]), [
+    ['turn-end'],
+    ['marker', 'straddle-setup', 'ready'],
+    ['session-end'],
+  ]);
 });

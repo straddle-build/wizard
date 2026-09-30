@@ -1,19 +1,19 @@
 #!/usr/bin/env node
-// Claude Code hook command installed per session through `claude --settings`. It records only event kind,
-// skill step names and repository-relative edit paths: never prompts, file contents or tool output.
+// Claude Code hook command installed per session through `claude --settings`. It records only event kind, the
+// session id, skill step names, repository-relative edit paths, and the STRADDLE_* markers the agent printed: never
+// prompts, file contents or tool output.
 // Step entries and edits come from PostToolUse, which runs only after a tool call was allowed and completed;
 // an attempted call the client or developer denies is never recorded as progress or a change.
+// Stop (each turn end) and SessionEnd sweep the transcript for markers, recording each one once.
 // PreToolUse enforces "no code edit before the durable plan exists" for Claude Code's file-edit tools.
 import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
-import type { ObservedEvent } from './events.ts';
+import { STEP_FILES, appendEvents, transcriptMarkers, type ObservedEvent } from './events.ts';
 import { field, parseJson, text } from './json.ts';
 import { SKILL_ARTIFACTS } from './programs.ts';
 
 const STEP_FILE = /\/skills\/(straddle-[a-z-]+)\/steps\/(\d{2}-[a-z0-9-]+)\.md$/;
-// Step files a shell command names, such as `cat <bundle>/skills/straddle-integrate/steps/06-review.md`.
-const STEP_FILES_IN_COMMAND = /\/skills\/(straddle-[a-z-]+)\/steps\/(\d{2}-[a-z0-9-]+)\.md\b/g;
 const EDIT_TOOLS: Record<string, true> = { Edit: true, Write: true, MultiEdit: true, NotebookEdit: true };
 
 const { values } = parseArgs({ options: { events: { type: 'string' }, repo: { type: 'string' }, gate: { type: 'string' } } });
@@ -47,19 +47,19 @@ function deny(reason: string): void {
 }
 
 if (hookEvent === 'SessionStart') {
+  const session = text(field(payload, 'session_id'));
   const transcript = text(field(payload, 'transcript_path'));
-  record(transcript ? { at, kind: 'session-start', transcript } : { at, kind: 'session-start' });
-} else if (hookEvent === 'SessionEnd') {
+  record({ at, kind: 'session-start', ...(session ? { session } : {}), ...(transcript ? { transcript } : {}) });
+} else if (hookEvent === 'SessionEnd' || hookEvent === 'Stop') {
   const reason = text(field(payload, 'reason'));
-  record(reason ? { at, kind: 'session-end', reason } : { at, kind: 'session-end' });
-} else if (hookEvent === 'Stop') {
-  record({ at, kind: 'turn-end' });
+  record(hookEvent === 'Stop' ? { at, kind: 'turn-end' } : reason ? { at, kind: 'session-end', reason } : { at, kind: 'session-end' });
+  appendEvents(eventsFile, transcriptMarkers(text(field(payload, 'transcript_path')) ?? '', at));
 } else if (hookEvent === 'PostToolUse' && tool === 'Read') {
   const step = STEP_FILE.exec(text(field(input, 'file_path')) ?? '');
   if (step) record({ at, kind: 'step-entered', skill: step[1]!, step: step[2]! });
 } else if (hookEvent === 'PostToolUse' && tool === 'Bash') {
   // ponytail: a completed command that names a step file counts as opening it; the skills name one only to read it.
-  for (const step of (text(field(input, 'command')) ?? '').matchAll(STEP_FILES_IN_COMMAND)) record({ at, kind: 'step-entered', skill: step[1]!, step: step[2]! });
+  for (const step of (text(field(input, 'command')) ?? '').matchAll(STEP_FILES)) record({ at, kind: 'step-entered', skill: step[1]!, step: step[2]! });
 } else if (hookEvent === 'PostToolUse' && EDIT_TOOLS[tool]) {
   const path = text(field(input, 'file_path')) ?? text(field(input, 'notebook_path'));
   const rel = path ? repoRelative(path) : null;
