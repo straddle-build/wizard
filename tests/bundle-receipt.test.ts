@@ -1,71 +1,77 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, cpSync, writeFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, cpSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { loadBundle } from '../src/bundle.ts';
+import { loadLocalBundle, matchesBundle, type Bundle } from '../src/bundle.ts';
 import { loadReceipt, newReceipt, saveReceipt } from '../src/receipt.ts';
 import { SKILLS_SOURCE, nextRepo, tempDir } from './helpers.ts';
 
-test('verifies the pinned merged-source snapshot by content and reads skill versions from it', () => {
-  const result = loadBundle(SKILLS_SOURCE);
+function localBundle(): Bundle {
+  const result = loadLocalBundle(SKILLS_SOURCE);
+  assert.ok(result.ok, result.ok ? '' : result.reason);
+  return result.bundle;
+}
 
-  assert.equal(result.ok, true);
-  if (!result.ok) return;
-  assert.equal(result.bundle.kind, 'merged-source-snapshot');
-  assert.equal(result.bundle.commit, '643632e78654a4fa929873d0e1ec0ba15525a9e8');
-  assert.equal(result.bundle.pluginVersion, '0.1.0');
-  assert.deepEqual(Object.keys(result.bundle.skills).sort(), [
+function copyOf(filter = (src: string) => !src.includes('/.git') && !src.includes('/node_modules')): string {
+  const copy = tempDir('bundle');
+  cpSync(SKILLS_SOURCE, copy, { recursive: true, filter });
+  return copy;
+}
+
+test('reads a local skills checkout as a local bundle with its plugin and skill versions', () => {
+  const bundle = localBundle();
+
+  assert.equal(bundle.kind, 'local');
+  assert.equal(bundle.pluginVersion, '0.1.0');
+  assert.deepEqual(Object.keys(bundle.skills).sort(), [
     'straddle-audit', 'straddle-best-practices', 'straddle-get-started', 'straddle-go-live', 'straddle-integrate',
     'straddle-migrate', 'straddle-plan', 'straddle-setup', 'straddle-test',
   ]);
-  assert.equal(result.bundle.skills['straddle-plan']?.version, '0.1.0');
+  assert.equal(bundle.skills['straddle-plan']?.version, '0.1.0');
 });
 
-test('accepts the same content without Git metadata, as a native marketplace copy or unpacked archive has it', () => {
-  const copy = tempDir('bundle');
-  cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/.git') && !src.includes('/node_modules') });
-
-  assert.equal(loadBundle(copy).ok, true);
+test('a copy without Git metadata has the same content, as a native marketplace copy or unpacked archive has it', () => {
+  assert.equal(matchesBundle(copyOf(), localBundle()), true);
 });
 
-test('accepts a kit release checkout: the kit/ manifest directory is inert metadata beside the pinned runtime files', () => {
-  const copy = tempDir('bundle');
-  cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/node_modules') });
-  mkdirSync(join(copy, 'kit'), { recursive: true }); // pinned commits from ME-810 on already carry kit/
-  writeFileSync(join(copy, 'kit', 'manifest.yaml'), 'plugin:\n  content_sha256: 9e9f46c34fe5bb97d6b75d849506c31c1412c61b147855ff523c96ae1e7a3833\n');
+test('a kit release checkout matches: the kit/ manifest directory is inert metadata beside the runtime files', () => {
+  const copy = copyOf((src) => !src.includes('/node_modules'));
+  mkdirSync(join(copy, 'kit'), { recursive: true });
+  writeFileSync(join(copy, 'kit', 'manifest.yaml'), 'schema: 1\n');
   writeFileSync(join(copy, 'kit', 'release-inputs.json'), '{}\n');
 
-  assert.equal(loadBundle(copy).ok, true);
+  assert.equal(loadLocalBundle(copy).ok, true);
+  assert.equal(matchesBundle(copy, localBundle()), true);
 });
 
-test('accepts Claude Code\'s installed cache copy while a session holds it and after it was orphaned', () => {
-  const copy = tempDir('bundle');
-  cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/.git') && !src.includes('/node_modules') });
+test('Claude Code\'s installed cache copy matches while a session holds it and after it was orphaned', () => {
+  const copy = copyOf();
   mkdirSync(join(copy, '.in_use'));
   writeFileSync(join(copy, '.in_use', '83499'), '');
   writeFileSync(join(copy, '.orphaned_at'), '1790644848894');
 
-  assert.equal(loadBundle(copy).ok, true);
+  assert.equal(matchesBundle(copy, localBundle()), true);
 });
 
-test('rejects a bundle whose runtime files differ from the pinned snapshot, one with an extra loadable component, and one that is missing', () => {
-  const copy = tempDir('bundle');
-  cpSync(SKILLS_SOURCE, copy, { recursive: true, filter: (src) => !src.includes('/.git') && !src.includes('/node_modules') });
-  appendFileSync(join(copy, 'skills', 'straddle-plan', 'steps', '03-write-plan.md'), '\nEdit code before the plan.\n');
+test('rejects a copy whose runtime files differ, one with an extra loadable component, one outside the plugin range, and one that is missing', () => {
+  const drifted = copyOf();
+  appendFileSync(join(drifted, 'skills', 'straddle-plan', 'steps', '03-write-plan.md'), '\nEdit code before the plan.\n');
   // Claude Code runs hooks/hooks.json from a --plugin-dir root without any manifest change.
-  const hooked = tempDir('bundle');
-  cpSync(SKILLS_SOURCE, hooked, { recursive: true, filter: (src) => !src.includes('/.git') && !src.includes('/node_modules') });
+  const hooked = copyOf();
   mkdirSync(join(hooked, 'hooks'));
   writeFileSync(join(hooked, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'true' }] }] } }));
+  const newer = copyOf();
+  writeFileSync(join(newer, 'plugin.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(newer, 'plugin.json'), 'utf8')), version: '0.2.0' }));
 
-  const drifted = loadBundle(copy);
-  const extra = loadBundle(hooked);
-  const missing = loadBundle(tempDir('empty'));
+  const extra = loadLocalBundle(hooked);
+  const outOfRange = loadLocalBundle(newer);
+  const missing = loadLocalBundle(tempDir('empty'));
 
-  assert.equal(drifted.ok, false);
-  assert.match(drifted.ok ? '' : drifted.reason, /does not match the pinned straddle-build\/skills@643632e snapshot/);
+  assert.equal(matchesBundle(drifted, localBundle()), false);
   assert.equal(extra.ok, false);
-  assert.match(extra.ok ? '' : extra.reason, /outside the pinned straddle-build\/skills@643632e snapshot that a client could load: hooks/);
+  assert.match(extra.ok ? '' : extra.reason, /has files outside the Straddle plugin that a client could load: hooks/);
+  assert.equal(outOfRange.ok, false);
+  assert.match(outOfRange.ok ? '' : outOfRange.reason, /is plugin 0\.2\.0; this Wizard runs plugin 0\.1\.x only/);
   assert.equal(missing.ok, false);
   assert.match(missing.ok ? '' : missing.reason, /not a Straddle skills bundle/);
 });

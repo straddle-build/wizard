@@ -58,7 +58,7 @@ export interface Receipt {
   repo: string;
   exclude: string[];
   context: { language: Answer; framework: Answer; choices: Choices | null };
-  bundle: Pick<Bundle, 'kind' | 'repository' | 'commit' | 'pluginVersion' | 'path'> | null;
+  bundle: Pick<Bundle, 'kind' | 'pluginVersion' | 'contentSha256' | 'path'> | null;
   planSha256: string | null;
   state: RunState;
   stateReason: string;

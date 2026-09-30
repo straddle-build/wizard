@@ -1,17 +1,22 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { crc32 } from 'node:zlib';
+import { RUNTIME_PATHS } from '../src/bundle.ts';
 import type { Receipt } from '../src/receipt.ts';
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const CLI = join(ROOT, 'src', 'cli.ts');
 
-// The merged skills source at the pinned commit. Tests verify the real bundle, never a copy.
+// A straddle-build/skills checkout: the local --bundle most tests use, and the content of the fixture plugin releases.
 export const SKILLS_SOURCE = process.env.STRADDLE_SKILLS_SOURCE ?? join(ROOT, '.straddle-skills');
 if (!existsSync(join(SKILLS_SOURCE, 'plugin.json'))) {
-  throw new Error('Set STRADDLE_SKILLS_SOURCE to a straddle-build/skills checkout at the pinned commit');
+  throw new Error('Set STRADDLE_SKILLS_SOURCE to a straddle-build/skills checkout with plugin 0.1.x');
 }
 
 export function tempDir(label: string): string {
@@ -75,6 +80,8 @@ export function runWizard(args: string[], opts: { cwd: string; input?: string[];
     HOME: opts.cwd,
     NO_COLOR: '1',
     STRADDLE_WIZARD_BUNDLE: SKILLS_SOURCE,
+    // Nothing listens here, so a test that forgets its fixture release server never reaches GitHub.
+    STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases',
     ...(opts.claude ? { FAKE_CLAUDE_STATE: opts.claude.state } : {}),
     ...opts.env,
   };
@@ -91,4 +98,86 @@ export function runWizard(args: string[], opts: { cwd: string; input?: string[];
 
 export function readReceipt(repo: string): Receipt {
   return JSON.parse(readFileSync(join(repo, '.straddle-wizard', 'receipt.json'), 'utf8')) as Receipt;
+}
+
+// A zip in kit-release's plugin archive layout: stored entries with Unix file modes, in the order given.
+export function storedZip(entries: Array<{ name: string; data: Buffer; mode?: number }>): Buffer {
+  const parts: Buffer[] = [];
+  const directory: Buffer[] = [];
+  let offset = 0;
+  for (const { name, data, mode = 0o100644 } of entries) {
+    const path = Buffer.from(name);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc32(data), 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(path.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(0x0314, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(crc32(data), 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(path.length, 28);
+    central.writeUInt32LE((mode << 16) >>> 0, 38);
+    central.writeUInt32LE(offset, 42);
+    parts.push(local, path, data);
+    directory.push(central, path);
+    offset += 30 + path.length + data.length;
+  }
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(directory.reduce((n, b) => n + b.length, 0), 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, ...directory, end]);
+}
+
+// The plugin files of SKILLS_SOURCE as a release archive whose plugin.json says `version`.
+export function pluginZip(version: string): Buffer {
+  const entries: Array<{ name: string; data: Buffer }> = [];
+  const visit = (rel: string): void => {
+    const abs = join(SKILLS_SOURCE, rel);
+    if (!existsSync(abs)) return;
+    if (statSync(abs).isDirectory()) { for (const name of readdirSync(abs).sort()) visit(`${rel}/${name}`); return; }
+    const data = readFileSync(abs);
+    entries.push({ name: rel, data: rel === 'plugin.json' ? Buffer.from(JSON.stringify({ ...JSON.parse(data.toString('utf8')), version })) : data });
+  };
+  for (const path of [...RUNTIME_PATHS].sort()) visit(path);
+  return storedZip(entries);
+}
+
+export const sha256 = (data: Buffer | string): string => createHash('sha256').update(data).digest('hex');
+
+export interface FixtureRelease { tag: string; zip?: Buffer; sums?: string; prerelease?: boolean }
+export interface ReleaseServer { url: string; requests: string[]; close(): Promise<void> }
+
+// Serves plugin releases the way the GitHub releases API and its asset downloads do, for STRADDLE_WIZARD_RELEASES.
+export async function releaseServer(releases: FixtureRelease[]): Promise<ReleaseServer> {
+  const files = new Map<string, Buffer>();
+  const requests: string[] = [];
+  let list = '';
+  const server = createServer((req, res) => {
+    requests.push(req.url ?? '');
+    const body = req.url === '/releases' ? Buffer.from(list) : files.get(req.url ?? '');
+    res.writeHead(body ? 200 : 404).end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  list = JSON.stringify(releases.map((release) => {
+    const version = release.tag.slice(1);
+    const archive = `straddle-plugin-${version}.zip`;
+    const zip = release.zip ?? pluginZip(version);
+    files.set(`/${release.tag}/${archive}`, zip);
+    files.set(`/${release.tag}/SHA256SUMS`, Buffer.from(release.sums ?? `${sha256(zip)}  ${archive}\n`));
+    return {
+      tag_name: release.tag, draft: false, prerelease: release.prerelease ?? false, html_url: `${base}/${release.tag}`,
+      assets: [archive, 'SHA256SUMS'].map((name) => ({ name, browser_download_url: `${base}/${release.tag}/${name}` })),
+    };
+  }));
+  return { url: `${base}/releases`, requests, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }

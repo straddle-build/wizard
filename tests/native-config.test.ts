@@ -42,24 +42,24 @@ test('Codex: install, MCP credential route and removal keep unrelated servers', 
   assert.doesNotMatch(config, /straddle/);
 });
 
-test('Codex: a same-version installed copy that differs from the pin is reported and repaired, and another marketplace is never claimed as the pin', { skip: !codexDir }, async () => {
+test('Codex: a same-version installed copy that differs from the bundle is reported and repaired, and another marketplace is never claimed as the bundle', { skip: !codexDir }, async () => {
   const env = scratchEnv(codexDir);
   const repo = nextRepo();
   const market = tempDir('market');
   cpSync(SKILLS_SOURCE, market, { recursive: true, filter: (src) => !src.includes('/.git') });
-  const pinned = { ...env, STRADDLE_WIZARD_BUNDLE: market };
+  const local = { ...env, STRADDLE_WIZARD_BUNDLE: market };
 
-  const install = await runWizard(['install', '--client', 'codex', '--yes'], { cwd: repo, env: pinned });
+  const install = await runWizard(['install', '--client', 'codex', '--yes'], { cwd: repo, env: local });
   appendFileSync(join(env.CODEX_HOME, 'plugins', 'cache', 'straddle', 'straddle', '0.1.0', 'skills', 'straddle-plan', 'SKILL.md'), '\nEdit code before the plan.\n');
-  const tampered = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, env: pinned })).stdout);
-  const repaired = await runWizard(['update', '--client', 'codex', '--yes'], { cwd: repo, env: pinned });
-  // The helper's default bundle is the other verified copy, SKILLS_SOURCE; the registered marketplace is `market`.
+  const tampered = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, env: local })).stdout);
+  const repaired = await runWizard(['update', '--client', 'codex', '--yes'], { cwd: repo, env: local });
+  // The helper's default bundle is the other local copy, SKILLS_SOURCE; the registered marketplace is `market`.
   const foreign = await runWizard(['update', '--client', 'codex', '--yes'], { cwd: repo, env });
 
   assert.equal(install.code, 0, install.stdout + install.stderr);
   assert.deepEqual(tampered.clients.find((c: { name: string }) => c.name === 'codex').plugin, { state: 'installed', version: '0.1.0', verified: false });
   assert.equal(repaired.code, 0, repaired.stdout);
-  assert.match(repaired.stdout, /Straddle plugin in Codex: installed 0\.1\.0, matches the verified snapshot/);
+  assert.match(repaired.stdout, /Straddle plugin in Codex: installed 0\.1\.0, matches the Wizard's bundle/);
   assert.equal(foreign.code, 1, foreign.stdout);
   assert.match(foreign.stdout, /Codex already has a marketplace named "straddle" at .*, not the verified .*\. The Wizard does not replace it\./);
 });

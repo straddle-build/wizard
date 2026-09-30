@@ -30,9 +30,9 @@ Guided setup that hands your Straddle integration to your local coding agent.
 Options
   --dir <path>        Repository to work in (default: current directory)
   --client <name>     claude, codex or cursor
-  --bundle <path>     Use this Straddle skills bundle instead of finding or fetching one (or STRADDLE_WIZARD_BUNDLE)
+  --bundle <path>     Use this local Straddle skills directory instead of a plugin release, for testing (or STRADDLE_WIZARD_BUNDLE)
   --exclude <glob>    Extra sensitive path the Wizard never opens (repeatable, or STRADDLE_WIZARD_EXCLUDE=a,b)
-  --yes               Fetch the skills and run install/update/remove/mcp commands without asking
+  --yes               Download the skills and run install/update/remove/mcp commands without asking
   --json              Machine-readable output for status and skill list`;
 
 function fail(message: string, code = 2): never {
@@ -90,7 +90,7 @@ const io = () => (prompter ??= new Prompter(process.stdin, process.stdout));
 
 async function preparedBundle() {
   const check = await prepareBundle(io(), { override: bundlePath, env }, Boolean(values.yes));
-  if (check === null) say('Cancelled. Nothing was fetched.');
+  if (check === null) say('Cancelled. Nothing was downloaded.');
   else if (!check.ok) say(check.reason);
   return check?.ok ? check.bundle : null;
 }
@@ -124,16 +124,16 @@ async function configure(kind: 'install' | 'update' | 'remove' | 'mcp add' | 'mc
   const plan = kind === 'install' ? installPlan(state, bundle) : updatePlan(state, bundle);
   const code = await confirmAndRun(plan, `${kind === 'install' ? 'Install' : 'Update'} the Straddle plugin in ${state.label} from the ${bundleLabel(bundle)}:`);
   if (client === 'cursor' || code !== 0) return code;
-  // Success means the copy the client loads is the verified snapshot, not only that the native commands exited 0.
-  const after = inspectClient(client, env);
-  say(`Straddle plugin in ${after.label}: ${after.plugin.state}${after.plugin.version ? ` ${after.plugin.version}` : ''}, ${after.plugin.verified ? 'matches the verified snapshot' : 'does not match the verified snapshot'}`);
+  // Success means the copy the client loads is the Wizard's bundle, not only that the native commands exited 0.
+  const after = inspectClient(client, env, bundle);
+  say(`Straddle plugin in ${after.label}: ${after.plugin.state}${after.plugin.version ? ` ${after.plugin.version}` : ''}, ${after.plugin.verified ? "matches the Wizard's bundle" : "does not match the Wizard's bundle"}`);
   return after.plugin.verified ? 0 : 1;
 }
 
 function status(): number {
   const loaded = loadReceipt(repo);
-  const check = findBundle({ override: bundlePath, remembered: loaded.kind === 'found' ? loaded.receipt.bundle?.path : null, env });
-  const clients = CLIENT_NAMES.map((name) => inspectClient(name, env));
+  const check = findBundle({ override: bundlePath, env });
+  const clients = CLIENT_NAMES.map((name) => inspectClient(name, env, check.ok ? check.bundle : null));
   const config = straddleConfiguration(env);
   const run = loaded.kind === 'found'
     ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client }
@@ -142,7 +142,7 @@ function status(): number {
     wizard: WIZARD_VERSION,
     repository: repo,
     bundle: check.ok
-      ? { kind: check.bundle.kind, repository: check.bundle.repository, commit: check.bundle.commit, pluginVersion: check.bundle.pluginVersion, path: check.bundle.path, skills: Object.fromEntries(Object.entries(check.bundle.skills).map(([k, v]) => [k, v.version])) }
+      ? { kind: check.bundle.kind, pluginVersion: check.bundle.pluginVersion, contentSha256: check.bundle.contentSha256, path: check.bundle.path, skills: Object.fromEntries(Object.entries(check.bundle.skills).map(([k, v]) => [k, v.version])) }
       : { error: check.reason },
     clients: clients.map((c) => ({ name: c.name, label: c.label, version: c.version, loggedIn: c.loggedIn, plugin: c.plugin, apiMcp: c.apiMcp, eventSurface: EVENT_SURFACE[c.name] })),
     credentials: { STRADDLE_API_KEY: config.key },
@@ -155,7 +155,7 @@ function status(): number {
   say(`  Repository     ${repo}`);
   say(`  Skill bundle   ${check.ok ? bundleLabel(check.bundle) : check.reason}`);
   for (const c of clients) {
-    const plugin = c.plugin.state === 'installed' ? `plugin ${c.plugin.version}${c.plugin.verified ? '' : ' (differs from the verified snapshot)'}` : `plugin ${c.plugin.state}`;
+    const plugin = c.plugin.state === 'installed' ? `plugin ${c.plugin.version}${c.plugin.verified ? '' : " (differs from the Wizard's bundle)"}` : `plugin ${c.plugin.state}`;
     say(`  ${c.label.padEnd(15)}${c.version ?? 'not found'}${c.version ? `, ${plugin}, API MCP ${c.apiMcp}, progress ${EVENT_SURFACE[c.name]}` : ''}`);
   }
   say(`  Straddle key   STRADDLE_API_KEY ${config.key === 'present' ? 'is set (value not read)' : 'is not set'}`);
