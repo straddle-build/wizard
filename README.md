@@ -6,24 +6,37 @@ Local Straddle Developer Kit installer and agent orchestrator.
 
 ## Status
 
-- No tagged Straddle plugin release exists yet. The Wizard uses the merged skills source, `straddle-build/skills` at `643632e78654a4fa929873d0e1ec0ba15525a9e8` (plugin `0.1.0`), and labels it "merged-source snapshot … not a tagged release" everywhere it appears.
+- The Wizard runs Straddle plugin releases: GitHub releases of `straddle-build/skills` in its `0.1.x` range. None is published yet, so until the first one exists, run it with `--bundle <skills checkout>`.
 - The npm package is not published yet. `.github/workflows/release.yml` publishes it with npm provenance when a GitHub release is published.
 
 ## Requirements
 
-- Node.js 22.18 or later, and Git.
+- Node.js 22.18 or later.
 - Claude Code or Codex on `PATH` for automated handoff. Cursor always gets a manual handoff.
 
 ## Skills bundle
 
-The Wizard needs the pinned skills snapshot on your machine. It checks every bundle by content: the SHA-256 of the plugin's runtime files (`plugin.json`, `mcp.json`, the three client manifests, `assets/`, `skills/`, `references/`, `third_party/`, `LICENSE`, `README.md`) must equal the digest of that commit, and the bundle's top level may hold nothing else except the commit's own non-plugin files (`docs/`, `evals/`, `fixtures/`, `scripts/`, `tests/`, `.github/`, `.gitignore`, `.markdownlint-cli2.jsonc`), the kit release metadata in `kit/`, Claude Code's cache bookkeeping (`.in_use/`, `.orphaned_at`), and `.git`. Anything else there, such as `hooks/`, `commands/`, `agents/` or `.mcp.json`, is something a client could load, so the bundle is rejected. It looks, in order, at:
+The Wizard runs a Straddle plugin release, or a local skills directory you pass with `--bundle`. It doesn't pin a skills commit, so a skills fix reaches you with the next plugin release, without a new Wizard.
 
-1. `--bundle <path>` or `STRADDLE_WIZARD_BUNDLE`, when you pass one. Nothing else is tried.
-2. The bundle the saved run last used.
-3. Claude Code's `straddle` marketplace, when it holds the same content.
-4. Its own snapshot in `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/skills-<commit>`.
+**Where releases come from.** GitHub releases of `straddle-build/skills`, read from `https://api.github.com/repos/straddle-build/skills/releases`. Each release is tagged `v<version>` and carries `straddle-plugin-<version>.zip` and `SHA256SUMS`, built by the skills repository's release cut (its `docs/packaging.md`, Plugin releases). This Wizard accepts plugin versions `0.1.x` (`PLUGIN_RELEASES` in `src/bundle.ts`). It uses the newest `vX.Y.Z` release in that range, and skips drafts, prereleases and newer releases outside it. A `0.2.0` plugin needs a Wizard release that accepts it. `STRADDLE_WIZARD_RELEASES` points the Wizard at another URL that serves the same JSON, such as a mirror.
 
-When none matches, the Wizard shows the exact Git commands that fetch that commit from GitHub into its cache, and runs them only after you choose Fetch (or pass `--yes` to `install`, `update`, or `skill list`). It verifies the fetched content before using it and changes nothing else. `wizard status` never fetches.
+**Verification.** The Wizard refuses a release, and keeps nothing from it, when:
+
+- the zip's SHA-256 differs from its line in the release's `SHA256SUMS`;
+- the release is outside the range;
+- its `plugin.json` version isn't the tag's;
+- the zip holds anything but stored regular files with safe paths;
+- the unpacked top level holds anything a client could load besides the plugin's runtime files (`plugin.json`, `mcp.json`, the three client manifests, `assets/`, `skills/`, `references/`, `third_party/`, `LICENSE`, `README.md`). Examples are `hooks/`, `commands/`, `agents/` and `.mcp.json`.
+
+A verified release is kept at `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/plugin`, a stable path, so a client marketplace registered from it survives updates. The Wizard records its content digest in `straddle-wizard/release.json` and re-hashes the directory against that record on every use, so an edited copy is refused.
+
+**Order.**
+
+1. `--bundle <path>` or `STRADDLE_WIZARD_BUNDLE`, when you pass one. This is for local testing: a skills checkout whose plugin version is in range and whose top level holds only plugin files, the checkout's own non-plugin files (`docs/`, `evals/`, `fixtures/`, `scripts/`, `tests/`, `kit/`, `.github/`, `.gitignore`, `.markdownlint-cli2.jsonc`, `.git`) and Claude Code's cache bookkeeping (`.in_use/`, `.orphaned_at`). It is labelled "local bundle, not a release" and isn't compared with any release.
+2. Otherwise the Wizard lists the releases. If the newest in range is already cached and intact, it uses that copy. If not, it shows the release and the two asset URLs, and downloads them only after you choose Download (or pass `--yes` to `install`, `update` or `skill list`).
+3. If the release list can't be read, for example offline, it uses the verified release already on this machine and says so.
+
+`wizard status` never touches the network. It reports the cached release.
 
 ## Guided run
 
@@ -35,7 +48,7 @@ npx @straddlecom/wizard
 1. **Context.** The Wizard shows the directory, detected language, framework, any Straddle SDK and other payment providers, and the program it will run. Choose Continue, Change detected context, Privacy and data, or Cancel. Detected values are suggestions; corrected values are marked "(you)".
 2. **Choices.** It asks what you want to build (charges, payouts, or both), direct, SaaS, or marketplace, which SDK, and which notification path (webhook, FIFO, or polling endpoint). It never infers these from the framework. "Not decided yet" leaves the question to the skill.
 3. **Agent.** Pick an installed agent, or pass `--client`. The menu labels how much progress the Wizard can see for each: Claude Code progress is observed through hooks, Codex progress is unverified, and Cursor is a manual handoff.
-4. **Readiness.** The Wizard finds or fetches the skills bundle, then checks the agent binary and login, the Straddle plugin, the API MCP credential route, `STRADDLE_API_KEY` (presence only), and the declared environment. Claude Code sessions always load the verified bundle with `claude --plugin-dir`, so nothing needs installing. Codex loads its own installed copy, so the Wizard checks that copy's content against the pinned snapshot, not just its version; when it differs or is missing, the Wizard prints the exact native install or update commands and runs them only when you choose to.
+4. **Readiness.** The Wizard finds or downloads the skills bundle, then checks the agent binary and login, the Straddle plugin, the API MCP credential route, `STRADDLE_API_KEY` (presence only), and the declared environment. Claude Code sessions always load that bundle with `claude --plugin-dir`, so nothing needs installing. Codex loads its own installed copy, so the Wizard checks that copy's content against the bundle, not just its version; when it differs or is missing, the Wizard prints the exact native install or update commands and runs them only when you choose to.
 5. **Steps.** The default program runs Setup, Plan, Integrate, and Test. Each step opens your agent in the same terminal with `/straddle:<skill>`, followed by the language and framework you confirmed (marked detected or corrected) and your choices. Answer its questions and approve or deny its actions there; choosing Start in the Wizard is not approval of anything. Exit the agent when the skill prints its handoff. Integrate and Test run only an approved plan: an approval recorded in `straddle-integration-plan.md` (or, for Test, `straddle-migration-plan.md`) that matches the current plan, or your approval of the current plan in that step's own session. The skill records your approval in the plan file, so it carries into later sessions until the plan is edited; the Wizard shows the plan and this rule before both steps. When Integrate or Test stops because the plan is not approved, approve the current plan there and ask the agent to continue.
 6. **Report.** After each step the Wizard shows what it observed separately from what the agent reported. Observed means Claude Code hooks confirmed a step file was opened (with the Read tool, or by a shell command that names it) or a file edit completed, or the Wizard's before-and-after file hashes changed; a step entry is not completion or approval. Reported means the skill's printed handoff status (or `abort` when an abort is the later marker). When the agent prints both `STRADDLE_ABORT` and a handoff, the later one counts, so a step the agent recovers and completes in the same session advances. A reported handoff never outranks the Wizard's own evidence: a session that exits with an error, ends by a signal, or last reports `STRADDLE_ABORT` does not advance, and `wizard resume` runs that step again. The final report lists changed files, says when that list is incomplete (the discovery file limit was reached, or paths could not be read), states that the Wizard sent no Straddle request and verified no server-side resource, and prints the skill's "Verify before merging" checklist.
 
@@ -50,11 +63,11 @@ Ctrl-C at a Wizard prompt marks the run aborted and keeps all work. While the ag
 | `wizard setup`, `plan`, `integrate`, `test` | One step of the integration program. |
 | `wizard get-started`, `migrate`, `go-live`, `audit` | The named program's skill. |
 | `wizard skill list`, `wizard skill run <name>` | Lists the bundle's skills with versions, or runs one directly. |
-| `wizard install`, `update`, `remove` | Installs, updates, or removes the Straddle plugin with the client's own plugin commands. Install and update succeed only when the copy the client loads matches the pinned snapshot, and never replace a `straddle` marketplace registered from another place. |
+| `wizard install`, `update`, `remove` | Installs, updates, or removes the Straddle plugin with the client's own plugin commands. Install and update succeed only when the copy the client loads matches the Wizard's bundle, and never replace a `straddle` marketplace registered from another place. |
 | `wizard mcp add`, `mcp remove` | Registers or removes only `straddle-api` and `straddle-docs` with the client's own MCP commands. |
 | `wizard status` | Bundle, clients, plugin and MCP state, key presence, environment, and the saved run. |
 
-Options: `--dir <path>`, `--client claude|codex|cursor` (for guided runs, `resume`, and configuration commands), `--bundle <path>` (or `STRADDLE_WIZARD_BUNDLE`), `--exclude <glob>` (repeatable, or `STRADDLE_WIZARD_EXCLUDE=a,b`), `--yes` for fetching the skills and for configuration commands, and `--json` for `status` and `skill list`.
+Options: `--dir <path>`, `--client claude|codex|cursor` (for guided runs, `resume`, and configuration commands), `--bundle <path>` (or `STRADDLE_WIZARD_BUNDLE`), `--exclude <glob>` (repeatable, or `STRADDLE_WIZARD_EXCLUDE=a,b`), `--yes` for downloading the skills and for configuration commands, and `--json` for `status` and `skill list`.
 
 `wizard audit` runs the `straddle-audit` skill and prints the findings table from `straddle-audit-report.md`, with `file:line` and confidence for each finding. There is no `diagnose` command.
 
@@ -80,10 +93,10 @@ Claude Code gets both from the Straddle plugin. Codex needs a client-level `stra
 
 ```sh
 npm ci
-export STRADDLE_SKILLS_SOURCE=/path/to/straddle-skills   # checkout of straddle-build/skills at 643632e
+export STRADDLE_SKILLS_SOURCE=/path/to/straddle-skills   # any straddle-build/skills checkout with plugin 0.1.x
 npm run typecheck
 npm test
 npm run build
 ```
 
-Tests drive the real CLI against the real pinned bundle. Claude Code is replaced by a scripted process in `tests/fixtures/fake-claude.mjs`, so the test suite is simulated-adapter evidence, not native-client proof.
+Tests drive the real CLI. Most use `STRADDLE_SKILLS_SOURCE` as a local bundle. The release tests serve fixture plugin releases, built from that checkout, from a local HTTP server that answers like the GitHub releases API, so no real tag or release is used. Claude Code is replaced by a scripted process in `tests/fixtures/fake-claude.mjs`, so the test suite is simulated-adapter evidence, not native-client proof.
