@@ -102,6 +102,6 @@ export function nextStep(items: readonly StepProgress[]): SkillName | null {
 // `Setup ✓ · Plan ▶ 2/6 · Integrate · Test · Go Live`: ticked steps, then the current step and any later step the
 // agent has entered with their observed step counts, then the steps still to come.
 export function statusLine(items: readonly StepProgress[]): string {
-  const current = items.findIndex((p) => !p.done);
-  return items.map((p, i) => `${SKILLS[p.skill].title}${p.done ? ' ✓' : i === current || p.entered ? ` ▶ ${p.entered}/${p.total}` : ''}`).join(' · ');
+  const current = items.findIndex((p) => !p.finished);
+  return items.map((p, i) => `${SKILLS[p.skill].title}${p.done ? ' ✓' : i === current || p.entered ? ` ▶ ${p.total ? `${p.entered}/${p.total}` : p.entered}` : ''}`).join(' · ');
 }

@@ -86,19 +86,29 @@ test('a contract file the Wizard must not open counts as unfinished, and its det
 
 test('the checklist ticks a step only when its file and the reported handoff agree, and shows observed progress on the current step', () => {
   const repo = nextRepo();
-  writeFiles(repo, { 'straddle-setup.md': done['straddle-setup.md'], 'straddle-integration-plan.md': approvedPlan });
+  writeFiles(repo, { 'straddle-setup.md': done['straddle-setup.md'] });
   const at = '2026-09-30T00:00:00Z';
   const handoff = (skill: string, status: string): ObservedEvent => ({ at, kind: 'marker', key: `${skill}-${status}`, marker: { kind: 'handoff', skill, status } });
   const entered = (skill: string, step: string): ObservedEvent => ({ at, kind: 'step-entered', skill, step });
 
-  assert.equal(statusLine(progress(repo, [], steps, [])), 'Setup ▶ 0/5 · Plan · Integrate · Test · Go Live');
+  assert.equal(statusLine(progress(repo, [], steps, [])), 'Setup · Plan ▶ 0/5 · Integrate · Test · Go Live');
   // Setup's file is complete and it reported ready: ticked. Plan is approved on file but its handoff isn't reported yet.
   const events = [entered('straddle-setup', '01-begin'), handoff('straddle-setup', 'ready'), entered('straddle-plan', '01-decisions'), entered('straddle-plan', '02-sources')];
   assert.equal(statusLine(progress(repo, [], steps, events)), 'Setup ✓ · Plan ▶ 2/5 · Integrate · Test · Go Live');
   // A reported handoff alone never ticks: Integrate says complete, but no report is on file.
+  writeFiles(repo, { 'straddle-integration-plan.md': approvedPlan });
   const later = [...events, handoff('straddle-plan', 'draft'), entered('straddle-integrate', '01-begin'), handoff('straddle-integrate', 'complete')];
   assert.equal(statusLine(progress(repo, [], steps, later)), 'Setup ✓ · Plan ✓ · Integrate ▶ 1/5 · Test · Go Live');
   // A later abort outranks an earlier handoff.
   const aborted: ObservedEvent = { at, kind: 'marker', key: 'abort', marker: { kind: 'abort', skill: 'straddle-setup', reason: 'stopped' } };
   assert.equal(statusLine(progress(repo, [], steps, [...later, aborted])).split(' · ')[0], 'Setup ▶ 1/5');
 });
+
+test('resuming from repository state files places the play marker on the first unfinished step without division by zero', () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-setup.md': done['straddle-setup.md'], 'straddle-integration-plan.md': approvedPlan });
+  assert.equal(statusLine(progress(repo, [], steps, [])), 'Setup · Plan · Integrate ▶ 0/5 · Test · Go Live');
+  const zeroSteps = steps.map((s) => ({ ...s, total: 0 }));
+  assert.equal(statusLine(progress(repo, [], zeroSteps, [])), 'Setup · Plan · Integrate ▶ 0 · Test · Go Live');
+});
+

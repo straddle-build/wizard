@@ -9,20 +9,33 @@ import { appendEvents, newRollout, rolloutEvents, type Rollout } from './events.
 import { field, parseJson, text } from './json.ts';
 
 function rolloutFiles(dir: string): string[] {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { recursive: true, encoding: 'utf8' }).filter((f) => /(^|\/)rollout-[^/]*\.jsonl$/.test(f)).map((f) => join(dir, f));
+  try {
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir, { recursive: true, encoding: 'utf8' }).filter((f) => /(^|\/)rollout-[^/]*\.jsonl$/.test(f)).map((f) => join(dir, f));
+  } catch {
+    return [];
+  }
 }
 
 // The rollout of the session this Wizard started: the one named for `session` when it resumes one, otherwise the newest
 // rollout written since `since` whose session runs in `repo`.
 function findRollout(env: NodeJS.ProcessEnv, repo: string, since: number, session: string | null): string | null {
   // ponytail: scans every rollout under sessions/ each second until found; limit to recent day folders if that gets slow.
-  const files = rolloutFiles(join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'sessions'));
-  if (session) return files.find((f) => f.endsWith(`-${session}.jsonl`)) ?? null;
-  const root = realpathSync(repo);
-  for (const file of files.filter((f) => statSync(f).mtimeMs >= since).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)) {
-    const cwd = text(field(field(parseJson(readFileSync(file, 'utf8').split('\n', 1)[0]!), 'payload'), 'cwd'));
-    if (cwd && existsSync(cwd) && realpathSync(cwd) === root) return file;
+  try {
+    const files = rolloutFiles(join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'sessions'));
+    if (session) return files.find((f) => f.endsWith(`-${session}.jsonl`)) ?? null;
+    const root = realpathSync(repo);
+    const mtime = (f: string) => { try { return statSync(f).mtimeMs; } catch { return 0; } };
+    for (const file of files.filter((f) => mtime(f) >= since).sort((a, b) => mtime(b) - mtime(a))) {
+      try {
+        const cwd = text(field(field(parseJson(readFileSync(file, 'utf8').split('\n', 1)[0]!), 'payload'), 'cwd'));
+        if (cwd && existsSync(cwd) && realpathSync(cwd) === root) return file;
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return null;
   }
   return null;
 }
@@ -36,15 +49,21 @@ export function followCodex(env: NodeJS.ProcessEnv, repo: string, eventsFile: st
   let offset = 0;
   let partial = '';
   const read = () => {
-    file ??= findRollout(env, repo, since, session);
-    if (!file) return;
-    const fd = openSync(file, 'r');
-    const chunk = Buffer.alloc(Math.max(0, statSync(file).size - offset));
-    offset += readSync(fd, chunk, 0, chunk.length, offset);
-    closeSync(fd);
-    const lines = (partial + chunk.toString('utf8')).split('\n');
-    partial = lines.pop() ?? '';
-    appendEvents(eventsFile, lines.flatMap((line) => rolloutEvents(state, line)));
+    try {
+      file ??= findRollout(env, repo, since, session);
+      if (!file) return;
+      const fd = openSync(file, 'r');
+      try {
+        const chunk = Buffer.alloc(Math.max(0, statSync(file).size - offset));
+        offset += readSync(fd, chunk, 0, chunk.length, offset);
+        const lines = (partial + chunk.toString('utf8')).split('\n');
+        partial = lines.pop() ?? '';
+        appendEvents(eventsFile, lines.flatMap((line) => rolloutEvents(state, line)));
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+    }
   };
   const timer = setInterval(read, 1000);
   return { stop() { clearInterval(timer); read(); return state; } };

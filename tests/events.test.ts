@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { followCodex } from '../src/codex.ts';
 import { appendEvents, newRollout, parseMarkers, readObservedEvents, rolloutEvents, stepEntries, transcriptMarkers, verifyChecklist, type ObservedEvent } from '../src/events.ts';
 import { tempDir } from './helpers.ts';
 
@@ -92,3 +93,27 @@ test('a Codex rollout yields its session id, step files a tool call opened once 
   assert.deepEqual(events.flatMap((e) => (e.kind === 'marker' ? [[e.marker.kind, e.marker.status, e.key]] : [])), [['handoff', 'draft', 'codex:01a0edf0-145f-7253-a347-af992a03ab61:5:0']]);
   assert.match(state.text.join('\n'), /Plan drafted\./);
 });
+
+test('followCodex follows rollout log and survives transient filesystem errors or rotations without unhandled exceptions', () => {
+  const dir = tempDir('codex');
+  const sessions = join(dir, 'sessions');
+  mkdirSync(sessions, { recursive: true });
+  const repo = tempDir('repo');
+  const events = join(dir, 'events.jsonl');
+  const rollout = join(sessions, 'rollout-test.jsonl');
+  const at = '2026-09-30T20:00:00.000Z';
+  const line1 = JSON.stringify({ timestamp: at, type: 'session_meta', payload: { id: 's1', cwd: repo } });
+  writeFileSync(rollout, line1 + '\n');
+
+  const follower = followCodex({ CODEX_HOME: dir }, repo, events, 0, null);
+  const line2 = JSON.stringify({ timestamp: at, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'STRADDLE_HANDOFF {"skill":"straddle-setup","status":"ready"}' }] } });
+  appendFileSync(rollout, line2 + '\n');
+  const state = follower.stop();
+  assert.equal(state.session, 's1');
+  assert.equal(readObservedEvents(events).length, 2);
+
+  unlinkSync(rollout);
+  const follower2 = followCodex({ CODEX_HOME: dir }, repo, events, 0, null);
+  assert.doesNotThrow(() => follower2.stop());
+});
+
