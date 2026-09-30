@@ -10,11 +10,11 @@ import { field, parseJson } from './json.ts';
 export const PINNED_BUNDLE = {
   repository: 'straddle-build/skills',
   url: 'https://github.com/straddle-build/skills.git',
-  commit: 'f713fc6201ad0fd800d23a3ec4c4102b7acee91c',
+  commit: '4bb8afe20b72448e0f1b12a42257075a5d53e26b',
   pluginVersion: '0.1.0',
   // sha256 of the `<sha256>  <path>` listing (sorted by path) of RUNTIME_PATHS at the commit; the same digest the
   // ME-810 kit manifest records as plugin.content_sha256.
-  contentSha256: 'e9a5db1d995e5798681e04d9d7f840000b6e0861f3e4b76ae3a31b881ad00b7c',
+  contentSha256: '1056487cca08a0783b34048228381dbf907806057969c9811f919dad2c8c5074',
 } as const;
 
 // What the clients load. Everything else in the repository (evals, tests, scripts) is not part of the plugin.

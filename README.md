@@ -6,7 +6,7 @@ Local Straddle Developer Kit installer and agent orchestrator.
 
 ## Status
 
-- No tagged Straddle plugin release exists yet. The Wizard uses the merged skills source, `straddle-build/skills` at `f713fc6201ad0fd800d23a3ec4c4102b7acee91c` (plugin `0.1.0`), and labels it "merged-source snapshot … not a tagged release" everywhere it appears.
+- No tagged Straddle plugin release exists yet. The Wizard uses the merged skills source, `straddle-build/skills` at `4bb8afe20b72448e0f1b12a42257075a5d53e26b` (plugin `0.1.0`), and labels it "merged-source snapshot … not a tagged release" everywhere it appears.
 - The npm package is not published yet. `.github/workflows/release.yml` publishes it with npm provenance when a GitHub release is published.
 
 ## Requirements
@@ -80,7 +80,7 @@ Claude Code gets both from the Straddle plugin. Codex needs a client-level `stra
 
 ```sh
 npm ci
-export STRADDLE_SKILLS_SOURCE=/path/to/straddle-skills   # checkout of straddle-build/skills at f713fc6
+export STRADDLE_SKILLS_SOURCE=/path/to/straddle-skills   # checkout of straddle-build/skills at 4bb8afe
 npm run typecheck
 npm test
 npm run build

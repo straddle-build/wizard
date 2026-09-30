@@ -88,8 +88,8 @@ test('first run without a bundle previews the snapshot fetch, and cancelling it 
   const r = await runWizard([], { cwd: repo, claude, env: { ...CONFIGURED, ...OFFLINE_GITHUB(cache) }, input: [...CHOOSE_CONTEXT, '2'] });
 
   assert.equal(r.code, 130, r.stdout + r.stderr);
-  assert.match(r.stdout, /merged-source snapshot straddle-build\/skills@f713fc6 \(plugin 0\.1\.0; not a tagged release\)/);
-  assert.match(r.stdout, /git -C \S+ fetch --depth 1 https:\/\/github\.com\/straddle-build\/skills\.git f713fc6201ad0fd800d23a3ec4c4102b7acee91c/);
+  assert.match(r.stdout, /merged-source snapshot straddle-build\/skills@4bb8afe \(plugin 0\.1\.0; not a tagged release\)/);
+  assert.match(r.stdout, /git -C \S+ fetch --depth 1 https:\/\/github\.com\/straddle-build\/skills\.git 4bb8afe20b72448e0f1b12a42257075a5d53e26b/);
   assert.deepEqual(readdirSync(cache), []);
   assert.equal(readReceipt(repo).state, 'aborted');
 });
@@ -106,9 +106,9 @@ test('first run fetches the pinned snapshot after confirmation, verifies it, and
   const status = await runWizard(['status', '--json'], { cwd: repo, claude, env });
 
   assert.equal(first.code, 0, first.stdout + first.stderr);
-  const snapshot = join(cache, 'straddle-wizard', 'skills-f713fc6201ad0fd800d23a3ec4c4102b7acee91c');
+  const snapshot = join(cache, 'straddle-wizard', 'skills-4bb8afe20b72448e0f1b12a42257075a5d53e26b');
   assert.equal(readReceipt(repo).bundle.path, snapshot);
-  assert.match(first.stdout, /Skill bundle\s+merged-source snapshot straddle-build\/skills@f713fc6 .*verified/);
+  assert.match(first.stdout, /Skill bundle\s+merged-source snapshot straddle-build\/skills@4bb8afe .*verified/);
   assert.equal(JSON.parse(status.stdout).bundle.path, snapshot);
   assert.doesNotMatch(status.stdout, /fetch/);
 });
@@ -147,7 +147,7 @@ test('default journey: isolated sessions from the verified bundle, plan before e
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'completed');
   assert.equal(receipt.client, 'claude');
-  assert.equal(receipt.bundle.commit, 'f713fc6201ad0fd800d23a3ec4c4102b7acee91c');
+  assert.equal(receipt.bundle.commit, '4bb8afe20b72448e0f1b12a42257075a5d53e26b');
   assert.deepEqual(receipt.steps.map((s) => [s.skill, s.reportedMarkers.at(-1)?.status]), [
     ['straddle-setup', 'ready_with_warnings'], ['straddle-plan', 'draft'], ['straddle-integrate', 'complete'], ['straddle-test', 'partial'],
   ]);
@@ -445,7 +445,7 @@ test('install, status, update and remove use native plugin commands and report d
   assert.equal(install.code, 0, install.stdout + install.stderr);
   assert.match(install.stdout, /ok\s+claude plugin install straddle@straddle/);
   const parsed = JSON.parse(status.stdout);
-  assert.equal(parsed.bundle.commit, 'f713fc6201ad0fd800d23a3ec4c4102b7acee91c');
+  assert.equal(parsed.bundle.commit, '4bb8afe20b72448e0f1b12a42257075a5d53e26b');
   assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'claude').plugin, { state: 'installed', version: '0.1.0', verified: true });
   assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'cursor').plugin, { state: 'unverified', version: null, verified: false });
   assert.equal(parsed.credentials.STRADDLE_API_KEY, 'missing');
