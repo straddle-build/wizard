@@ -338,7 +338,8 @@ function section(textContent: string, heading: string): string[] {
   return lines.slice(start + 1, end < 0 ? undefined : end).filter((l) => l.trim());
 }
 
-function showPlan(io: Prompter, receipt: Receipt): void {
+// Integrate and Test apply the same approval rule to the plan (skills straddle-integrate and straddle-test, step 01-begin).
+function showPlan(io: Prompter, receipt: Receipt, title: string): void {
   const plan = readRepoFile(receipt.repo, INTEGRATION_PLAN, receipt.exclude);
   if (plan.kind === 'absent') return;
   if (plan.kind === 'skipped') {
@@ -349,14 +350,16 @@ function showPlan(io: Prompter, receipt: Receipt): void {
   }
   const state = /Plan state:\s*([^\n]+)/.exec(plan.text)?.[1]?.trim() ?? 'not recorded';
   io.say(io.bold(`Plan: ${INTEGRATION_PLAN} (Plan state: ${state})`));
-  if (receipt.planSha256 && receipt.planSha256 !== plan.sha256) io.say('  The plan changed after the Plan step. Integrate reviews the current file.');
+  if (receipt.planSha256 && receipt.planSha256 !== plan.sha256) io.say(`  The plan changed after the Plan step. ${title} reviews the current file.`);
   for (const heading of ['File changes', 'Future Sandbox writes']) {
     io.say(`  ${heading}`);
     const lines = section(plan.text, heading);
     for (const line of lines.length ? lines : ['(section not found)']) io.say(`    ${line}`);
   }
-  io.say('  Approve or change the plan in your coding agent. Integrate asks for approval of the current plan, and every');
-  io.say('  Sandbox write gets its own preview and approval there. Nothing here counts as approval.');
+  io.say(`  ${title} runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan in`);
+  io.say(`  its own session. Approval given in an earlier session, including Plan's, does not carry over. If ${title} stops`);
+  io.say('  because the plan is not approved, approve the current plan there and ask it to continue. Every Sandbox write');
+  io.say('  still gets its own preview and approval there. Nothing here counts as approval.');
   io.say();
 }
 
@@ -421,7 +424,7 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
     io.say(`${route.title} needs ${route.requiresAnyOf.join(' or ')}. Run \`wizard plan\` first; no code edit happens before the plan exists.`);
     return finish(receipt, 'blocked', `${route.title} needs ${route.requiresAnyOf.join(' or ')}`);
   }
-  if (skill === 'straddle-integrate') showPlan(io, receipt);
+  if (skill === 'straddle-integrate' || skill === 'straddle-test') showPlan(io, receipt, route.title);
 
   const config = straddleConfiguration(ctx.opts.env);
   if (route.sendsStraddleRequests && config.errors.length) {

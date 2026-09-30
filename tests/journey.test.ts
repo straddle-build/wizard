@@ -191,6 +191,21 @@ test('Integrate never starts before the durable plan exists', async () => {
   assert.equal(readReceipt(repo).state, 'blocked');
 });
 
+test('before Integrate and before Test the Wizard shows the plan state and where approval must happen, since it does not carry over between sessions', async () => {
+  for (const [program, title] of [['integrate', 'Integrate'], ['test', 'Test']] as const) {
+    const repo = nextRepo();
+    writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+
+    // Continue, then stop at Start.
+    const r = await runWizard([program, '--client', 'claude'], { cwd: repo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '2'] });
+
+    assert.match(r.stdout, /Plan: straddle-integration-plan\.md \(Plan state: Draft\)/, program);
+    assert.match(r.stdout, new RegExp(`${title} runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan`), program);
+    assert.match(r.stdout, /Approval given in an earlier session, including Plan's, does not carry over/, program);
+    assert.doesNotMatch(r.stdout, /Integrate asks for approval/, program);
+  }
+});
+
 test('a step file the agent opens with a shell command is observed as entered, like one opened with Read', async () => {
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
