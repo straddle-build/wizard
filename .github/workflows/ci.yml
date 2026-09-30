@@ -16,12 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Test fixture only: the local --bundle most tests use and the content of the fixture plugin releases. The Wizard
-      # itself runs the newest 0.1.x plugin release, so skills changes never require changing this ref.
+      # Test fixture only: the local --bundle most tests use, the content of the fixture plugin releases, and the
+      # state-file templates tests/contract.test.ts checks. The Wizard itself runs the newest 0.1.x plugin release; move
+      # this ref when the skills change the state-file contract (wizard-program.md).
       - uses: actions/checkout@v5
         with:
           repository: straddle-build/skills
-          ref: 643632e78654a4fa929873d0e1ec0ba15525a9e8
+          ref: ecb66451a1075a296e4fb9e5eb9c71676b57d555
           path: .straddle-skills
 
       - uses: actions/setup-node@v5

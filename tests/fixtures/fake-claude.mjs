@@ -90,7 +90,8 @@ appendFileSync(transcript, JSON.stringify({ type: 'user', uuid: randomUUID(), me
 statusLine();
 let script = { exit: 0 };
 for (const skill of program.slice(program.indexOf(first))) {
-  script = sessions[skill];
+  // `withoutKey`: what the step does when STRADDLE_API_KEY isn't set, as real Setup stops at the missing key.
+  script = !process.env.STRADDLE_API_KEY && sessions[skill]?.withoutKey ? sessions[skill].withoutKey : sessions[skill];
   if (!script) break;
   // Like Claude Code: PreToolUse before the permission decision, PostToolUse only after the tool completed.
   // `denied` lists tool targets the developer refuses at the client's own permission prompt.

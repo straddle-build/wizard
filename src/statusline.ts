@@ -12,4 +12,4 @@ const { values } = parseArgs({ options: { repo: { type: 'string' }, steps: { typ
 const repo = values.repo ?? '';
 // `straddle-setup:5,straddle-plan:6`: each program step and how many step files it has.
 const steps = (values.steps ?? '').split(',').map((s) => s.split(':')).flatMap(([skill, total]) => (skill && isRunnableSkill(skill) ? [{ skill, total: Number(total) }] : []));
-process.stdout.write(`Straddle: ${statusLine(progress(repo, values.exclude ?? [], steps, readObservedEvents(join(repo, WIZARD_DIR, 'events.jsonl'))))}\n`);
+process.stdout.write(`Straddle: ${statusLine(progress(repo, values.exclude ?? [], steps, readObservedEvents(join(repo, WIZARD_DIR, 'events.jsonl')).events))}\n`);

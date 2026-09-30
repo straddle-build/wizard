@@ -17,27 +17,34 @@ function rolloutFiles(dir: string): string[] {
   }
 }
 
-// The rollout of the session this Wizard started: the one named for `session` when it resumes one, otherwise the newest
-// rollout written since `since` whose session runs in `repo`.
+// The rollout of the session this Wizard started: the one named for `session` when it resumes one, otherwise the
+// first session in `repo` that started at or after `since`, by its `session_meta` start time. Another Codex session
+// in the same repo can still be writing its own rollout, so which file changed last says nothing.
 function findRollout(env: NodeJS.ProcessEnv, repo: string, since: number, session: string | null): string | null {
   // ponytail: scans every rollout under sessions/ each second until found; limit to recent day folders if that gets slow.
   try {
     const files = rolloutFiles(join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'sessions'));
     if (session) return files.find((f) => f.endsWith(`-${session}.jsonl`)) ?? null;
     const root = realpathSync(repo);
-    const mtime = (f: string) => { try { return statSync(f).mtimeMs; } catch { return 0; } };
-    for (const file of files.filter((f) => mtime(f) >= since).sort((a, b) => mtime(b) - mtime(a))) {
+    let found: { file: string; started: number } | null = null;
+    for (const file of files) {
       try {
-        const cwd = text(field(field(parseJson(readFileSync(file, 'utf8').split('\n', 1)[0]!), 'payload'), 'cwd'));
-        if (cwd && existsSync(cwd) && realpathSync(cwd) === root) return file;
+        // A file written before `since` can't hold a session that started after it.
+        if (statSync(file).mtimeMs < since) continue;
+        const meta = parseJson(readFileSync(file, 'utf8').split('\n', 1)[0]!);
+        const payload = field(meta, 'payload');
+        const started = Date.parse(text(field(payload, 'timestamp')) ?? text(field(meta, 'timestamp')) ?? '');
+        const cwd = text(field(payload, 'cwd'));
+        if (field(meta, 'type') !== 'session_meta' || !(started >= since) || !cwd || !existsSync(cwd) || realpathSync(cwd) !== root) continue;
+        if (!found || started < found.started) found = { file, started };
       } catch {
         continue;
       }
     }
+    return found?.file ?? null;
   } catch {
     return null;
   }
-  return null;
 }
 
 export interface Follower { stop(): Rollout }

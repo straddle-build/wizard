@@ -38,7 +38,8 @@ function planRecord(read: Read, file: string): StepRecord & { hash?: string } {
   return { done: true, detail: 'Plan state: Approved, and the plan is unchanged since', hash };
 }
 
-// A report is done when its Status says so and, where it names a plan, it was made for the current approved plan.
+// A report is done when its Status says so and, where it names a plan, it was made for the current approved plan: the
+// plan its `Plan:` line names.
 function reportRecord(read: Read, file: string, complete: string, forPlan: boolean): StepRecord {
   const report = read(file);
   if ('missing' in report) return { done: false, detail: report.missing };
@@ -54,15 +55,15 @@ function reportRecord(read: Read, file: string, complete: string, forPlan: boole
 
 // What the step's contract file says, read under discovery's boundary: never a symlink or an excluded path.
 export function stepRecord(repo: string, exclude: readonly string[], skill: SkillName): StepRecord | null {
-  const file = SKILLS[skill].record;
-  if (!file) return null;
+  const record = SKILLS[skill].record;
+  if (!record) return null;
   const read: Read = (name) => {
     const f = readRepoFile(repo, name, exclude);
     return f.kind === 'read' ? { text: f.text } : { missing: f.kind === 'absent' ? 'not written yet' : `not opened: ${f.reason}` };
   };
-  if (skill === 'straddle-plan' || skill === 'straddle-migrate') return planRecord(read, file);
-  // Go Live is done only when it's ready, for the current plan. Setup comes before any plan.
-  return reportRecord(read, file, skill === 'straddle-go-live' ? 'ready' : 'complete', skill !== 'straddle-setup');
+  if (!record.finished) return planRecord(read, record.file);
+  // Setup comes before any plan; every later report counts only for the current approved plan.
+  return reportRecord(read, record.file, record.finished, skill !== 'straddle-setup');
 }
 
 export interface StepProgress {
@@ -76,8 +77,7 @@ export interface StepProgress {
   // Ticked: the Wizard's own evidence (the file, or observed step entries for a skill without one) and the agent's
   // report agree.
   done: boolean;
-  // Finished for the resume rule: the file says so. Migrate also needs its `migrated` handoff, because its approved
-  // plan comes before its code edits (wizard-program.md). A skill without a file is finished when it is ticked.
+  // Finished for the resume rule: the file says so. A skill without a file is finished when it is ticked.
   finished: boolean;
 }
 
@@ -89,7 +89,7 @@ export function progress(repo: string, exclude: readonly string[], steps: Readon
     const marker = reported?.kind === 'marker' ? reported.marker : undefined;
     const agrees = marker?.kind === 'handoff' && SKILLS[skill].advanceOn.includes(marker.status ?? '');
     const done = agrees && (record ? record.done : entered > 0);
-    const finished = record ? record.done && (skill !== 'straddle-migrate' || agrees) : done;
+    const finished = record ? record.done : done;
     return { skill, record, entered, total, reported: marker, done, finished };
   });
 }

@@ -267,10 +267,11 @@ export interface LaunchRequest {
   resume: string | null;
 }
 
-// The skill is invoked by name; everything the skill does comes from the versioned bundle.
+// The skill is invoked by name on the first line; the context follows on its own lines, so its `Straddle Wizard
+// program:` line begins a line, as wizard-program.md says. Everything the skill does comes from the versioned bundle.
 export function launchCommand(req: LaunchRequest): Command {
   if (req.client === 'claude') {
-    const prompt = [`/straddle:${req.skill}`, req.context].filter(Boolean).join(' ');
+    const prompt = [`/straddle:${req.skill}`, req.context].filter(Boolean).join('\n');
     // `--setting-sources ''` leaves out user, project and local settings, so none of the developer's allow rules,
     // hooks, plugins or default mode approve the session's tool calls. OAuth or keychain login is not a settings source
     // and stays; settings-based authentication (apiKeyHelper, an env block) does not apply in these sessions.
@@ -278,6 +279,6 @@ export function launchCommand(req: LaunchRequest): Command {
   }
   // These two flags override a developer's `danger-full-access` sandbox or `never` approval default for this session.
   // The rest of the Codex configuration (profiles, hooks, MCP servers, other plugins) still applies.
-  const prompt = [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join(' ');
+  const prompt = [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join('\n');
   return { bin: 'codex', args: [...(req.resume ? ['resume'] : []), '-C', req.repo, '--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', ...(req.resume ? [req.resume] : []), prompt] };
 }
