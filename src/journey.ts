@@ -512,7 +512,8 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
       SessionEnd: [{ hooks: hook }],
       Stop: [{ hooks: hook }],
       PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: hook }],
-      PostToolUse: [{ matcher: 'Read|Bash|Edit|Write|MultiEdit|NotebookEdit', hooks: hook }],
+      // Every tool, so a turn's markers are swept after each call (MCP and Skill calls included).
+      PostToolUse: [{ hooks: hook }],
     },
   }, null, 2));
 

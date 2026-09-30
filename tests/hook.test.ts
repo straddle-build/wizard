@@ -64,19 +64,21 @@ test('fails closed on an edit payload it cannot read', () => {
   assert.equal(runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: {} }).decision, 'deny');
 });
 
-test('Stop and SessionEnd record the markers the agent printed, each once however many turns end', () => {
+test('every completed tool call, Stop and SessionEnd record the markers the agent printed, each once however often they sweep', () => {
   const repo = nextRepo();
   const dir = tempDir('events');
   const events = join(dir, 'e.jsonl');
   const transcript = join(dir, 't.jsonl');
   writeFileSync(transcript, JSON.stringify({ type: 'assistant', uuid: 'a1', message: { content: [{ type: 'text', text: 'STRADDLE_HANDOFF {"skill":"straddle-setup","status":"ready","report":"ready"}' }] } }) + '\n');
 
+  // A turn can finish Setup and start Plan before it ends, so a completed tool call already records Setup's handoff.
+  runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'PostToolUse', tool_name: 'mcp__plugin_straddle_straddle-docs__search', tool_input: {}, transcript_path: transcript });
   runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'Stop', transcript_path: transcript });
   runHook(repo, events, 'straddle-integration-plan.md', { hook_event_name: 'SessionEnd', reason: 'prompt_input_exit', transcript_path: transcript });
 
   assert.deepEqual(recorded(events).map((e) => e.kind === 'marker' ? [e.kind, e.marker.skill, e.marker.status] : [e.kind]), [
-    ['turn-end'],
     ['marker', 'straddle-setup', 'ready'],
+    ['turn-end'],
     ['session-end'],
   ]);
 });

@@ -4,7 +4,7 @@
 // prompts, file contents or tool output.
 // Step entries and edits come from PostToolUse, which runs only after a tool call was allowed and completed;
 // an attempted call the client or developer denies is never recorded as progress or a change.
-// Stop (each turn end) and SessionEnd sweep the transcript for markers, recording each one once.
+// Stop (each turn end), SessionEnd and every PostToolUse sweep the transcript for markers, recording each one once.
 // PreToolUse enforces "no code edit before the durable plan exists" for Claude Code's file-edit tools.
 import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -76,3 +76,6 @@ if (hookEvent === 'SessionStart') {
     deny(`No code edit before the durable plan exists: ${gate.join(' or ')} is not in the repository yet. Run the plan step first.`);
   }
 }
+// A turn can run several steps between two turn ends, so every completed tool call also sweeps the transcript for the
+// markers printed so far, and the checklist ticks without waiting for the turn to end.
+if (hookEvent === 'PostToolUse') appendEvents(eventsFile, transcriptMarkers(text(field(payload, 'transcript_path')) ?? '', at));
