@@ -488,8 +488,10 @@ async function runStep(io: Prompter, receipt: Receipt, skill: SkillName, index: 
     receipt.planSha256 = plan.kind === 'read' ? plan.sha256 : null;
   }
 
-  const handoff = step.reportedMarkers.findLast((m) => m.kind === 'handoff');
-  const abort = step.reportedMarkers.findLast((m) => m.kind === 'abort');
+  // The later of an abort and a handoff decides: an agent may abort, recover in the same session, and complete.
+  const last = step.reportedMarkers.findLast((m) => m.kind === 'handoff' || m.kind === 'abort');
+  const handoff = last?.kind === 'handoff' ? last : undefined;
+  const abort = last?.kind === 'abort' ? last : undefined;
   const signal = exit.signal;
   const ended = exit.error ? `${label} could not start: ${exit.error}` : signal ? `${label} ended by signal ${signal}` : `${label} exited with code ${exit.code}`;
   io.say(io.bold(`${route.title} ended (${ended})`));

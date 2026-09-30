@@ -315,7 +315,7 @@ test('an interrupted agent session is recorded as aborted with preserved work, a
   assert.equal(readReceipt(repo).state, 'completed');
 });
 
-test('a reported handoff never outranks a reported abort or a failed session, on the first run or on resume', async () => {
+test('a reported handoff never outranks a later abort or a failed session, on the first run or on resume', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
   const draftThenAbort = `${handoff('straddle-plan', 'draft', [])}\nSTRADDLE_ABORT {"skill":"straddle-plan","reason":"developer stopped"}`;
@@ -336,6 +336,29 @@ test('a reported handoff never outranks a reported abort or a failed session, on
   assert.equal(resumed.code, 0, resumed.stdout);
   assert.equal(claude.calls().filter((c) => c.includes('/straddle:straddle-plan')).length, 3);
   assert.deepEqual(readReceipt(repo).steps.map((s) => s.advanced), [false, false, true]);
+});
+
+test('the later of a reported abort and handoff decides the step: a recovered session advances, a later abort still stops', async () => {
+  const abort = 'STRADDLE_ABORT {"skill":"straddle-integrate","step":"01-begin","reason":"plan not approved"}';
+  const complete = handoff('straddle-integrate', 'complete', []);
+  const run = async (text: string) => {
+    const repo = nextRepo();
+    writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
+    const claude = fakeClaude();
+    claude.sessions({ 'straddle-integrate': { steps: ['01-begin', '07-handoff'], text } });
+    const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+    return { ...r, receipt: readReceipt(repo) };
+  };
+
+  const recovered = await run(`${abort}\nThe developer approved the plan in this session.\n${complete}`);
+  assert.equal(recovered.code, 0, recovered.stdout);
+  assert.equal(recovered.receipt.state, 'completed');
+  assert.equal(recovered.receipt.steps.at(-1)?.advanced, true);
+
+  const abortedAfterHandoff = await run(`${complete}\n${abort}`);
+  assert.equal(abortedAfterHandoff.code, 130, abortedAfterHandoff.stdout);
+  assert.match(abortedAfterHandoff.stdout, /the agent reported STRADDLE_ABORT: plan not approved/);
+  assert.equal(abortedAfterHandoff.receipt.steps.at(-1)?.advanced, false);
 });
 
 test('resume finishes cancelled upfront choices, applies new exclusions before inspecting, and hands corrected context to the agent', async () => {
