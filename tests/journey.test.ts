@@ -204,6 +204,12 @@ test('before Integrate and before Test the Wizard shows the plan state and where
     assert.match(r.stdout, /Approval given in an earlier session, including Plan's, does not carry over/, program);
     assert.doesNotMatch(r.stdout, /Integrate asks for approval/, program);
   }
+
+  const migrationRepo = nextRepo();
+  writeFiles(migrationRepo, { 'straddle-migration-plan.md': PLAN });
+  const mr = await runWizard(['test', '--client', 'claude'], { cwd: migrationRepo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '2'] });
+  assert.match(mr.stdout, /Plan: straddle-migration-plan\.md \(Plan state: Draft\)/);
+  assert.match(mr.stdout, /Test runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan/);
 });
 
 test('a step file the agent opens with a shell command is observed as entered, like one opened with Read', async () => {
@@ -394,11 +400,14 @@ test('the later of a reported abort and handoff decides the step: a recovered se
   assert.equal(recovered.code, 0, recovered.stdout);
   assert.equal(recovered.receipt.state, 'completed');
   assert.equal(recovered.receipt.steps.at(-1)?.advanced, true);
+  assert.match(recovered.stdout, /Integrate\s+observed 2 step entries; reported: complete/);
 
   const abortedAfterHandoff = await run(`${complete}\n${abort}`);
   assert.equal(abortedAfterHandoff.code, 130, abortedAfterHandoff.stdout);
   assert.match(abortedAfterHandoff.stdout, /the agent reported STRADDLE_ABORT: plan not approved/);
   assert.equal(abortedAfterHandoff.receipt.steps.at(-1)?.advanced, false);
+  assert.match(abortedAfterHandoff.stdout, /Integrate\s+observed 2 step entries; reported: abort/);
+  assert.doesNotMatch(abortedAfterHandoff.stdout, /reported: complete/);
 });
 
 test('resume finishes cancelled upfront choices, applies new exclusions before inspecting, and hands corrected context to the agent', async () => {
