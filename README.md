@@ -61,14 +61,14 @@ Resume comes from the files the skills write, not from session tracking. Each st
 | -- | -- | -- |
 | Setup | `straddle-setup.md` | `Status: complete` |
 | Plan | `straddle-integration-plan.md` | `- Plan state: Approved` and the `- Approval:` line's sha256 matches the plan |
-| Migrate | `straddle-migration-plan.md` | the same, for the migration plan |
+| Migrate | `straddle-migration-plan.md` | the same, for the migration plan, and its reported `migrated` handoff |
 | Integrate | `straddle-integration-report.md` | `Status: complete` and `Plan hash:` is the current approved plan's |
 | Test | `straddle-test-evidence.md` | `Status: complete` and `Plan hash:` is the current approved plan's |
 | Go Live | `straddle-go-live-report.md` | `Status: ready` and `Plan hash:` is the current approved plan's |
 
 The plan hash is SHA-256 of the plan without its `- Plan state:` and `- Approval:` lines, exactly what `grep -v -e '^- Plan state:' -e '^- Approval:' <plan> | sha256sum` prints. The next step is the first one in program order whose file is missing, not done, or made for an older plan, so a plan edited after approval sends you back to Plan, and a partial or blocked report reruns its step. The Wizard reads these files under the same rules as discovery: a symlinked or excluded file counts as not done and is never opened.
 
-`wizard resume` shows where the run stands and reopens your last agent session at the next step (`claude --resume <session>` or `codex resume <session>`) with a prompt that starts there. The receipt only remembers that session id and your context; without it (a Codex or Cursor run, or no receipt at all), `wizard resume` asks for the context again and starts a new session at the same step. When `wizard` finds Straddle state files or a saved run, it asks **Start fresh or resume?** Start fresh keeps the earlier files beside the new ones as `<file>.previous-<time>`, and the saved receipt and events as `.straddle-wizard/receipt.json.<state>-<time>` and `events.jsonl.<state>-<time>`. Only the integration program sets the skills' files aside; `wizard plan` and the other single-step commands always run their skill.
+`wizard resume` shows where the run stands and reopens your last agent session at the next step (`claude --resume <session>` or `codex resume <session>`) with a prompt that starts there. The receipt only remembers that session id and your context; without a session id (such as a Cursor run), it starts a new session at the same step. Without a receipt at all, `wizard resume` asks for the context again and starts at the first unfinished step from the skills' state files. When `wizard` finds Straddle state files or a saved run, it asks **Start fresh or resume?** Start fresh keeps the earlier files beside the new ones as `<file>.previous-<time>`, and the saved receipt and events as `.straddle-wizard/receipt.json.<state>-<time>` and `events.jsonl.<state>-<time>`. Only the integration program sets the skills' files aside; `wizard plan` and the other single-step commands always run their skill.
 
 When `STRADDLE_API_KEY` or the Sandbox environment isn't set, the session runs only the steps before the first one that can send Straddle requests (Setup and Plan), then ends. Set the values in your own shell and run `wizard resume` to continue at Integrate.
 
