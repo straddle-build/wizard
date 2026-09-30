@@ -40,7 +40,7 @@ export interface StepRun {
   // every file discovery may open.
   evidenceLimits: string[];
   checklist: string[];
-  // The Wizard's own decision, saved once: true only when the session ended normally, reported no abort, and printed
+  // The Wizard's own decision, saved once: true only when the session ended normally, did not last report an abort, and printed
   // a handoff status after which the next step may start. Resume reads this, never the markers alone.
   advanced: boolean;
 }

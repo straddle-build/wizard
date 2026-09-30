@@ -70,7 +70,7 @@ if (hookEvent === 'SessionStart') {
   if (!path) {
     deny('Straddle Wizard could not read the edit target, so it cannot confirm the durable plan exists.');
   } else if (rel === null || (SKILL_ARTIFACTS as readonly string[]).includes(rel) || gate.some((file) => existsSync(join(repo, file)))) {
-    // Allowed by the gate. Outside the repository, or once the plan exists, the client's own permission prompt decides.
+    // Allowed by the gate. Outside the repository, or once the plan exists, the client's own permission prompt or managed policy decides.
   } else {
     record({ at, kind: 'edit-denied', path: rel });
     deny(`No code edit before the durable plan exists: ${gate.join(' or ')} is not in the repository yet. Run the plan step first.`);
