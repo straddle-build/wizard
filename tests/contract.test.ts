@@ -52,7 +52,7 @@ function approvedPlan(repo: string, file: string, template: string, approvalLine
   writeFileSync(join(repo, file), draft);
   const hash = skillsHash(repo, file);
   assert.equal(hash, approvalHash(draft), `the Wizard's hash of ${file} is the skills' command's`);
-  const plan = draft.replace('- Plan state: Draft', '- Plan state: Approved').replace('- Approval: none', approvalLine.replace('<64 hex characters>', hash));
+  const plan = draft.replace('- Plan state: Draft', '- Plan state: Approved').replace('- Approval: none', approvalLine.replace(/<64 hex characters>|<hash>/, hash));
   writeFileSync(join(repo, file), plan);
   assert.equal(skillsHash(repo, file), hash, 'recording the approval leaves the hash as it was');
   return hash;
@@ -63,14 +63,14 @@ const PROGRAM: SkillName[] = ['straddle-setup', 'straddle-plan', 'straddle-migra
 test('state files written from the skills\' own templates carry the program through to the end, and only each step\'s finished status finishes it', () => {
   const repo = nextRepo();
 
-  // Plans: Integrate step 1's recorded-approval format for the integration plan; the migration plan's template line.
+  // Plans, approved in the format the approving step tells the agent to write: Integrate step 1's Recorded approval for
+  // the integration plan, Migrate step 5 for the migration plan.
   const recorded = skillFile('straddle-integrate/steps/01-begin.md').split('\n').find((l) => l.startsWith('- Approval: <YYYY-MM-DD>'));
   assert.ok(recorded, 'Integrate step 1 has no recorded Approval line');
   const planHash = approvedPlan(repo, 'straddle-integration-plan.md', skillFile('straddle-plan/references/plan-template.md'), recorded);
-  const migrationTemplate = skillFile('straddle-migrate/references/plan-template.md');
-  const migrationApproval = /^- Approval: none \| (.*)$/m.exec(migrationTemplate)?.[1];
-  assert.ok(migrationApproval, 'the migration plan template has no recorded Approval format');
-  const migrationHash = approvedPlan(repo, 'straddle-migration-plan.md', migrationTemplate, `- Approval: ${migrationApproval}`);
+  const migrationApproval = /`(- Approval: [^`]*recorded by straddle-migrate[^`]*)`/.exec(skillFile('straddle-migrate/steps/05-approval.md'))?.[1];
+  assert.ok(migrationApproval, 'Migrate step 5 has no recorded Approval line');
+  const migrationHash = approvedPlan(repo, 'straddle-migration-plan.md', skillFile('straddle-migrate/references/plan-template.md'), migrationApproval);
 
   // Reports: each header template, and the Status alternative the Wizard counts as finished.
   const reports: Array<{ skill: SkillName; file: string; block: string[]; hash: string; finished: string }> = [
