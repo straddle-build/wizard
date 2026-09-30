@@ -191,7 +191,7 @@ test('Integrate never starts before the durable plan exists', async () => {
   assert.equal(readReceipt(repo).state, 'blocked');
 });
 
-test('before Integrate and before Test the Wizard shows the plan state and where approval must happen, since it does not carry over between sessions', async () => {
+test('before Integrate and before Test the Wizard shows the plan state and where approval must happen, including that only a recorded approval of the current plan carries over', async () => {
   for (const [program, title] of [['integrate', 'Integrate'], ['test', 'Test']] as const) {
     const repo = nextRepo();
     writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
@@ -200,8 +200,8 @@ test('before Integrate and before Test the Wizard shows the plan state and where
     const r = await runWizard([program, '--client', 'claude'], { cwd: repo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '2'] });
 
     assert.match(r.stdout, /Plan: straddle-integration-plan\.md \(Plan state: Draft\)/, program);
-    assert.match(r.stdout, new RegExp(`${title} runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan`), program);
-    assert.match(r.stdout, /Approval given in an earlier session, including Plan's, does not carry over/, program);
+    assert.match(r.stdout, new RegExp(`${title} runs only an approved plan: an approval recorded in the file that matches the current plan`), program);
+    assert.match(r.stdout, /Editing the plan after approval voids the record/, program);
     assert.doesNotMatch(r.stdout, /Integrate asks for approval/, program);
   }
 
@@ -209,7 +209,7 @@ test('before Integrate and before Test the Wizard shows the plan state and where
   writeFiles(migrationRepo, { 'straddle-migration-plan.md': PLAN });
   const mr = await runWizard(['test', '--client', 'claude'], { cwd: migrationRepo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '2'] });
   assert.match(mr.stdout, /Plan: straddle-migration-plan\.md \(Plan state: Draft\)/);
-  assert.match(mr.stdout, /Test runs only an approved plan: Plan state: Approved in the file, or your approval of the current plan/);
+  assert.match(mr.stdout, /Test runs only an approved plan: an approval recorded in the file that matches the current plan/);
 });
 
 test('a step file the agent opens with a shell command is observed as entered, like one opened with Read', async () => {
@@ -333,7 +333,7 @@ test('client login loss blocks the handoff with a repair, and resume rechecks it
   assert.equal(resumed.code, 0, resumed.stdout);
   assert.match(resumed.stdout, /Saved run: setup program, blocked/);
   assert.match(resumed.stdout, /Choices\s+charges, marketplace, TypeScript, webhook endpoint/);
-  assert.match(resumed.stdout, /Approvals from earlier sessions do not carry over/);
+  assert.match(resumed.stdout, /Sandbox write approvals from earlier sessions do not carry over; a recorded plan approval does while the plan is unchanged/);
   assert.equal(readReceipt(repo).state, 'completed');
 });
 
