@@ -45,14 +45,51 @@ export function parseMarkers(output: string): ReportedMarker[] {
   return markers;
 }
 
-export function readObservedEvents(path: string): ObservedEvent[] {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8').split('\n').filter(Boolean).map((line) => parseJson(line)).filter((e): e is ObservedEvent => typeof field(e, 'kind') === 'string');
+// The string fields each persisted event must carry, and the ones it may carry.
+const EVENT_FIELDS: Record<ObservedEvent['kind'], { required: string[]; optional: string[] }> = {
+  'session-start': { required: [], optional: ['session', 'transcript'] },
+  'session-end': { required: [], optional: ['reason'] },
+  'turn-end': { required: [], optional: [] },
+  'step-entered': { required: ['skill', 'step'], optional: ['key'] },
+  edit: { required: ['path'], optional: [] },
+  'edit-denied': { required: ['path'], optional: [] },
+  marker: { required: ['key'], optional: [] },
+};
+const MARKER_KINDS: Record<ReportedMarker['kind'], true> = { progress: true, abort: true, handoff: true };
+
+const strings = (value: unknown, required: readonly string[], optional: readonly string[]) =>
+  required.every((k) => typeof field(value, k) === 'string') && optional.every((k) => field(value, k) === undefined || typeof field(value, k) === 'string');
+
+// events.jsonl sits in the repository and is appended by separate processes, so a line is used only when it has
+// exactly the shape its kind promises.
+function isObservedEvent(value: unknown): value is ObservedEvent {
+  const kind = text(field(value, 'kind'));
+  if (!kind || !Object.hasOwn(EVENT_FIELDS, kind) || typeof field(value, 'at') !== 'string') return false;
+  const shape = EVENT_FIELDS[kind as ObservedEvent['kind']];
+  if (!strings(value, shape.required, shape.optional)) return false;
+  if (kind !== 'marker') return true;
+  const marker = field(value, 'marker');
+  const markerKind = text(field(marker, 'kind'));
+  return markerKind !== undefined && Object.hasOwn(MARKER_KINDS, markerKind) && strings(marker, ['skill'], ['step', 'status', 'reason', 'report']);
+}
+
+// The recorded events, and how many lines were skipped because they aren't one.
+export function readObservedEvents(path: string): { events: ObservedEvent[]; skipped: number } {
+  if (!existsSync(path)) return { events: [], skipped: 0 };
+  const events: ObservedEvent[] = [];
+  let skipped = 0;
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    const value = parseJson(line);
+    if (isObservedEvent(value)) events.push(value);
+    else skipped++;
+  }
+  return { events, skipped };
 }
 
 // Appends the events not recorded yet: a keyed event already in the file is skipped.
 export function appendEvents(path: string, events: readonly ObservedEvent[]): void {
-  const seen = new Set(readObservedEvents(path).map((e) => text(field(e, 'key'))));
+  const seen = new Set(readObservedEvents(path).events.map((e) => text(field(e, 'key'))));
   const fresh = events.filter((e) => { const key = text(field(e, 'key')); return key === undefined || !seen.has(key); });
   if (fresh.length) appendFileSync(path, fresh.map((e) => JSON.stringify(e) + '\n').join(''));
 }

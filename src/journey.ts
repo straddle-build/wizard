@@ -332,9 +332,16 @@ function stepCounts(bundle: Bundle | null, skills: readonly SkillName[]): Steps 
   });
 }
 
-function currentProgress(receipt: Receipt, steps: Steps): StepProgress[] {
-  return progress(receipt.repo, receipt.exclude, steps, readObservedEvents(eventsPath(receipt.repo)));
+// The steps as the files and recorded events show them, and how many event lines were skipped as unreadable.
+interface Progress { items: StepProgress[]; skipped: number }
+
+function currentProgress(receipt: Receipt, steps: Steps): Progress {
+  const { events, skipped } = readObservedEvents(eventsPath(receipt.repo));
+  return { items: progress(receipt.repo, receipt.exclude, steps, events), skipped };
 }
+
+const skippedNote = (skipped: number) =>
+  `I skipped ${skipped} unreadable line${skipped === 1 ? '' : 's'} in ${WIZARD_DIR}/events.jsonl, so the checklist can miss some progress. The step files still decide where you resume.`;
 
 // One row per step: the tick, what its file says (read by the Wizard), what the agent reported, and what the client
 // showed of the step files the agent opened.
@@ -342,13 +349,18 @@ function stepRows(items: readonly StepProgress[], observed: boolean): string[] {
   const width = Math.max(...items.map((p) => SKILLS[p.skill].title.length)) + 2;
   return items.map((p) => {
     const route = SKILLS[p.skill];
-    const file = p.record ? `${route.record}: ${p.record.detail}` : 'writes no status file';
+    const file = p.record && route.record ? `${route.record.file}: ${p.record.detail}` : 'writes no status file';
     const said = !p.reported ? 'no handoff reported'
       : p.reported.kind === 'abort' ? `reported STRADDLE_ABORT${p.reported.reason ? ` (${p.reported.reason})` : ''}`
         : `reported ${p.reported.status ?? 'a handoff with no status'}`;
     const seen = observed ? `${p.total ? `${p.entered} of ${p.total}` : p.entered} step file${(p.total || p.entered) === 1 ? '' : 's'} opened` : 'progress not observable';
     return `${p.done ? '✓' : p.entered ? '▶' : ' '} ${route.title.padEnd(width)}${[file, said, seen].join(' · ')}`;
   });
+}
+
+function printSteps(io: Prompter, { items, skipped }: Progress, observed: boolean): void {
+  for (const line of stepRows(items, observed)) io.say(`  ${line}`);
+  if (skipped) io.say(`  ${skippedNote(skipped)}`);
 }
 
 const LEGEND = "✓ means the file and your agent's handoff agree. I read each file myself; a handoff is what your agent reported.";
@@ -410,23 +422,36 @@ function contextForAgent(receipt: Receipt): string {
   return `${context} Developer choices from the Straddle Wizard: ${decided.join('; ')}.`;
 }
 
-// The skills recognize `Straddle Wizard program:` and walk the listed steps in this one session.
-function programPrompt(run: readonly SkillName[], receipt: Receipt): string {
-  return `Straddle Wizard program: ${run.join(' → ')}. Start at ${run[0]}. Run the steps in order in this one session: after each step's STRADDLE_HANDOFF, `
-    + 'continue with the next unfinished step without waiting for the Wizard; stop and ask whenever a step needs the developer (plan approval, each Sandbox write). '
-    + contextForAgent(receipt);
+// Said to a reopened session, whose earlier previews and yeses are back in its context (wizard-program.md).
+const REOPENED = "This session was reopened by the Straddle Wizard. Approvals given before this message don't count: show every Sandbox write preview again and ask; a plan approval counts only as recorded in the plan file.";
+
+// The skills recognize a line beginning `Straddle Wizard program:` and walk the listed steps in this one session.
+function programPrompt(run: readonly SkillName[], receipt: Receipt, reopened: boolean): string {
+  return [
+    `Straddle Wizard program: ${run.join(' → ')}. Start at ${run[0]}.`,
+    "Run the listed steps in order in this one session: after each step's STRADDLE_HANDOFF, continue with the next listed step without waiting for the Wizard; stop and ask whenever a step needs the developer (plan approval, each Sandbox write).",
+    ...(reopened ? [REOPENED] : []),
+    contextForAgent(receipt),
+  ].join('\n');
 }
 
-// The exact configuration errors, what can still run, and how to fix them.
-function printConfigurationError(io: Prompter, errors: string[], env: NodeJS.ProcessEnv, canRun: readonly SkillName[], stopsAt: SkillName): void {
+// The exact configuration errors, what can still run, and how to fix them. `setupLeft`: Setup stops at a configuration
+// error, so the session leaves it until the values are set.
+function printConfigurationError(io: Prompter, errors: string[], env: NodeJS.ProcessEnv, canRun: readonly SkillName[], stopsAt: SkillName | undefined, setupLeft: boolean): void {
   io.say(`Configuration error: ${errors.join('; ')}.`);
-  const titles = canRun.map((s) => SKILLS[s].title);
-  if (titles.length) io.say(`  ${titles.join(' and ')} send no Straddle request, so they can run now. I'll end the session before ${SKILLS[stopsAt].title}.`);
-  io.say(`  ${SKILLS[stopsAt].title} can send Straddle requests, and the skill refuses every one until this is fixed, so ${titles.length ? 'it won\'t start' : 'I won\'t start it'}: zero Straddle requests are sent.`);
-  io.say(`  ${SKILLS[stopsAt].title} won't start until you fix this in your own shell and run \`wizard resume\`:`);
+  if (setupLeft) io.say("  Setup stops at this error, so I'll leave it until you've fixed it.");
+  const titles = canRun.map((s) => SKILLS[s].title).join(' and ');
+  if (titles) io.say(`  ${titles} ${canRun.length === 1 ? 'sends' : 'send'} no Straddle request, so I'll start the session there and list only ${titles}.`);
+  if (stopsAt) {
+    io.say(`  ${SKILLS[stopsAt].title} can send Straddle requests, and the skill refuses every one until this is fixed, so ${titles ? 'it won\'t start' : 'I won\'t start it'}: zero Straddle requests are sent.`);
+    io.say(`  ${SKILLS[stopsAt].title} won't start until you fix this in your own shell and run \`wizard resume\`:`);
+  } else {
+    io.say('  Fix this in your own shell, then run `wizard resume`:');
+  }
   io.say('    export STRADDLE_API_KEY=<your Sandbox key>    # type it in your shell, never into the Wizard');
   io.say('    export STRADDLE_ENVIRONMENT=sandbox');
   if (env.STRADDLE_BASE_URL) io.say('    unset STRADDLE_BASE_URL                       # or set it to https://sandbox.straddle.com');
+  if (setupLeft) io.say('  When you resume, Setup runs first and checks the values.');
   io.say("  I check only these shell variables, not a saved Straddle CLI login.");
   io.say();
 }
@@ -453,43 +478,53 @@ function runInteractive(command: Command, cwd: string, env: NodeJS.ProcessEnv): 
 
 interface Ready { bundle: Bundle; client: ClientState }
 
-// One agent session for the rest of the program: from `start` to the last step, or to the step before the first one
-// that can send Straddle requests when the configuration isn't ready.
+// `Setup, Plan and Integrate`.
+const titleList = (titles: readonly string[]) => titles.length > 1 ? `${titles.slice(0, -1).join(', ')} and ${titles.at(-1)}` : titles[0] ?? '';
+
+// One agent session for the rest of the program: `start` and every unfinished step after it, never a finished one. When
+// the configuration isn't ready, Setup waits (it stops at the error) and the session ends before the first step that
+// can send Straddle requests.
 async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: SkillName, ready: Ready, opts: JourneyOptions): Promise<number> {
   const { repo } = receipt;
   const client = receipt.client!;
   const label = CLIENT_LABEL[client];
   const skills = steps.map((s) => s.skill);
-  let run = skills.slice(skills.indexOf(start));
-  const first = SKILLS[start];
+  const atStart = currentProgress(receipt, steps).items;
+  let run = skills.slice(skills.indexOf(start)).filter((s) => s === start || !atStart.find((p) => p.skill === s)!.finished);
+
+  const config = straddleConfiguration(opts.env);
+  const setupLeft = config.errors.length > 0 && run[0] === 'straddle-setup' && run.length > 1;
+  if (setupLeft) run = run.slice(1);
+  const begin = run[0]!;
+  const first = SKILLS[begin];
 
   if (first.requiresAnyOf.length && !first.requiresAnyOf.some((f) => existsSync(join(repo, f)))) {
     io.say(`${first.title} needs ${first.requiresAnyOf.join(' or ')}. Run \`wizard plan\` first: no code changes happen before there's a plan.`);
     return finish(receipt, 'blocked', `${first.title} needs ${first.requiresAnyOf.join(' or ')}`);
   }
-  if (start === 'straddle-integrate' || start === 'straddle-test') showPlan(io, receipt, start);
+  if (begin === 'straddle-integrate' || begin === 'straddle-test') showPlan(io, receipt, begin);
 
-  const config = straddleConfiguration(opts.env);
   const sends = config.errors.length ? run.findIndex((s) => SKILLS[s].sendsStraddleRequests) : -1;
-  if (sends >= 0) {
-    printConfigurationError(io, config.errors, opts.env, run.slice(0, sends), run[sends]!);
+  if (sends >= 0 || setupLeft) {
+    printConfigurationError(io, config.errors, opts.env, sends < 0 ? run : run.slice(0, sends), sends < 0 ? undefined : run[sends], setupLeft);
     if (sends === 0) return finish(receipt, 'blocked', `configuration error: ${config.errors.join('; ')}`);
-    run = run.slice(0, sends);
+    if (sends > 0) run = run.slice(0, sends);
   }
 
   const previous = receipt.sessions.findLast((s) => s.client === client && s.sessionId);
-  const done = skills.slice(0, skills.indexOf(start)).map((s) => SKILLS[s].title);
+  const done = atStart.filter((p) => p.finished).map((p) => SKILLS[p.skill].title);
   const render = () => {
-    const items = currentProgress(receipt, steps);
-    return [`Straddle Wizard: ${stepTitles(skills)} in Codex`, '', statusLine(items), '', ...stepRows(items, true), '', LEGEND].join('\n');
+    const now = currentProgress(receipt, steps);
+    return [`Straddle Wizard: ${stepTitles(skills)} in Codex`, '', statusLine(now.items), '', ...stepRows(now.items, true), ...(now.skipped ? [skippedNote(now.skipped)] : []), '', LEGEND].join('\n');
   };
   const page = client === 'codex' ? await checklistPage(render) : null;
   io.say(io.bold(`Your session in ${label}: ${stepTitles(run)}`));
-  if (done.length) io.say(`  ${done.join(' and ')} ${done.length === 1 ? 'is' : 'are'} done; I read that from ${done.length === 1 ? 'its file' : 'their files'}. I'll start at ${first.title}.`);
+  if (done.length) io.say(`  ${titleList(done)} ${done.length === 1 ? 'is' : 'are'} done; I read that from ${done.length === 1 ? 'its file' : 'their files'}. I'll start at ${first.title}.`);
   if (client === 'cursor') return manualHandoff(io, receipt, steps, run);
   io.say(`  ${label} opens here and runs ${run.length === 1 ? 'the step' : 'these steps'} in one session. ${page ? `Follow the checklist at ${page.url}` : 'Its status line shows the checklist as it goes'}.`);
   io.say('  Answer its questions there, and approve or deny each change and each Sandbox request. Starting isn\'t approval of anything.');
-  io.say(`  To stop, exit ${label} (${client === 'claude' ? '/exit' : 'Ctrl-C twice'}). Run \`wizard resume\` later and I'll ${previous ? 'reopen your session' : 'reopen the session'} at the next unfinished step.`);
+  if (previous) io.say("  I'm reopening your earlier session, so I tell your agent that approvals from before don't count: every Sandbox write gets a fresh preview and question.");
+  io.say(`  To stop, exit ${label} (${client === 'claude' ? '/exit' : 'Ctrl-C twice'}). Run \`wizard resume\` later and I'll reopen the session at the next unfinished step.`);
   const go = await io.choose('Next', [{ label: 'Start', value: true }, { label: 'Stop here (resume later with `wizard resume`)', value: false }], 0);
   io.say();
   if (!go) { page?.close(); return finish(receipt, 'ready', `stopped before ${first.title}`); }
@@ -525,14 +560,14 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   saveReceipt(receipt);
 
   const follower = client === 'codex' ? followCodex(opts.env, repo, eventsFile, Date.now() - 1000, previous?.sessionId ?? null) : null;
-  const command = launchCommand({ client, skill: run[0]!, repo, context: programPrompt(run, receipt), settingsPath, pluginDir: ready.bundle.path, resume: previous?.sessionId ?? null });
+  const command = launchCommand({ client, skill: begin, repo, context: programPrompt(run, receipt, previous !== undefined), settingsPath, pluginDir: ready.bundle.path, resume: previous?.sessionId ?? null });
   const exit = await runInteractive(command, repo, opts.env);
   const rollout = follower?.stop();
   page?.close();
 
   session.endedAt = new Date().toISOString();
   session.exit = { code: exit.code, signal: exit.signal };
-  const events = readObservedEvents(eventsFile).filter((e) => e.at >= session.startedAt);
+  const events = readObservedEvents(eventsFile).events.filter((e) => e.at >= session.startedAt);
   const claudeSession = events.findLast((e) => e.kind === 'session-start' && e.session);
   session.sessionId = rollout?.session ?? (claudeSession?.kind === 'session-start' ? claudeSession.session ?? null : null);
   const transcripts = [...new Set(events.flatMap((e) => (e.kind === 'session-start' && e.transcript ? [e.transcript] : [])))];
@@ -541,8 +576,8 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   session.changedFiles = changedFiles(before, after);
   session.evidenceLimits = [...new Set([...before.limits, ...after.limits])];
 
-  const items = currentProgress(receipt, steps);
-  const next = nextStep(items);
+  const atEnd = currentProgress(receipt, steps);
+  const next = nextStep(atEnd.items);
   const ended = exit.error ? `${label} couldn't start: ${exit.error}` : exit.signal ? `${label} ended by signal ${exit.signal}` : `${label} exited with code ${exit.code}`;
   io.say(io.bold(`Session ended (${ended})`));
   for (const e of events) if (e.kind === 'edit-denied') io.say(`  Blocked an edit before the plan existed: ${e.path}`);
@@ -550,22 +585,22 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   else if (exit.error) finish(receipt, 'blocked', ended);
   else if (exit.signal) interrupted(io, receipt, session, `${ended} during ${SKILLS[next].title}`);
   else if (exit.code !== 0) finish(receipt, 'blocked', `${ended} during ${SKILLS[next].title}; I don't advance past a failed session`);
-  else if (!run.includes(next) && sends > 0) finish(receipt, 'blocked', `configuration error: ${config.errors.join('; ')}`);
+  else if (!run.includes(next) && (sends > 0 || setupLeft)) finish(receipt, 'blocked', `configuration error: ${config.errors.join('; ')}`);
   else {
-    const said = items.find((p) => p.skill === next)!.reported;
+    const said = atEnd.items.find((p) => p.skill === next)!.reported;
     if (said?.kind === 'abort') interrupted(io, receipt, session, `your agent reported STRADDLE_ABORT for ${SKILLS[next].title}: ${said.reason ?? 'no reason given'}`);
     else if (said?.kind === 'handoff' && !SKILLS[next].advanceOn.includes(said.status ?? '')) finish(receipt, 'blocked', `${SKILLS[next].title} reported ${said.status ?? 'no status'}`);
     else finish(receipt, 'ready', `next: ${SKILLS[next].title}`);
   }
   io.say();
   if (skills.includes('straddle-audit')) showAuditFindings(io, receipt);
-  return printReport(io, receipt, items, ready.bundle);
+  return printReport(io, receipt, atEnd, ready.bundle);
 }
 
 function interrupted(io: Prompter, receipt: Receipt, session: SessionRun, reason: string): void {
   io.say(`  ${reason[0]!.toUpperCase()}${reason.slice(1)}.`);
   io.say(`  Nothing is rolled back. The work already done stays in place: ${session.changedFiles.length ? session.changedFiles.join(', ') : 'no file changes'}.`);
-  io.say("  Run `wizard resume` and I'll reopen the session at the next unfinished step. Sandbox write approvals are asked again.");
+  io.say("  Run `wizard resume` and I'll reopen the session at the next unfinished step, telling your agent that approvals from before don't count.");
   finish(receipt, 'aborted', reason);
 }
 
@@ -573,7 +608,8 @@ function interrupted(io: Prompter, receipt: Receipt, session: SessionRun, reason
 async function manualHandoff(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[]): Promise<number> {
   io.say("  I can't drive Cursor, so here's the handoff:");
   io.say(`    1. Open ${receipt.repo} in Cursor with the Straddle plugin installed from its team marketplace.`);
-  io.say(`    2. Ask the Cursor agent: "Use the ${run[0]} skill. ${programPrompt(run, receipt)}"`);
+  io.say('    2. Ask the Cursor agent:');
+  for (const line of [`Use the ${run[0]} skill.`, ...programPrompt(run, receipt, false).split('\n')]) io.say(`         ${line}`);
   io.say('    3. Answer its questions and approvals in Cursor, then come back here.');
   io.say("  I can't see Cursor's progress, so I show none. When you're back, I read the files the skills wrote.");
   io.say();
@@ -581,10 +617,10 @@ async function manualHandoff(io: Prompter, receipt: Receipt, steps: Steps, run: 
   io.say();
   receipt.sessions.push({ client: 'cursor', sessionId: null, skills: [...run], startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), exit: null, changedFiles: [], evidenceLimits: ['I compared no files for a Cursor session'], checklist: [] });
   if (!back) return finish(receipt, 'ready', `handed off to Cursor at ${SKILLS[run[0]!].title}`);
-  const items = currentProgress(receipt, steps);
-  const next = nextStep(items);
+  const now = currentProgress(receipt, steps);
+  const next = nextStep(now.items);
   finish(receipt, next ? 'ready' : 'completed', next ? `next: ${SKILLS[next].title}` : 'every step is done and on file');
-  return printReport(io, receipt, items, null);
+  return printReport(io, receipt, now, null);
 }
 
 // ---------- Report ----------
@@ -614,7 +650,7 @@ function printInStraddle(io: Prompter, receipt: Receipt): void {
   io.say();
 }
 
-function printReport(io: Prompter, receipt: Receipt, items: readonly StepProgress[], bundle: Bundle | null): number {
+function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bundle | null): number {
   io.say(io.bold(`Straddle Wizard report: ${receipt.program} program, ${receipt.state}`));
   row(io, 'Reason', receipt.stateReason);
   row(io, 'Repository', receipt.repo);
@@ -623,7 +659,7 @@ function printReport(io: Prompter, receipt: Receipt, items: readonly StepProgres
   row(io, 'Run record', `${WIZARD_DIR}/receipt.json and ${WIZARD_DIR}/events.jsonl`);
   io.say();
   io.say(io.bold('Steps'));
-  for (const line of stepRows(items, receipt.client !== null && EVENT_SURFACE[receipt.client] === 'observed')) io.say(`  ${line}`);
+  printSteps(io, now, receipt.client !== null && EVENT_SURFACE[receipt.client] === 'observed');
   io.say(`  ${LEGEND}`);
   io.say();
   const changed = [...new Set(receipt.sessions.flatMap((s) => s.changedFiles))].sort();
@@ -654,7 +690,7 @@ function printReport(io: Prompter, receipt: Receipt, items: readonly StepProgres
     for (const f of evidence) io.say(`  ${f}`);
     io.say();
   }
-  const next = nextStep(items);
+  const next = nextStep(now.items);
   const goLive = next === 'straddle-go-live' ? readRepoFile(receipt.repo, 'straddle-go-live-report.md', receipt.exclude) : null;
   if (goLive?.kind === 'read') {
     io.say(io.bold('Go Live gaps (straddle-go-live-report.md)'));
@@ -670,7 +706,7 @@ function printReport(io: Prompter, receipt: Receipt, items: readonly StepProgres
     const where = next ? ` at ${SKILLS[next].title}` : '';
     io.say(receipt.state === 'ready'
       ? `Next: run \`wizard resume\` and I'll reopen the session${where}.`
-      : `Next: fix what stopped the run (${receipt.stateReason}), then run \`wizard resume\` and I'll reopen the session${where}. Sandbox write approvals are asked again.`);
+      : `Next: fix what stopped the run (${receipt.stateReason}), then run \`wizard resume\` and I'll reopen the session${where}. Approvals from before don't count there, so every Sandbox write is asked again.`);
   }
   return EXIT_CODE[receipt.state];
 }
@@ -686,12 +722,12 @@ async function runProgram(io: Prompter, receipt: Receipt, opts: JourneyOptions, 
   }
   saveReceipt(receipt);
   const steps = stepCounts(ready.bundle, programSkills(receipt.program, providers));
-  const items = currentProgress(receipt, steps);
+  const now = currentProgress(receipt, steps);
   // A single-skill program always runs its skill; the integration program starts at its first unfinished step.
-  const start = steps.length === 1 ? steps[0]!.skill : nextStep(items);
+  const start = steps.length === 1 ? steps[0]!.skill : nextStep(now.items);
   if (!start) {
     finish(receipt, 'completed', 'every step is done and on file');
-    return printReport(io, receipt, items, ready.bundle);
+    return printReport(io, receipt, now, ready.bundle);
   }
   return runSession(io, receipt, steps, start, ready, opts);
 }
@@ -700,7 +736,7 @@ function existingContractFiles(repo: string): string[] {
   return CONTRACT_FILES.filter((f) => existsSync(join(repo, f)));
 }
 
-function printSaved(io: Prompter, receipt: Receipt, items: readonly StepProgress[]): void {
+function printSaved(io: Prompter, receipt: Receipt, now: Progress): void {
   io.say(io.bold(`Saved run: ${receipt.program} program, ${receipt.state}: ${receipt.stateReason}`));
   row(io, 'Updated', receipt.updatedAt);
   row(io, 'Agent', receipt.client ? CLIENT_LABEL[receipt.client] : 'not chosen');
@@ -708,22 +744,22 @@ function printSaved(io: Prompter, receipt: Receipt, items: readonly StepProgress
   row(io, 'Framework', answerText(receipt.context.framework, []));
   row(io, 'Choices', choicesText(receipt));
   if (receipt.exclude.length) row(io, 'Never opened', receipt.exclude.join(', '));
-  for (const line of stepRows(items, receipt.client !== null && EVENT_SURFACE[receipt.client] === 'observed')) io.say(`  ${line}`);
+  printSteps(io, now, receipt.client !== null && EVENT_SURFACE[receipt.client] === 'observed');
   io.say("  Sandbox write approvals from earlier sessions don't carry over. A recorded plan approval does, while the plan is unchanged.");
   io.say('  I recheck the skills, your agent and your files before we continue.');
   io.say();
 }
 
-function savedProgress(receipt: Receipt, providers: readonly string[]): StepProgress[] {
+function savedProgress(receipt: Receipt, providers: readonly string[]): Progress {
   return currentProgress(receipt, programSkills(receipt.program, providers).map((skill) => ({ skill, total: 0 })));
 }
 
 async function resumeRun(io: Prompter, receipt: Receipt, opts: JourneyOptions, confirm: boolean): Promise<number> {
   const providers = discover(receipt.repo, receipt.exclude).providers;
-  const items = savedProgress(receipt, providers);
-  const start = nextStep(items);
+  const now = savedProgress(receipt, providers);
+  const start = nextStep(now.items);
   if (confirm) {
-    printSaved(io, receipt, items);
+    printSaved(io, receipt, now);
     if (!start) {
       io.say(`Everything in the saved ${receipt.program} run is done and on file. There's nothing to resume.`);
       return 0;
@@ -776,17 +812,16 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
     if (loaded.kind === 'found') {
       const saved = loaded.receipt;
       saved.exclude = [...new Set([...saved.exclude, ...opts.exclude])];
-      const providers = discover(repo, saved.exclude).providers;
-      const items = savedProgress(saved, providers);
-      printSaved(io, saved, items);
-      const at = nextStep(items);
+      const now = savedProgress(saved, discover(repo, saved.exclude).providers);
+      printSaved(io, saved, now);
+      const at = nextStep(now.items);
       label = at ? `Resume the ${saved.program} run at ${SKILLS[at].title}` : null;
     } else {
-      const items = currentProgress({ ...newReceipt({ repo, program, pid: process.pid }), exclude: opts.exclude }, programSkills(program, discover(repo, opts.exclude).providers).map((skill) => ({ skill, total: 0 })));
+      const now = currentProgress({ ...newReceipt({ repo, program, pid: process.pid }), exclude: opts.exclude }, programSkills(program, discover(repo, opts.exclude).providers).map((skill) => ({ skill, total: 0 })));
       io.say(io.bold('This repo already has Straddle files from an earlier run'));
-      for (const line of stepRows(items, false)) io.say(`  ${line}`);
+      printSteps(io, now, false);
       io.say();
-      const at = nextStep(items);
+      const at = nextStep(now.items);
       label = at ? `Resume at ${SKILLS[at].title}` : null;
     }
     const next = await io.choose('Start fresh or resume?', [
@@ -808,8 +843,8 @@ function keepAside(io: Prompter, dir: string, names: readonly string[], suffix: 
   if (kept.length) io.say(`I kept the earlier ${kept.join(', ')} beside the new ones as ${kept.map((n) => `${n}.${suffix}`).join(', ')}.`);
 }
 
-// A new receipt after the context screen, choices and agent. `fresh` also sets the earlier run's files aside; a
-// resume from files keeps them and starts at the first unfinished step.
+// A new receipt after the context screen, choices and agent. `fresh` also sets the earlier run's files aside, once you've
+// confirmed the new run by choosing an agent; a resume from files keeps them and starts at the first unfinished step.
 async function newRun(program: ProgramName, opts: JourneyOptions, loaded: LoadedReceipt, fresh: boolean): Promise<number> {
   const { io, repo } = opts;
   // A new run over a saved one keeps its exclusions too; nothing here removes a protection the developer added.
@@ -835,33 +870,39 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
     else { io.say("Cancelled. I haven't saved or changed anything."); return 130; }
   }
 
+  // The saved receipt goes aside now, so the new run has a record of its own from here. The earlier run's files and
+  // events stay in place until you've chosen an agent.
   const stamp = Date.now();
-  if (loaded.kind !== 'none') {
-    const state = loaded.kind === 'found' ? loaded.receipt.state : 'invalid';
-    keepAside(io, join(repo, WIZARD_DIR), ['receipt.json', ...(fresh ? ['events.jsonl'] : [])], `${state}-${stamp}`);
-  } else if (fresh) {
-    keepAside(io, join(repo, WIZARD_DIR), ['events.jsonl'], `previous-${stamp}`);
-  }
-  if (fresh && program === 'integration') keepAside(io, repo, CONTRACT_FILES, `previous-${stamp}`);
+  const suffix = `${loaded.kind === 'found' ? loaded.receipt.state : loaded.kind === 'invalid' ? 'invalid' : 'previous'}-${stamp}`;
+  if (loaded.kind !== 'none') keepAside(io, join(repo, WIZARD_DIR), ['receipt.json'], suffix);
   const receipt = newReceipt({ repo, program, pid: process.pid });
   receipt.context = context;
   receipt.exclude = exclude;
   saveReceipt(receipt);
   active.receipt = receipt;
+  const cancel = (reason: string) => {
+    io.say(fresh && program === 'integration' && existingContractFiles(repo).length ? 'Cancelled. Your earlier Straddle files stay where they were.' : 'Cancelled.');
+    return finish(receipt, 'aborted', reason);
+  };
 
   if (programFor(program).asksChoices) {
     const choices = await askChoices(io, context.language.value);
-    if (!choices) { io.say('Cancelled.'); return finish(receipt, 'aborted', 'you cancelled while choosing'); }
+    if (!choices) return cancel('you cancelled while choosing');
     receipt.context.choices = choices;
     saveReceipt(receipt);
   }
   receipt.client = opts.client ?? await chooseClient(io, opts.env);
-  if (!receipt.client) { io.say('Cancelled.'); return finish(receipt, 'aborted', 'you cancelled at agent choice'); }
+  if (!receipt.client) return cancel('you cancelled at agent choice');
+  if (fresh) {
+    keepAside(io, join(repo, WIZARD_DIR), ['events.jsonl'], suffix);
+    if (program === 'integration') keepAside(io, repo, CONTRACT_FILES, `previous-${stamp}`);
+  }
   saveReceipt(receipt);
   return runProgram(io, receipt, opts, facts.providers);
 }
 
 // For `wizard status`: the saved program as the status line shows it, from the files and recorded events.
 export function savedStatusLine(receipt: Receipt): string {
-  return statusLine(savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers));
+  const now = savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers);
+  return `${statusLine(now.items)}${now.skipped ? ` (${skippedNote(now.skipped)})` : ''}`;
 }

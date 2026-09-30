@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import type { ObservedEvent } from '../src/events.ts';
 import type { SkillName } from '../src/programs.ts';
@@ -31,18 +30,6 @@ const done = {
   'straddle-go-live-report.md': `# Straddle Go Live review\n\nStatus: ready\nPlan: straddle-integration-plan.md\nPlan hash: ${hash}\nResult: ready\n`,
 };
 
-test('the approval hash is exactly what the skills\' shell command computes', () => {
-  const repo = nextRepo();
-  writeFiles(repo, { 'straddle-integration-plan.md': approvedPlan, 'no-newline.md': approvedPlan.trimEnd(), 'crlf.md': approvedPlan.replaceAll('\n', '\r\n') });
-  for (const file of ['straddle-integration-plan.md', 'no-newline.md', 'crlf.md']) {
-    const shell = execFileSync('/bin/sh', ['-c', `grep -v -e '^- Plan state:' -e '^- Approval:' ${file} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-64`], { cwd: repo, encoding: 'utf8' }).trim();
-    const content = { 'straddle-integration-plan.md': approvedPlan, 'no-newline.md': approvedPlan.trimEnd(), 'crlf.md': approvedPlan.replaceAll('\n', '\r\n') }[file]!;
-    assert.equal(approvalHash(content), shell, file);
-  }
-  // Recording the approval changes only the two excluded lines, so the hash is the draft's.
-  assert.equal(approvalHash(approvedPlan), approvalHash(draftPlan));
-});
-
 test('resume picks the first unfinished step from the files, in program order', () => {
   assert.equal(next({}), 'straddle-setup');
   assert.equal(next({ 'straddle-setup.md': 'Status: blocked (no Sandbox key)\n' }), 'straddle-setup');
@@ -67,13 +54,39 @@ test('resume goes back to Plan when the plan changed after approval, and redoes 
   assert.equal(next({ ...done, 'straddle-go-live-report.md': done['straddle-go-live-report.md'].replace(hash, older) }), 'straddle-go-live');
 });
 
-test('Migrate is finished only when its approved plan is on file and it reported `migrated`, because its edits come after approval', () => {
-  const repo = nextRepo();
-  writeFiles(repo, { ...done, 'straddle-migration-plan.md': approvedPlan });
-  const withMigrate = [steps[0]!, steps[1]!, { skill: 'straddle-migrate' as const, total: 8 }, ...steps.slice(2)];
+const migrationReport = (status: string, planHash = hash) => `# Straddle migration report\n\nStatus: ${status}\nPlan: straddle-migration-plan.md\nPlan hash: ${planHash}\n\nProvider: Stripe\n`;
+const withMigrate = [steps[0]!, steps[1]!, { skill: 'straddle-migrate' as const, total: 8 }, ...steps.slice(2)];
+
+test('Migrate is finished when its report says migrated for the current migration plan, from the files alone', () => {
+  const nextWithMigrate = (files: Record<string, string>, events: ObservedEvent[] = []) => {
+    const repo = nextRepo();
+    writeFiles(repo, files);
+    return nextStep(progress(repo, [], withMigrate, events));
+  };
   const migrated: ObservedEvent = { at: 't', kind: 'marker', key: 'm', marker: { kind: 'handoff', skill: 'straddle-migrate', status: 'migrated' } };
-  assert.equal(nextStep(progress(repo, [], withMigrate, [])), 'straddle-migrate');
-  assert.equal(nextStep(progress(repo, [], withMigrate, [migrated])), null);
+  const base = { ...done, 'straddle-migration-plan.md': approvedPlan };
+
+  // No session events at all, as after a Cursor run or with .straddle-wizard/ gone: the report decides.
+  assert.equal(nextWithMigrate({ ...base, 'straddle-migration-report.md': migrationReport('migrated') }), null);
+  // An approved plan is not a finished migration, whatever the agent reported.
+  assert.equal(nextWithMigrate(base, [migrated]), 'straddle-migrate');
+  assert.equal(nextWithMigrate({ ...base, 'straddle-migration-report.md': migrationReport('awaiting_approval (rows 3-4)') }, [migrated]), 'straddle-migrate');
+  assert.equal(nextWithMigrate({ ...base, 'straddle-migration-report.md': migrationReport('blocked (plan not approved)') }), 'straddle-migrate');
+  // A changed and reapproved migration plan isn't implemented by the report made for the earlier one.
+  const reapproved = approve(draftPlan.replace('add client', 'add client and payouts'));
+  assert.equal(nextWithMigrate({ ...base, 'straddle-migration-plan.md': reapproved, 'straddle-migration-report.md': migrationReport('migrated') }, [migrated]), 'straddle-migrate');
+});
+
+test('a failed Test or not-ready Go Live handoff never shows a tick, even when an earlier successful file is still on disk', () => {
+  const repo = nextRepo();
+  writeFiles(repo, done);
+  const handoff = (skill: string, status: string): ObservedEvent => ({ at: 't', kind: 'marker', key: `${skill}-${status}`, marker: { kind: 'handoff', skill, status } });
+  const earlier = [handoff('straddle-setup', 'ready'), handoff('straddle-plan', 'draft'), handoff('straddle-integrate', 'complete')];
+
+  for (const [test, goLive] of [['failed', 'not_ready'], ['partial', 'blocked']]) {
+    assert.equal(statusLine(progress(repo, [], steps, [...earlier, handoff('straddle-test', test!), handoff('straddle-go-live', goLive!)])), 'Setup ✓ · Plan ✓ · Integrate ✓ · Test · Go Live', `${test}, ${goLive}`);
+  }
+  assert.equal(statusLine(progress(repo, [], steps, [...earlier, handoff('straddle-test', 'passed'), handoff('straddle-go-live', 'ready')])), 'Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓');
 });
 
 test('a contract file the Wizard must not open counts as unfinished, and its detail says why', () => {

@@ -2,12 +2,14 @@
 
 export const INTEGRATION_PLAN = 'straddle-integration-plan.md';
 export const MIGRATION_PLAN = 'straddle-migration-plan.md';
+export const MIGRATION_REPORT = 'straddle-migration-report.md';
 
 // The files the integration program's skills write, each opening with a status header. Resume reads them, never session state.
 export const CONTRACT_FILES = [
   'straddle-setup.md',
   INTEGRATION_PLAN,
   MIGRATION_PLAN,
+  MIGRATION_REPORT,
   'straddle-integration-report.md',
   'straddle-test-evidence.md',
   'straddle-go-live-report.md',
@@ -22,7 +24,8 @@ export const SKILL_ARTIFACTS = [
 
 export interface SkillRoute {
   title: string;
-  // Handoff statuses that report the step finished; a step ticks only when its file agrees.
+  // Handoff statuses that report the step succeeded. A step ticks only when its file agrees, so a failed, partial or
+  // not-ready handoff never ticks, whatever an earlier run left on disk.
   advanceOn: readonly string[];
   // The skill will not run without one of these files in the repository.
   requiresAnyOf: readonly string[];
@@ -30,18 +33,20 @@ export interface SkillRoute {
   editGate: readonly string[];
   // The skill can send Straddle requests, so missing key or environment is shown as a configuration error first.
   sendsStraddleRequests: boolean;
-  // The contract file whose status header says whether this step is done. Skills without one finish on their handoff.
-  record?: (typeof CONTRACT_FILES)[number];
+  // The contract file whose header says whether this step is finished (wizard-program.md), and for a report the
+  // `Status:` word that means finished. A plan has no status word: it's finished when approved at its current hash.
+  // Skills without a file finish on their handoff.
+  record?: { file: (typeof CONTRACT_FILES)[number]; finished?: string };
 }
 
 const ROUTES = {
-  'straddle-setup': { title: 'Setup', advanceOn: ['ready', 'ready_with_warnings'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: 'straddle-setup.md' },
-  'straddle-plan': { title: 'Plan', advanceOn: ['draft'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: INTEGRATION_PLAN },
-  'straddle-integrate': { title: 'Integrate', advanceOn: ['complete'], requiresAnyOf: [INTEGRATION_PLAN], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: true, record: 'straddle-integration-report.md' },
-  'straddle-test': { title: 'Test', advanceOn: ['passed', 'failed', 'partial'], requiresAnyOf: [INTEGRATION_PLAN, MIGRATION_PLAN], editGate: [INTEGRATION_PLAN, MIGRATION_PLAN], sendsStraddleRequests: true, record: 'straddle-test-evidence.md' },
+  'straddle-setup': { title: 'Setup', advanceOn: ['ready', 'ready_with_warnings'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: { file: 'straddle-setup.md', finished: 'complete' } },
+  'straddle-plan': { title: 'Plan', advanceOn: ['draft'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: { file: INTEGRATION_PLAN } },
+  'straddle-integrate': { title: 'Integrate', advanceOn: ['complete'], requiresAnyOf: [INTEGRATION_PLAN], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: true, record: { file: 'straddle-integration-report.md', finished: 'complete' } },
+  'straddle-test': { title: 'Test', advanceOn: ['passed'], requiresAnyOf: [INTEGRATION_PLAN, MIGRATION_PLAN], editGate: [INTEGRATION_PLAN, MIGRATION_PLAN], sendsStraddleRequests: true, record: { file: 'straddle-test-evidence.md', finished: 'complete' } },
   'straddle-get-started': { title: 'Get Started', advanceOn: ['routed', 'needs_input'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false },
-  'straddle-migrate': { title: 'Migrate', advanceOn: ['migrated'], requiresAnyOf: [], editGate: [MIGRATION_PLAN], sendsStraddleRequests: false, record: MIGRATION_PLAN },
-  'straddle-go-live': { title: 'Go Live', advanceOn: ['ready', 'not_ready'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: 'straddle-go-live-report.md' },
+  'straddle-migrate': { title: 'Migrate', advanceOn: ['migrated'], requiresAnyOf: [], editGate: [MIGRATION_PLAN], sendsStraddleRequests: false, record: { file: MIGRATION_REPORT, finished: 'migrated' } },
+  'straddle-go-live': { title: 'Go Live', advanceOn: ['ready'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: { file: 'straddle-go-live-report.md', finished: 'ready' } },
   'straddle-audit': { title: 'Audit', advanceOn: ['findings', 'clean'], requiresAnyOf: [], editGate: ['straddle-audit-report.md'], sendsStraddleRequests: false },
 } as const satisfies Record<string, SkillRoute>;
 

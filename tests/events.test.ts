@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { followCodex } from '../src/codex.ts';
@@ -68,7 +68,7 @@ test('markers swept from a Claude Code transcript at every turn end are recorded
   writeFileSync(transcript, [...lines, assistant('a2', 'STRADDLE_PROGRESS {"skill":"straddle-plan","step":"01-decisions"}')].join('\n') + '\n');
   appendEvents(events, transcriptMarkers(transcript, 't2'));
 
-  assert.deepEqual(readObservedEvents(events).map((e) => (e.kind === 'marker' ? [e.at, e.marker.skill, e.marker.kind] : e.kind)), [
+  assert.deepEqual(readObservedEvents(events).events.map((e) => (e.kind === 'marker' ? [e.at, e.marker.skill, e.marker.kind] : e.kind)), [
     ['t1', 'straddle-setup', 'handoff'],
     ['t2', 'straddle-plan', 'progress'],
   ]);
@@ -110,10 +110,55 @@ test('followCodex follows rollout log and survives transient filesystem errors o
   appendFileSync(rollout, line2 + '\n');
   const state = follower.stop();
   assert.equal(state.session, 's1');
-  assert.equal(readObservedEvents(events).length, 2);
+  assert.equal(readObservedEvents(events).events.length, 2);
 
   unlinkSync(rollout);
   const follower2 = followCodex({ CODEX_HOME: dir }, repo, events, 0, null);
   assert.doesNotThrow(() => follower2.stop());
+});
+
+test('persisted events of the wrong shape are skipped and counted at the read boundary, never handed to a consumer', () => {
+  const file = join(tempDir('events'), 'events.jsonl');
+  const valid = [
+    { at: 't1', kind: 'session-start', session: 'c0ffee00-1111-2222-3333-444455556666' },
+    { at: 't2', kind: 'step-entered', skill: 'straddle-setup', step: '01-begin' },
+    { at: 't3', kind: 'marker', key: 'a1:0', marker: { kind: 'handoff', skill: 'straddle-setup', status: 'ready' } },
+  ];
+  const malformed = [
+    '{"at":"t4","kind":"marker"}',
+    '{"at":"t5","kind":"marker","key":"k","marker":{"kind":"handoff"}}',
+    '{"at":"t6","kind":"marker","key":"k","marker":{"kind":"shout","skill":"straddle-setup"}}',
+    '{"at":"t7","kind":"step-entered","skill":"straddle-setup"}',
+    '{"kind":"turn-end"}',
+    '{"at":"t8","kind":"edit","path":7}',
+    '{"at":"t9","kind":"reboot"}',
+    'not json',
+  ];
+  writeFileSync(file, [...valid.map((e) => JSON.stringify(e)), ...malformed].join('\n') + '\n');
+
+  const read = readObservedEvents(file);
+  assert.deepEqual(read.events, valid);
+  assert.equal(read.skipped, malformed.length);
+});
+
+test('a new Codex session is found by when its session started, not by which rollout was written last', () => {
+  const dir = tempDir('codex');
+  const sessions = join(dir, 'sessions', '2026', '09', '30');
+  mkdirSync(sessions, { recursive: true });
+  const repo = tempDir('repo');
+  const events = join(dir, 'events.jsonl');
+  const since = Date.now() - 60_000;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const meta = (id: string, started: number) => JSON.stringify({ timestamp: iso(started), type: 'session_meta', payload: { id, cwd: repo, timestamp: iso(started) } }) + '\n';
+  const fresh = join(sessions, 'rollout-new.jsonl');
+  const other = join(sessions, 'rollout-other.jsonl');
+  writeFileSync(fresh, meta('new-session-0001', since + 5_000));
+  // Another Codex session in the same repo, started before this one and still writing: its file is the newest on disk.
+  writeFileSync(other, meta('other-session-01', since - 30 * 60_000));
+  utimesSync(fresh, (since + 5_000) / 1000, (since + 5_000) / 1000);
+  utimesSync(other, (since + 50_000) / 1000, (since + 50_000) / 1000);
+
+  const state = followCodex({ CODEX_HOME: dir }, repo, events, since, null).stop();
+  assert.equal(state.session, 'new-session-0001');
 });
 

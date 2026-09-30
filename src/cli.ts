@@ -18,7 +18,7 @@ const USAGE = `Straddle Wizard ${WIZARD_VERSION}
 
 Sets up Straddle in your repo with your own coding agent, in one guided session.
 
-  wizard                       Guided integration in one agent session: Setup, Plan, Integrate, Test, Go Live
+  wizard                       Guided integration in one agent session: Setup, Plan, Migrate (when you use another payment provider), Integrate, Test, Go Live
   wizard resume                Pick up at the first unfinished step, from the files the skills wrote
   wizard setup | plan | integrate | test
   wizard get-started | migrate | go-live | audit

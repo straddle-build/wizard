@@ -1,11 +1,12 @@
 // Guided journey through the real CLI, with Claude Code replaced by a scripted process (tests/fixtures/fake-claude.mjs).
 // This is simulated-adapter evidence. Native client proof is recorded separately.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { approvalHash } from '../src/progress.ts';
-import { SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
+import { ROOT, SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
 
 const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENVIRONMENT: 'sandbox' };
 const PLAN = '# Straddle integration plan\n\n## Status\n\n- Plan state: Draft\n- Approval: none\n\n## File changes\n\n| File | Change |\n| --- | --- |\n| src/straddle.ts | add client |\n\n## Future Sandbox writes\n\n| Write | Tool |\n| --- | --- |\n| create customer | SDK |\n\n## Verification\n';
@@ -25,6 +26,12 @@ const DEFAULT_SESSIONS = {
     steps: ['01-begin', '02-repository', '03-cli-and-context', '04-mcp', '05-report'],
     writes: [{ path: 'straddle-setup.md', content: SETUP_FILE }],
     text: handoff('straddle-setup', 'ready_with_warnings', ['- [ ] The environment is Sandbox.']),
+    // Like the real Setup (05-report.md): a missing key blocks it.
+    withoutKey: {
+      steps: ['01-begin', '02-repository', '03-cli-and-context', '04-mcp', '05-report'],
+      writes: [{ path: 'straddle-setup.md', content: SETUP_FILE.replace('Status: complete', 'Status: blocked (STRADDLE_API_KEY not set)') }],
+      text: handoff('straddle-setup', 'blocked'),
+    },
   },
   'straddle-plan': {
     steps: ['01-decisions', '02-sources', '03-write-plan', '04-review', '05-handoff', '06-show-me'],
@@ -48,6 +55,8 @@ const DEFAULT_SESSIONS = {
   },
 };
 const PROGRAM_LINE = 'Straddle Wizard program: straddle-setup → straddle-plan → straddle-integrate → straddle-test → straddle-go-live. Start at straddle-setup.';
+// wizard-program.md's rule for a session the Wizard reopens: earlier previews and yeses are back in its context.
+const REOPENED = "This session was reopened by the Straddle Wizard. Approvals given before this message don't count: show every Sandbox write preview again and ask; a plan approval counts only as recorded in the plan file.";
 
 // Continue, charges, marketplace, suggested SDK, webhook endpoint, Claude Code.
 const CHOOSE_CONTEXT = ['1', '1', '3', '', '1', '1'];
@@ -179,7 +188,9 @@ test('default journey: one isolated agent session walks the whole program, with 
   // One launch, in isolated settings, naming the whole program.
   const [launch, ...others] = launches(claude);
   assert.equal(others.length, 0);
-  assert.ok(launch!.at(-1)!.startsWith(`/straddle:straddle-setup ${PROGRAM_LINE} `), launch!.at(-1));
+  // N1: the program line begins a line of its own, after the skill invocation.
+  assert.ok(launch!.at(-1)!.startsWith(`/straddle:straddle-setup\n${PROGRAM_LINE}\n`), launch!.at(-1));
+  assert.ok(!launch!.at(-1)!.includes(REOPENED), 'a new session has no earlier approvals to disown');
   assert.ok(!launch!.some((a) => /--resume|--continue|dangerously|bypass|--permission-mode/.test(a)), `native approvals stay interactive: ${launch}`);
   // The developer's allow rules, hooks, plugins and auto or accept-edits default never approve the session's tool calls.
   assert.equal(launch![launch!.indexOf('--setting-sources') + 1], '');
@@ -233,11 +244,38 @@ test('interrupted mid-program: resume reopens the same session at the first unfi
   assert.match(resumed.stdout, /Resume at Integrate/);
   const [, second] = launches(claude);
   assert.equal(second![second!.indexOf('--resume') + 1], aborted.sessions[0]!.sessionId);
-  assert.ok(second!.at(-1)!.startsWith('/straddle:straddle-integrate Straddle Wizard program: straddle-integrate → straddle-test → straddle-go-live. Start at straddle-integrate.'), second!.at(-1));
+  const prompt = second!.at(-1)!;
+  assert.ok(prompt.startsWith('/straddle:straddle-integrate\nStraddle Wizard program: straddle-integrate → straddle-test → straddle-go-live. Start at straddle-integrate.\n'), prompt);
+  // F: the reopened conversation still holds the earlier previews and yeses, so the agent is told they don't count.
+  assert.equal(prompt.split('\n')[3], REOPENED);
+  assert.match(resumed.stdout, /I'm reopening your earlier session, so I tell your agent that approvals from before don't count/);
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'completed');
   assert.equal(receipt.sessions.length, 2);
   assert.equal(statusLines(claude).at(-1), 'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓');
+});
+
+test('resume never replays a finished step: with Setup blocked and later steps done, the session lists Setup and only the unfinished steps after it', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, {
+    'straddle-setup.md': SETUP_FILE.replace('Status: complete', 'Status: blocked (Docs MCP missing)'),
+    'straddle-integration-plan.md': APPROVED_PLAN,
+    'straddle-integration-report.md': report('complete'),
+    'straddle-test-evidence.md': EVIDENCE,
+  });
+  const claude = fakeClaude();
+  claude.sessions(DEFAULT_SESSIONS);
+
+  const r = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+
+  assert.equal(r.code, 0, r.stdout);
+  assert.match(r.stdout, /Your session in Claude Code: Setup → Go Live\n/);
+  assert.match(r.stdout, /Plan, Integrate and Test are done; I read that from their files\. I'll start at Setup\./);
+  const [launch] = launches(claude);
+  assert.ok(launch!.at(-1)!.startsWith('/straddle:straddle-setup\nStraddle Wizard program: straddle-setup → straddle-go-live. Start at straddle-setup.\n'), launch!.at(-1));
+  // Plan never ran again, so its approval stands.
+  assert.equal(readFileSync(join(repo, 'straddle-integration-plan.md'), 'utf8'), APPROVED_PLAN);
+  assert.equal(readReceipt(repo).state, 'completed');
 });
 
 test('resume trusts the files over the session: a finished report moves on to Test, and a plan edited after approval goes back to Plan', async () => {
@@ -259,15 +297,23 @@ test('resume trusts the files over the session: a finished report moves on to Te
   assert.match(toPlan.stdout, /Resume at Plan/);
 });
 
-test('with Straddle files already here, the Wizard asks to start fresh or resume: fresh keeps them beside the new ones, resume starts at the first unfinished step', async () => {
+test('with Straddle files already here, the Wizard asks to start fresh or resume: fresh sets them aside only once the run is confirmed, resume starts at the first unfinished step', async () => {
   const fresh = nextRepo();
   writeFiles(fresh, { 'straddle-setup.md': SETUP_FILE, 'straddle-integration-plan.md': APPROVED_PLAN });
+  const claude = fakeClaude();
 
-  // Start fresh, Continue, the four choices, then Cancel at the agent choice.
-  const r = await runWizard([], { cwd: fresh, claude: fakeClaude(), env: CONFIGURED, input: ['2', '1', '1', '3', '', '1', '3'] });
+  // Start fresh, Continue, the four choices, then Cancel at the agent choice: nothing moves.
+  const cancelled = await runWizard([], { cwd: fresh, claude, env: CONFIGURED, input: ['2', '1', '1', '3', '', '1', '3'] });
 
-  assert.match(r.stdout, /This repo already has Straddle files from an earlier run/);
-  assert.match(r.stdout, /Start fresh or resume\?\n\s+1\) Resume at Integrate\n\s+2\) Start fresh/);
+  assert.match(cancelled.stdout, /This repo already has Straddle files from an earlier run/);
+  assert.match(cancelled.stdout, /Start fresh or resume\?\n\s+1\) Resume at Integrate\n\s+2\) Start fresh/);
+  assert.match(cancelled.stdout, /Cancelled\. Your earlier Straddle files stay where they were\./);
+  assert.equal(readFileSync(join(fresh, 'straddle-integration-plan.md'), 'utf8'), APPROVED_PLAN);
+  assert.deepEqual(readdirSync(fresh).filter((f) => f.includes('.previous-')), []);
+
+  // Start fresh again and choose Claude Code, then stop before the session: the earlier files now sit beside the new ones.
+  await runWizard([], { cwd: fresh, claude, env: CONFIGURED, input: ['2', '1', '1', '3', '', '1', '1', '2'] });
+
   const kept = readdirSync(fresh).filter((f) => f.includes('.previous-')).sort();
   assert.deepEqual(kept.map((f) => f.replace(/\d+$/, 'N')), ['straddle-integration-plan.md.previous-N', 'straddle-setup.md.previous-N']);
   assert.equal(existsSync(join(fresh, 'straddle-setup.md')), false);
@@ -275,34 +321,43 @@ test('with Straddle files already here, the Wizard asks to start fresh or resume
   // Without any receipt, `wizard resume` confirms the details and starts at the first unfinished step.
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-setup.md': SETUP_FILE, 'straddle-integration-plan.md': APPROVED_PLAN });
-  const claude = fakeClaude();
   claude.sessions(DEFAULT_SESSIONS);
   const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
 
   assert.equal(resumed.code, 0, resumed.stdout);
   assert.match(resumed.stdout, /I'll pick up from the Straddle files in this repo/);
   assert.match(resumed.stdout, /Setup and Plan are done; I read that from their files\. I'll start at Integrate\./);
-  assert.ok(launches(claude)[0]!.at(-1)!.startsWith('/straddle:straddle-integrate Straddle Wizard program: straddle-integrate → straddle-test → straddle-go-live.'));
+  assert.ok(launches(claude)[0]!.at(-1)!.startsWith('/straddle:straddle-integrate\nStraddle Wizard program: straddle-integrate → straddle-test → straddle-go-live.'));
   assert.equal(readFileSync(join(repo, 'straddle-setup.md'), 'utf8'), SETUP_FILE);
 });
 
-test('without a Sandbox configuration the session stops before the first step that can send Straddle requests, and resume continues there', async () => {
+test('without a Sandbox configuration the session starts at Plan, since Setup stops at the missing key, and resume runs Setup and then the rest', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
   claude.sessions(DEFAULT_SESSIONS);
 
   const first = await runWizard([], { cwd: repo, claude, env: {}, input: [...CHOOSE_CONTEXT, '1'] });
+  const setupRanFirst = existsSync(join(repo, 'straddle-setup.md'));
   const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
 
   assert.equal(first.code, 1, first.stdout);
   assert.match(first.stdout, /Configuration error: STRADDLE_API_KEY is not set; no environment is declared \(STRADDLE_ENVIRONMENT=sandbox\)\./);
-  assert.match(first.stdout, /Setup and Plan send no Straddle request, so they can run now\. I'll end the session before Integrate\./);
+  assert.match(first.stdout, /Setup stops at this error, so I'll leave it until you've fixed it\./);
+  assert.match(first.stdout, /Plan sends no Straddle request, so I'll start the session there and list only Plan\./);
   assert.match(first.stdout, /zero Straddle requests are sent/);
+  assert.doesNotMatch(first.stdout, /end the session/);
+  assert.equal(setupRanFirst, false, 'Setup waits for the key instead of running and stopping the session');
   const [one, two] = launches(claude);
-  assert.ok(one!.at(-1)!.startsWith('/straddle:straddle-setup Straddle Wizard program: straddle-setup → straddle-plan. Start at straddle-setup.'), one!.at(-1));
+  assert.ok(one!.at(-1)!.startsWith('/straddle:straddle-plan\nStraddle Wizard program: straddle-plan. Start at straddle-plan.\n'), one!.at(-1));
   assert.equal(resumed.code, 0, resumed.stdout);
-  assert.ok(two!.at(-1)!.startsWith('/straddle:straddle-integrate Straddle Wizard program: straddle-integrate → straddle-test → straddle-go-live.'), two!.at(-1));
+  // Plan finished in the first session, so it isn't listed again.
+  assert.ok(two!.at(-1)!.startsWith('/straddle:straddle-setup\nStraddle Wizard program: straddle-setup → straddle-integrate → straddle-test → straddle-go-live. Start at straddle-setup.\n'), two!.at(-1));
   assert.equal(readReceipt(repo).state, 'completed');
+
+  // `wizard setup` on its own still runs Setup, which reports the missing key.
+  const alone = nextRepo();
+  const setupOnly = await runWizard(['setup', '--client', 'claude'], { cwd: alone, claude, env: {}, input: [...CHOOSE_CONTEXT.slice(0, -1), '1'] });
+  assert.match(setupOnly.stdout, /Setup\s+straddle-setup\.md: Status: blocked \(STRADDLE_API_KEY not set\) · reported blocked/);
 });
 
 test('another payment provider in the repo adds Migrate to the program', async () => {
@@ -548,11 +603,14 @@ test('resume finishes cancelled upfront choices, applies new exclusions before i
   assert.match(resumed.stdout, /Choices\s+not answered yet; I'll ask before your agent starts/);
   assert.match(resumed.stdout, /Never opened\s+src\/private-data\.txt/);
   assert.equal(resumed.code, 0, resumed.stdout);
-  assert.equal(launches(claude)[0]!.at(-1), '/straddle:straddle-plan Straddle Wizard program: straddle-plan. Start at straddle-plan. Run the steps in order in this one session: '
-    + "after each step's STRADDLE_HANDOFF, continue with the next unfinished step without waiting for the Wizard; stop and ask whenever a step needs the developer "
-    + '(plan approval, each Sandbox write). Repository context confirmed in the Straddle Wizard: language TypeScript (detected); '
-    + 'framework CUSTOM_FRAMEWORK (corrected by the developer). Developer choices from the Straddle Wizard: products charges; integration type marketplace; '
-    + 'SDK TypeScript; notification path webhook endpoint.');
+  assert.equal(launches(claude)[0]!.at(-1), [
+    '/straddle:straddle-plan',
+    'Straddle Wizard program: straddle-plan. Start at straddle-plan.',
+    // N2: the skills run only the listed steps (wizard-program.md), so the prompt says "the next listed step".
+    "Run the listed steps in order in this one session: after each step's STRADDLE_HANDOFF, continue with the next listed step without waiting for the Wizard; stop and ask whenever a step needs the developer (plan approval, each Sandbox write).",
+    'Repository context confirmed in the Straddle Wizard: language TypeScript (detected); framework CUSTOM_FRAMEWORK (corrected by the developer). '
+      + 'Developer choices from the Straddle Wizard: products charges; integration type marketplace; SDK TypeScript; notification path webhook endpoint.',
+  ].join('\n'));
   const receipt = readReceipt(repo);
   assert.deepEqual(receipt.exclude, ['src/private-data.txt']);
   assert.deepEqual(receipt.sessions[0]?.changedFiles, ['straddle-integration-plan.md']);
@@ -577,6 +635,25 @@ test('a completed run is shown and kept beside the next run instead of being ove
   assert.equal(readReceipt(repo).program, 'audit');
   // Only the integration program sets the skills' files aside.
   assert.equal(readFileSync(join(repo, 'straddle-setup.md'), 'utf8'), SETUP_FILE);
+});
+
+test('a malformed line in events.jsonl is skipped with a note, and the start screen and the status line still read the files', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, {
+    'straddle-setup.md': SETUP_FILE,
+    'straddle-integration-plan.md': APPROVED_PLAN,
+    '.straddle-wizard/events.jsonl': '{"at":"t1","kind":"marker"}\n{"at":"t2","kind":"step-entered","skill":"straddle-integrate","step":"01-begin"}\n',
+  });
+
+  // Cancel at "Start fresh or resume?".
+  const r = await runWizard([], { cwd: repo, claude: fakeClaude(), env: CONFIGURED, input: ['3'] });
+  const line = spawnSync(process.execPath, [join(ROOT, 'src', 'statusline.ts'), '--repo', repo, '--steps', 'straddle-setup:5,straddle-plan:6,straddle-integrate:7'], { encoding: 'utf8' });
+
+  assert.equal(r.code, 130, r.stdout + r.stderr);
+  assert.match(r.stdout, /1\) Resume at Integrate/);
+  assert.match(r.stdout, /I skipped 1 unreadable line in \.straddle-wizard\/events\.jsonl/);
+  assert.equal(line.status, 0, line.stderr);
+  assert.equal(line.stdout, 'Straddle: Setup · Plan · Integrate ▶ 1/7\n');
 });
 
 test('a corrupted receipt is reported on resume and left untouched', async () => {
@@ -612,10 +689,12 @@ test('wizard skill run <name> launches that versioned skill in the chosen agent'
 
   const r = await runWizard(['skill', 'run', 'straddle-go-live'], { cwd: repo, claude, input: ['1', '1', '1'] });
 
-  assert.equal(r.code, 0, r.stdout + r.stderr);
+  // C: a not-ready review isn't a finished Go Live, so the run stops there.
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /Reason\s+Go Live reported not_ready/);
   assert.match(r.stdout, /Your session in Claude Code: Go Live/);
   const [launch] = launches(claude);
-  assert.ok(launch!.at(-1)!.startsWith('/straddle:straddle-go-live Straddle Wizard program: straddle-go-live. Start at straddle-go-live.'));
+  assert.ok(launch!.at(-1)!.startsWith('/straddle:straddle-go-live\nStraddle Wizard program: straddle-go-live. Start at straddle-go-live.\n'));
   assert.ok(launch!.at(-1)!.endsWith('Repository context confirmed in the Straddle Wizard: language TypeScript (detected); framework Next.js (detected).'));
   assert.equal(readReceipt(repo).program, 'skill:straddle-go-live');
 });
@@ -625,6 +704,8 @@ test('unknown command exits with usage error', async () => {
 
   assert.equal(r.code, 2);
   assert.match(r.stderr, /Unknown command "diagnose"\./);
+  // N9: the usage names every step the guided run can take, Migrate included.
+  assert.match(r.stderr, /Setup, Plan, Migrate \(when you use another payment provider\), Integrate, Test, Go Live/);
 });
 
 test('install, status, update and remove use native plugin commands and report deterministic results', async () => {
@@ -678,7 +759,7 @@ test('Cursor gets a labelled manual handoff, never fake progress, and the files 
 
   assert.equal(r.code, 0, r.stdout);
   assert.match(r.stdout, /I can't drive Cursor, so here's the handoff:/);
-  assert.match(r.stdout, /Use the straddle-plan skill\. Straddle Wizard program: straddle-plan\. Start at straddle-plan\./);
+  assert.match(r.stdout, /Use the straddle-plan skill\.\n\s+Straddle Wizard program: straddle-plan\. Start at straddle-plan\.\n/);
   assert.match(r.stdout, /Plan\s+straddle-integration-plan\.md: not written yet · no handoff reported · progress not observable/);
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'ready');
