@@ -16,7 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The Wizard's tests verify the real skills bundle it pins (src/bundle.ts).
+      # Test fixture only: the local --bundle most tests use and the content of the fixture plugin releases. The Wizard
+      # itself runs the newest 0.1.x plugin release, so skills changes never require changing this ref.
       - uses: actions/checkout@v5
         with:
           repository: straddle-build/skills

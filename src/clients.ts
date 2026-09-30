@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { loadBundle, type Bundle } from './bundle.ts';
+import { matchesBundle, type Bundle } from './bundle.ts';
 import { field, parseJson, text } from './json.ts';
 
 export type ClientName = 'claude' | 'codex' | 'cursor';
@@ -60,7 +60,7 @@ export function runCommands(commands: readonly Command[], env: NodeJS.ProcessEnv
   return results;
 }
 
-// `verified`: every copy the client reports loading the plugin from has exactly the pinned snapshot's content.
+// `verified`: every copy the client reports loading the plugin from has exactly the content of the Wizard's bundle.
 export interface PluginState { state: 'installed' | 'missing' | 'unverified'; version: string | null; verified: boolean }
 
 export interface ClientState {
@@ -74,20 +74,20 @@ export interface ClientState {
 }
 
 // Where Claude Code keeps the "straddle" marketplace: the directory it was added from, or its own copy of a Git source.
-export function claudeMarketplacePath(env: NodeJS.ProcessEnv): string | null {
+function claudeMarketplacePath(env: NodeJS.ProcessEnv): string | null {
   const markets = parseJson(native('claude', ['plugin', 'marketplace', 'list', '--json'], env).out);
   const market = Array.isArray(markets) ? markets.find((m) => field(m, 'name') === 'straddle') : undefined;
   return text(field(market, 'installLocation')) ?? text(field(market, 'path')) ?? null;
 }
 
-function pluginState(listed: boolean, entry: unknown, loadedFrom: ReadonlyArray<string | null>): PluginState {
+function pluginState(listed: boolean, entry: unknown, loadedFrom: ReadonlyArray<string | null>, bundle: Bundle | null): PluginState {
   if (!listed) return { state: 'unverified', version: null, verified: false };
   if (!entry) return { state: 'missing', version: null, verified: false };
   const paths = loadedFrom.filter((p) => p !== null);
-  return { state: 'installed', version: text(field(entry, 'version')) ?? null, verified: paths.length > 0 && paths.every((p) => loadBundle(p).ok) };
+  return { state: 'installed', version: text(field(entry, 'version')) ?? null, verified: bundle !== null && paths.length > 0 && paths.every((p) => matchesBundle(p, bundle)) };
 }
 
-function inspectClaude(env: NodeJS.ProcessEnv, version: string): ClientState {
+function inspectClaude(env: NodeJS.ProcessEnv, version: string, bundle: Bundle | null): ClientState {
   const auth = native('claude', ['auth', 'status', '--json'], env);
   const loggedIn = field(parseJson(auth.out), 'loggedIn');
   const listed = parseJson(native('claude', ['plugin', 'list', '--json'], env).out);
@@ -99,7 +99,7 @@ function inspectClaude(env: NodeJS.ProcessEnv, version: string): ClientState {
     version,
     loggedIn: typeof loggedIn === 'boolean' ? loggedIn : null,
     // Claude Code loads a directory marketplace's plugin in place, and reports its cached copy as installPath.
-    plugin: pluginState(Array.isArray(listed), entry, [marketplacePath, text(field(entry, 'installPath')) ?? null]),
+    plugin: pluginState(Array.isArray(listed), entry, [marketplacePath, text(field(entry, 'installPath')) ?? null], bundle),
     marketplacePath,
     apiMcp: entry
       ? 'declared by the Straddle plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in'
@@ -107,7 +107,7 @@ function inspectClaude(env: NodeJS.ProcessEnv, version: string): ClientState {
   };
 }
 
-function inspectCodex(env: NodeJS.ProcessEnv, version: string): ClientState {
+function inspectCodex(env: NodeJS.ProcessEnv, version: string, bundle: Bundle | null): ClientState {
   const login = native('codex', ['login', 'status'], env);
   const listed = parseJson(native('codex', ['plugin', 'list', '--json'], env).out);
   const installed = field(listed, 'installed');
@@ -125,7 +125,7 @@ function inspectCodex(env: NodeJS.ProcessEnv, version: string): ClientState {
     label: CLIENT_LABEL.codex,
     version,
     loggedIn: login.status === 0,
-    plugin: pluginState(Array.isArray(installed), entry, [cached]),
+    plugin: pluginState(Array.isArray(installed), entry, [cached], bundle),
     marketplacePath: text(field(market, 'root')) ?? null,
     apiMcp: bearer
       ? `straddle-api reads ${bearer} (codex mcp)`
@@ -135,13 +135,14 @@ function inspectCodex(env: NodeJS.ProcessEnv, version: string): ClientState {
   };
 }
 
-export function inspectClient(name: ClientName, env: NodeJS.ProcessEnv): ClientState {
+// `bundle`: the bundle the Wizard is using, which an installed plugin must match to count as verified.
+export function inspectClient(name: ClientName, env: NodeJS.ProcessEnv, bundle: Bundle | null = null): ClientState {
   const probe = native(BINARY[name], ['--version'], env);
   const version = probe.status === 0 ? (/(\d+\.\d+\.\d+\S*)/.exec(probe.out)?.[1] ?? probe.out) : null;
   if (version === null || name === 'cursor') {
     return { name, label: CLIENT_LABEL[name], version, loggedIn: null, plugin: { state: name === 'cursor' ? 'unverified' : 'missing', version: null, verified: false }, marketplacePath: null, apiMcp: 'unverified' };
   }
-  return name === 'claude' ? inspectClaude(env, version) : inspectCodex(env, version);
+  return name === 'claude' ? inspectClaude(env, version, bundle) : inspectCodex(env, version, bundle);
 }
 
 export type ConfigPlan = { kind: 'commands'; commands: Command[]; note: string } | { kind: 'manual'; steps: string[] } | { kind: 'nothing'; note: string };

@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PINNED_BUNDLE, bundleLabel, fetchCommands, loadBundle, snapshotDir, type Bundle, type BundleCheck } from './bundle.ts';
+import { PLUGIN_RELEASES, bundleLabel, downloadRelease, listReleases, loadCachedRelease, loadLocalBundle, pickRelease, releaseDir, type Bundle, type BundleCheck } from './bundle.ts';
 import {
-  CLIENT_LABEL, EVENT_SURFACE, EVENT_SURFACE_NOTE, claudeMarketplacePath, displayCommand, inspectClient, installPlan, launchCommand, runCommands, updatePlan,
+  CLIENT_LABEL, EVENT_SURFACE, EVENT_SURFACE_NOTE, displayCommand, inspectClient, installPlan, launchCommand, runCommands, updatePlan,
   type ClientName, type ClientState, type Command, type CommandResult, type ConfigPlan,
 } from './clients.ts';
 import { straddleConfiguration } from './configuration.ts';
@@ -176,47 +176,45 @@ function printCommandResults(io: Prompter, results: readonly CommandResult[]): b
 
 // ---------- Skill bundle ----------
 
-export interface BundleRequest { override: string | undefined; remembered?: string | null | undefined; env: NodeJS.ProcessEnv }
+export interface BundleRequest { override: string | undefined; env: NodeJS.ProcessEnv }
 
-const SNAPSHOT = `merged-source snapshot ${PINNED_BUNDLE.repository}@${PINNED_BUNDLE.commit.slice(0, 7)} (plugin ${PINNED_BUNDLE.pluginVersion}; not a tagged release)`;
-
-// The developer's --bundle first, then a verified copy already on this machine: the last one this run used,
-// Claude Code's "straddle" marketplace, or the Wizard's own snapshot. Never fetches.
+// The developer's --bundle, else the verified plugin release already on this machine. Never fetches.
 export function findBundle(req: BundleRequest): BundleCheck {
-  if (req.override) return loadBundle(req.override);
-  for (const path of [req.remembered, claudeMarketplacePath(req.env), snapshotDir(req.env)]) {
-    if (!path) continue;
-    const check = loadBundle(path);
-    if (check.ok) return check;
-  }
-  return { ok: false, reason: `The Straddle skills are not on this machine yet. \`wizard\` or \`wizard install\` fetches the ${SNAPSHOT}.` };
+  return req.override ? loadLocalBundle(req.override) : loadCachedRelease(req.env);
 }
 
-// Like findBundle, then offers to fetch the pinned snapshot. Resolves null when the developer cancels.
+// The developer's --bundle, else the newest plugin release in range: the cached copy when it is that release,
+// otherwise downloaded and verified after the developer agrees. When the release list cannot be read, the release
+// already on this machine is used. Resolves null when the developer cancels.
 export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boolean): Promise<BundleCheck | null> {
-  const found = findBundle(req);
-  if (found.ok || req.override) return found;
-  const dir = snapshotDir(req.env);
-  const staging = `${dir}.partial`;
-  const commands = fetchCommands(staging);
+  if (req.override) return loadLocalBundle(req.override);
+  const cached = loadCachedRelease(req.env);
+  let listed: unknown;
+  try {
+    listed = await listReleases(req.env);
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    if (!cached.ok) return { ok: false, reason: `Could not read the Straddle plugin releases (${why}). ${cached.reason}` };
+    io.say(`Could not check for a newer Straddle plugin release (${why}); using the ${bundleLabel(cached.bundle)} already on this machine.`);
+    io.say();
+    return cached;
+  }
+  const release = pickRelease(listed);
+  if (typeof release === 'string') return { ok: false, reason: release };
+  if (cached.ok && cached.bundle.pluginVersion === release.version) return cached;
   io.say(io.bold('Straddle skills'));
-  io.say(`  Not on this machine yet. The Wizard fetches the ${SNAPSHOT}`);
-  io.say(`  from GitHub into ${dir}, checks its content, and changes nothing else:`);
-  for (const command of commands) io.say(`    ${displayCommand(command)}`);
+  io.say(`  ${cached.ok ? `Plugin release v${cached.bundle.pluginVersion} is on this machine. ` : ''}The newest ${PLUGIN_RELEASES.range} plugin release is ${release.tag} (${release.page}).`);
+  io.say(`  The Wizard downloads it into ${releaseDir(req.env)}, checks it against the release's SHA256SUMS, and changes nothing else:`);
+  io.say(`    GET ${release.archiveUrl}`);
+  io.say(`    GET ${release.sumsUrl}`);
   if (!yes) {
-    const go = await io.choose('Fetch the Straddle skills?', [{ label: 'Fetch', value: true }, { label: 'Cancel', value: false }], 0);
+    const go = await io.choose('Download the Straddle skills?', [{ label: 'Download', value: true }, { label: 'Cancel', value: false }], 0);
     io.say();
     if (!go) return null;
   }
-  rmSync(staging, { recursive: true, force: true });
-  mkdirSync(dirname(staging), { recursive: true });
-  const fetched = printCommandResults(io, runCommands(commands, req.env));
-  io.say();
-  const check: BundleCheck = fetched ? loadBundle(staging) : { ok: false, reason: `fetching the ${SNAPSHOT} failed` };
-  if (!check.ok) { rmSync(staging, { recursive: true, force: true }); return check; }
-  rmSync(dir, { recursive: true, force: true });
-  renameSync(staging, dir);
-  return loadBundle(dir);
+  const check = await downloadRelease(release, req.env);
+  if (check.ok) io.say(`Verified straddle-plugin-${release.version}.zip against the ${release.tag} SHA256SUMS.\n`);
+  return check;
 }
 
 export function printPlan(say: (line: string) => void, plan: ConfigPlan): void {
@@ -229,14 +227,14 @@ export function printPlan(say: (line: string) => void, plan: ConfigPlan): void {
 function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: ClientState, env: NodeJS.ProcessEnv): void {
   const config = straddleConfiguration(env);
   io.say(io.bold(`Readiness for ${client.label}`));
-  row(io, 'Skill bundle', `${bundleLabel(bundle)}, verified`);
+  row(io, 'Skill bundle', bundleLabel(bundle));
   row(io, 'Agent', client.version ? `${client.label} ${client.version}` : `${client.label}: not found`);
   if (client.loggedIn !== null) row(io, 'Agent login', client.loggedIn ? 'logged in' : 'not logged in');
   const installed = client.plugin.state === 'installed'
-    ? `installed ${client.plugin.version ?? ''}, ${client.plugin.verified ? 'matches the verified snapshot' : 'differs from the verified snapshot'}`
+    ? `installed ${client.plugin.version ?? ''}, ${client.plugin.verified ? "matches the Wizard's bundle" : "differs from the Wizard's bundle"}`
     : client.plugin.state === 'missing' ? 'not installed' : 'unverified (the Wizard cannot inspect this client)';
   if (receipt.pluginLoad === 'session') {
-    row(io, 'Straddle plugin', `loaded into each Wizard session from the verified snapshot with --plugin-dir (your Claude Code: ${installed})`);
+    row(io, 'Straddle plugin', `loaded into each Wizard session from that bundle with --plugin-dir (your Claude Code: ${installed})`);
     row(io, 'API MCP', 'declared by that plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in');
     row(io, 'Session settings', "isolated: your user and project allow and deny rules, hooks, plugins, default mode and settings-based login (apiKeyHelper, env) do not apply; each session starts in Claude Code's default permission mode, but your organization's managed policy still applies and can allow edits, commands or MCP calls without asking (the Wizard does not read it)");
   } else {
@@ -265,20 +263,20 @@ function printCredentialHelp(io: Prompter, receipt: Receipt, env: NodeJS.Process
 }
 
 async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions): Promise<{ bundle: Bundle; client: ClientState } | number> {
-  const check = await prepareBundle(io, { override: opts.bundlePath, remembered: receipt.bundle?.path, env: opts.env }, false);
+  const check = await prepareBundle(io, { override: opts.bundlePath, env: opts.env }, false);
   if (!check) return finish(receipt, 'aborted', 'developer cancelled the Straddle skills fetch');
   if (!check.ok) {
     io.say(`Skill bundle: ${check.reason}`);
     return finish(receipt, 'blocked', `skill bundle: ${check.reason}`);
   }
   const bundle = check.bundle;
-  receipt.bundle = { kind: bundle.kind, repository: bundle.repository, commit: bundle.commit, pluginVersion: bundle.pluginVersion, path: bundle.path };
+  receipt.bundle = { kind: bundle.kind, pluginVersion: bundle.pluginVersion, contentSha256: bundle.contentSha256, path: bundle.path };
   const name = receipt.client!;
-  // Claude Code sessions always load exactly the verified bundle; they ignore user settings, where an install is enabled.
+  // Claude Code sessions always load exactly the Wizard's bundle; they ignore user settings, where an install is enabled.
   if (name === 'claude') receipt.pluginLoad = 'session';
   let repaired = false;
   for (;;) {
-    const client = inspectClient(name, opts.env);
+    const client = inspectClient(name, opts.env, bundle);
     printReadiness(io, receipt, bundle, client, opts.env);
     if (name === 'cursor') { receipt.pluginLoad = 'manual'; return { bundle, client }; }
     if (!client.version) {
@@ -292,19 +290,19 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
       return finish(receipt, 'blocked', `${client.label} is not logged in`);
     }
     if (receipt.pluginLoad === 'session') return { bundle, client };
-    // Codex loads its own installed copy, so that copy, not just its version, must be the verified snapshot.
+    // Codex loads its own installed copy, so that copy, not just its version, must be the Wizard's bundle.
     if (client.plugin.verified) {
       receipt.pluginLoad = 'installed';
       return { bundle, client };
     }
     if (repaired) {
-      io.say(`The Straddle plugin ${client.label} would load still differs from the verified snapshot after the repair.`);
-      return finish(receipt, 'blocked', `the Straddle plugin in ${client.label} differs from the verified snapshot`);
+      io.say(`The Straddle plugin ${client.label} would load still differs from the Wizard's bundle after the repair.`);
+      return finish(receipt, 'blocked', `the Straddle plugin in ${client.label} differs from the Wizard's bundle`);
     }
 
     const outdated = client.plugin.state === 'installed';
     const plan = outdated ? updatePlan(client, bundle) : installPlan(client, bundle);
-    io.say(outdated ? `The Straddle plugin ${client.label} would load (${client.plugin.version ?? 'unknown version'}) differs from the verified snapshot.` : `The Straddle plugin is not installed in ${client.label}.`);
+    io.say(outdated ? `The Straddle plugin ${client.label} would load (${client.plugin.version ?? 'unknown version'}) differs from the Wizard's bundle.` : `The Straddle plugin is not installed in ${client.label}.`);
     type Repair = 'apply' | 'manual' | 'cancel';
     const options: Array<{ label: string; value: Repair }> = [];
     if (plan.kind === 'commands') options.push({ label: outdated ? 'Update it with these commands' : 'Install it with these commands', value: 'apply' });

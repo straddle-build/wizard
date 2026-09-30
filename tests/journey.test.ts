@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, runWizard, tempDir, writeFiles } from './helpers.ts';
+import { SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type ReleaseServer } from './helpers.ts';
 
 const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENVIRONMENT: 'sandbox' };
 const PLAN = '# Straddle integration plan\n\n## Status\n\n- Plan state: Draft\n\n## File changes\n\n| File | Change |\n| --- | --- |\n| src/straddle.ts | add client |\n\n## Future Sandbox writes\n\n| Write | Tool |\n| --- | --- |\n| create customer | SDK |\n\n## Verification\n';
@@ -73,44 +73,49 @@ test('detected context is a suggestion the developer corrects, and the SDK sugge
   assert.deepEqual(receipt.context.choices, { products: 'charges', integrationType: 'direct', sdk: 'Python', notificationPath: 'polling endpoint' });
 });
 
-// Maps the public skills URL to the local pinned checkout with Git's own url.<base>.insteadOf, so the real fetch runs offline.
-const OFFLINE_GITHUB = (cache: string) => ({
-  STRADDLE_WIZARD_BUNDLE: '', XDG_CACHE_HOME: cache,
-  GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.file://${SKILLS_SOURCE}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/straddle-build/skills.git',
-});
+// Plugin releases served from a local fixture server, so the real download and verification run offline.
+const RELEASES = (cache: string, server: ReleaseServer) => ({ STRADDLE_WIZARD_BUNDLE: '', XDG_CACHE_HOME: cache, STRADDLE_WIZARD_RELEASES: server.url });
 
-test('first run without a bundle previews the snapshot fetch, and cancelling it fetches nothing', async () => {
+test('first run without a bundle previews the release download, and cancelling it downloads nothing', async () => {
   const repo = nextRepo();
   const cache = tempDir('cache');
   const claude = fakeClaude();
   claude.setState({ installed: true });
+  const server = await releaseServer([{ tag: 'v0.1.0' }]);
 
-  const r = await runWizard([], { cwd: repo, claude, env: { ...CONFIGURED, ...OFFLINE_GITHUB(cache) }, input: [...CHOOSE_CONTEXT, '2'] });
+  const r = await runWizard([], { cwd: repo, claude, env: { ...CONFIGURED, ...RELEASES(cache, server) }, input: [...CHOOSE_CONTEXT, '2'] });
+  await server.close();
 
   assert.equal(r.code, 130, r.stdout + r.stderr);
-  assert.match(r.stdout, /merged-source snapshot straddle-build\/skills@643632e \(plugin 0\.1\.0; not a tagged release\)/);
-  assert.match(r.stdout, /git -C \S+ fetch --depth 1 https:\/\/github\.com\/straddle-build\/skills\.git 643632e78654a4fa929873d0e1ec0ba15525a9e8/);
+  assert.match(r.stdout, /The newest 0\.1\.x plugin release is v0\.1\.0/);
+  assert.match(r.stdout, /GET http:\/\/127\.0\.0\.1:\d+\/v0\.1\.0\/straddle-plugin-0\.1\.0\.zip/);
+  assert.deepEqual(server.requests, ['/releases']);
   assert.deepEqual(readdirSync(cache), []);
   assert.equal(readReceipt(repo).state, 'aborted');
 });
 
-test('first run fetches the pinned snapshot after confirmation, verifies it, and later runs reuse it without asking', async () => {
+test('first run downloads the newest release after confirmation, verifies it, and later runs reuse it without asking', async () => {
   const repo = nextRepo();
   const cache = tempDir('cache');
   const claude = fakeClaude();
   claude.setState({ installed: true });
   claude.sessions(DEFAULT_SESSIONS);
-  const env = { ...CONFIGURED, ...OFFLINE_GITHUB(cache) };
+  const server = await releaseServer([{ tag: 'v0.1.0' }]);
+  const env = { ...CONFIGURED, ...RELEASES(cache, server) };
 
   const first = await runWizard(['setup'], { cwd: repo, claude, env, input: [...CHOOSE_CONTEXT, '1', '1'] });
   const status = await runWizard(['status', '--json'], { cwd: repo, claude, env });
+  const list = await runWizard(['skill', 'list'], { cwd: repo, claude, env });
+  await server.close();
 
   assert.equal(first.code, 0, first.stdout + first.stderr);
-  const snapshot = join(cache, 'straddle-wizard', 'skills-643632e78654a4fa929873d0e1ec0ba15525a9e8');
-  assert.equal(readReceipt(repo).bundle.path, snapshot);
-  assert.match(first.stdout, /Skill bundle\s+merged-source snapshot straddle-build\/skills@643632e .*verified/);
-  assert.equal(JSON.parse(status.stdout).bundle.path, snapshot);
-  assert.doesNotMatch(status.stdout, /fetch/);
+  const release = join(cache, 'straddle-wizard', 'plugin');
+  assert.equal(readReceipt(repo).bundle?.path, release);
+  assert.match(first.stdout, /Skill bundle\s+plugin release v0\.1\.0 of straddle-build\/skills \(9 skills, verified against its published SHA256SUMS\)/);
+  assert.equal(JSON.parse(status.stdout).bundle.path, release);
+  assert.equal(list.code, 0, list.stdout);
+  assert.doesNotMatch(list.stdout, /Download/);
+  assert.deepEqual(server.requests.filter((path) => path.endsWith('.zip')), ['/v0.1.0/straddle-plugin-0.1.0.zip']);
 });
 
 test('--client picks the agent for a guided run instead of asking', async () => {
@@ -132,7 +137,7 @@ test('default journey: isolated sessions from the verified bundle, plan before e
   const r = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '1', '1', '1'] });
 
   assert.equal(r.code, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /Straddle plugin\s+loaded into each Wizard session from the verified snapshot/);
+  assert.match(r.stdout, /Straddle plugin\s+loaded into each Wizard session from that bundle/);
   assert.doesNotMatch(r.stdout, /claude plugin install/);
   assert.match(r.stdout, /Choosing Start is not approval/);
   assert.match(r.stdout, /Observed \(Claude Code hooks\): entered 01-decisions, 02-sources, 03-write-plan, 04-review, 05-handoff/);
@@ -147,7 +152,7 @@ test('default journey: isolated sessions from the verified bundle, plan before e
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'completed');
   assert.equal(receipt.client, 'claude');
-  assert.equal(receipt.bundle.commit, '643632e78654a4fa929873d0e1ec0ba15525a9e8');
+  assert.deepEqual([receipt.bundle?.kind, receipt.bundle?.pluginVersion, receipt.bundle?.path], ['local', '0.1.0', SKILLS_SOURCE]);
   assert.deepEqual(receipt.steps.map((s) => [s.skill, s.reportedMarkers.at(-1)?.status]), [
     ['straddle-setup', 'ready_with_warnings'], ['straddle-plan', 'draft'], ['straddle-integrate', 'complete'], ['straddle-test', 'partial'],
   ]);
@@ -517,12 +522,12 @@ test('install, status, update and remove use native plugin commands and report d
   assert.equal(install.code, 0, install.stdout + install.stderr);
   assert.match(install.stdout, /ok\s+claude plugin install straddle@straddle/);
   const parsed = JSON.parse(status.stdout);
-  assert.equal(parsed.bundle.commit, '643632e78654a4fa929873d0e1ec0ba15525a9e8');
+  assert.deepEqual([parsed.bundle.kind, parsed.bundle.pluginVersion], ['local', '0.1.0']);
   assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'claude').plugin, { state: 'installed', version: '0.1.0', verified: true });
   assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'cursor').plugin, { state: 'unverified', version: null, verified: false });
   assert.equal(parsed.credentials.STRADDLE_API_KEY, 'missing');
   assert.equal(update.code, 0, update.stdout);
-  assert.match(update.stdout, /ok\s+claude plugin uninstall straddle@straddle\nok\s+claude plugin install straddle@straddle\nStraddle plugin in Claude Code: installed 0\.1\.0, matches the verified snapshot/);
+  assert.match(update.stdout, /ok\s+claude plugin uninstall straddle@straddle\nok\s+claude plugin install straddle@straddle\nStraddle plugin in Claude Code: installed 0\.1\.0, matches the Wizard's bundle/);
   assert.equal(remove.code, 0);
   assert.equal(JSON.parse(after.stdout).clients.find((c: { name: string }) => c.name === 'claude').plugin.state, 'missing');
 });
