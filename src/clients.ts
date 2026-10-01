@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { matchesBundle, type Bundle } from './bundle.ts';
 import { field, parseJson, text } from './json.ts';
 
@@ -20,10 +20,9 @@ export const EVENT_SURFACE: Record<ClientName, 'observed' | 'unsupported'> = { c
 export const EVENT_SURFACE_NOTE: Record<ClientName, string> = {
   claude: 'live checklist in its status line, from Claude Code hooks',
   codex: 'live checklist on a local page, from its session log',
-  cursor: "manual: you run the skills in Cursor, and I read the files they write",
+  cursor: 'no live checklist: I read the files the skills write when it stops',
 };
 
-// Cursor has no supported command-line agent the Wizard drives, so it is always a manual handoff.
 const BINARY: Record<ClientName, string> = { claude: 'claude', codex: 'codex', cursor: 'cursor-agent' };
 
 export interface Command {
@@ -136,14 +135,52 @@ function inspectCodex(env: NodeJS.ProcessEnv, version: string, bundle: Bundle | 
   };
 }
 
+// Cursor names a plugin's MCP servers `plugin-<plugin dir>-<server>`, so a Straddle server counts by its name's suffix.
+export const isStraddleServer = (name: string, server: 'straddle-api' | 'straddle-docs') => name === server || name.endsWith(`-${server}`);
+
+// cursor-agent has no plugin list, and `cursor-agent mcp list` doesn't show plugin servers, so the Wizard reads the
+// files Cursor loads: local plugin copies in ~/.cursor/plugins/local and servers in ~/.cursor/mcp.json.
+// ponytail: user-level files only; a project's .cursor/mcp.json isn't read until the Wizard passes the repo here.
+function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle | null): ClientState {
+  const status = native('cursor-agent', ['status'], env);
+  const home = join(env.HOME || homedir(), '.cursor');
+  const read = (path: string) => (existsSync(path) ? parseJson(readFileSync(path, 'utf8')) : null);
+  const manifest = (dir: string) => read(join(dir, '.cursor-plugin', 'plugin.json'));
+  // Server names from a server map, or from the mcp.json a plugin manifest points to (Straddle's says "./mcp.json").
+  const names = (servers: unknown, dir: string): string[] => {
+    const map = typeof servers === 'string' ? field(read(join(dir, servers)), 'mcpServers') : servers;
+    return Object.keys(map && typeof map === 'object' ? map : {});
+  };
+  const local = join(home, 'plugins', 'local');
+  const copies = (existsSync(local) ? readdirSync(local) : []).map((d) => join(local, d)).filter((d) => field(manifest(d), 'name') === 'straddle');
+  const configured = names(field(read(join(home, 'mcp.json')), 'mcpServers'), home).find((n) => isStraddleServer(n, 'straddle-api'));
+  const declaring = copies.find((d) => names(field(manifest(d), 'mcpServers'), d).some((n) => isStraddleServer(n, 'straddle-api')));
+  return {
+    name: 'cursor',
+    label: CLIENT_LABEL.cursor,
+    version,
+    loggedIn: /Logged in as /.test(status.stdout),
+    // A copy in plugins/local is the only install the Wizard can see; team-marketplace installs stay unverified.
+    plugin: copies.length
+      ? { state: 'installed', version: text(field(manifest(copies[0]!), 'version')) ?? null, verified: bundle !== null && copies.every((d) => matchesBundle(d, bundle)) }
+      : { state: 'unverified', version: null, verified: false },
+    marketplacePath: null,
+    apiMcp: configured
+      ? `${configured} in ~/.cursor/mcp.json`
+      : declaring
+        ? `declared by the Straddle plugin in ${declaring}, which Cursor names plugin-${basename(declaring)}-straddle-api; cursor-agent sends STRADDLE_API_KEY from the environment it starts in`
+        : 'not detected: no straddle-api in ~/.cursor/mcp.json or a local Straddle plugin (I can\'t see team-marketplace installs)',
+  };
+}
+
 // `bundle`: the bundle the Wizard is using, which an installed plugin must match to count as verified.
 export function inspectClient(name: ClientName, env: NodeJS.ProcessEnv, bundle: Bundle | null = null): ClientState {
   const probe = native(BINARY[name], ['--version'], env);
   const version = probe.status === 0 ? (/(\d+\.\d+\.\d+\S*)/.exec(probe.stdout)?.[1] ?? probe.stdout) : null;
-  if (version === null || name === 'cursor') {
+  if (version === null) {
     return { name, label: CLIENT_LABEL[name], version, loggedIn: null, plugin: { state: name === 'cursor' ? 'unverified' : 'missing', version: null, verified: false }, marketplacePath: null, apiMcp: 'unverified' };
   }
-  return name === 'claude' ? inspectClaude(env, version, bundle) : inspectCodex(env, version, bundle);
+  return name === 'claude' ? inspectClaude(env, version, bundle) : name === 'codex' ? inspectCodex(env, version, bundle) : inspectCursor(env, version, bundle);
 }
 
 export type ConfigPlan = { kind: 'commands'; commands: Command[]; note: string } | { kind: 'manual'; steps: string[] } | { kind: 'nothing'; note: string };
@@ -218,7 +255,7 @@ export function mcpAddPlan(state: ClientState): ConfigPlan {
     return {
       kind: 'manual',
       steps: [
-        "I don't configure or check Cursor's MCP servers. Add these in Cursor (Settings > MCP), or merge them into ~/.cursor/mcp.json:",
+        "I don't configure Cursor's MCP servers. Add these in Cursor (Settings > MCP), or merge them into ~/.cursor/mcp.json:",
         JSON.stringify({ mcpServers: { 'straddle-api': { url: API_MCP_URL, headers: { Authorization: 'Bearer ${env:STRADDLE_API_KEY}' } }, 'straddle-docs': { url: DOCS_MCP_URL } } }, null, 2),
         `Guide: ${CONNECT_MCP_GUIDE}`,
       ],
@@ -257,7 +294,7 @@ export function mcpRemovePlan(state: ClientState): ConfigPlan {
 }
 
 export interface LaunchRequest {
-  client: 'claude' | 'codex';
+  client: ClientName;
   skill: string;
   repo: string;
   context: string;
@@ -268,15 +305,43 @@ export interface LaunchRequest {
   resume: string | null;
 }
 
-// The skill is invoked by name on the first line; the context follows on its own lines, so its `Straddle Wizard
-// program:` line begins a line, as wizard-program.md says. Everything the skill does comes from the versioned bundle.
+// The first message for the agent: the skill's start on the first line, then the context on its own lines, so its
+// `Straddle Wizard program:` line begins a line, as wizard-program.md says. Everything the skill does comes from the
+// versioned bundle. Auto passes it on the command line; Manual prints it to paste.
+function startPrompt(client: ClientName, skill: string, context: string): string {
+  return [client === 'claude' ? `/straddle:${skill}` : `Use the ${skill} skill.`, context].filter(Boolean).join('\n');
+}
+
 // The agent runs with the developer's own settings, permission mode, sandbox and approval policy; the Wizard never
-// changes them. Claude Code merges `--settings` with them and adds its hooks to theirs.
+// changes them. Claude Code merges `--settings` with them and adds its hooks to theirs. cursor-agent gets no --force,
+// --sandbox, --approve-mcps or --trust, so its own approval mode and workspace trust apply.
 export function launchCommand(req: LaunchRequest): Command {
+  const prompt = startPrompt(req.client, req.skill, req.context);
   if (req.client === 'claude') {
-    const prompt = [`/straddle:${req.skill}`, req.context].filter(Boolean).join('\n');
     return { bin: 'claude', args: ['--settings', req.settingsPath, '--plugin-dir', req.pluginDir, ...(req.resume ? ['--resume', req.resume] : []), prompt] };
   }
-  const prompt = [`Use the ${req.skill} skill.`, req.context].filter(Boolean).join('\n');
+  if (req.client === 'cursor') {
+    return { bin: 'cursor-agent', args: ['--workspace', req.repo, '--plugin-dir', req.pluginDir, ...(req.resume ? [`--resume=${req.resume}`] : []), prompt] };
+  }
   return { bin: 'codex', args: [...(req.resume ? ['resume'] : []), '-C', req.repo, ...(req.resume ? [req.resume] : []), prompt] };
+}
+
+// Manual mode: what the developer pastes into their own agent and the few steps around it. The Wizard starts no process.
+export interface Handoff {
+  // Exactly what Auto would send as the first message.
+  prompt: string;
+  steps: string[];
+}
+
+export function manualHandoff(req: Pick<LaunchRequest, 'client' | 'skill' | 'repo' | 'context'>): Handoff {
+  const label = CLIENT_LABEL[req.client];
+  return {
+    prompt: startPrompt(req.client, req.skill, req.context),
+    steps: [
+      `Open ${req.repo} in ${label} with the Straddle plugin installed${req.client === 'cursor' ? ' from its team marketplace' : ''}.`,
+      `Paste this as your message to the ${label} agent:`,
+      `Answer its questions there, and approve or deny each change and each Sandbox request. Nothing here counts as approval.`,
+      "When it stops, run `wizard resume`: I read the files the skills wrote and tell you what to paste next.",
+    ],
+  };
 }
