@@ -42,10 +42,11 @@ export function displayCommand(command: Command): string {
   return [command.bin, ...command.args].map(shellQuote).join(' ');
 }
 
-function native(bin: string, args: string[], env: NodeJS.ProcessEnv): { status: number | null; out: string } {
+// `stdout` is what callers parse; `out` adds stderr, which clients use for warnings, and is only for showing or matching messages.
+function native(bin: string, args: string[], env: NodeJS.ProcessEnv): { status: number | null; stdout: string; out: string } {
   const r = spawnSync(bin, args, { env, encoding: 'utf8', timeout: NATIVE_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] });
-  if (r.error) return { status: null, out: r.error.message };
-  return { status: r.status, out: `${r.stdout}${r.stderr}`.trim() };
+  if (r.error) return { status: null, stdout: '', out: r.error.message };
+  return { status: r.status, stdout: r.stdout.trim(), out: `${r.stdout}${r.stderr}`.trim() };
 }
 
 export function runCommands(commands: readonly Command[], env: NodeJS.ProcessEnv): CommandResult[] {
@@ -74,7 +75,7 @@ export interface ClientState {
 
 // Where Claude Code keeps the "straddle" marketplace: the directory it was added from, or its own copy of a Git source.
 function claudeMarketplacePath(env: NodeJS.ProcessEnv): string | null {
-  const markets = parseJson(native('claude', ['plugin', 'marketplace', 'list', '--json'], env).out);
+  const markets = parseJson(native('claude', ['plugin', 'marketplace', 'list', '--json'], env).stdout);
   const market = Array.isArray(markets) ? markets.find((m) => field(m, 'name') === 'straddle') : undefined;
   return text(field(market, 'installLocation')) ?? text(field(market, 'path')) ?? null;
 }
@@ -88,8 +89,8 @@ function pluginState(listed: boolean, entry: unknown, loadedFrom: ReadonlyArray<
 
 function inspectClaude(env: NodeJS.ProcessEnv, version: string, bundle: Bundle | null): ClientState {
   const auth = native('claude', ['auth', 'status', '--json'], env);
-  const loggedIn = field(parseJson(auth.out), 'loggedIn');
-  const listed = parseJson(native('claude', ['plugin', 'list', '--json'], env).out);
+  const loggedIn = field(parseJson(auth.stdout), 'loggedIn');
+  const listed = parseJson(native('claude', ['plugin', 'list', '--json'], env).stdout);
   const entry = Array.isArray(listed) ? listed.find((p) => field(p, 'id') === PLUGIN_ID) : undefined;
   const marketplacePath = claudeMarketplacePath(env);
   return {
@@ -108,15 +109,15 @@ function inspectClaude(env: NodeJS.ProcessEnv, version: string, bundle: Bundle |
 
 function inspectCodex(env: NodeJS.ProcessEnv, version: string, bundle: Bundle | null): ClientState {
   const login = native('codex', ['login', 'status'], env);
-  const listed = parseJson(native('codex', ['plugin', 'list', '--json'], env).out);
+  const listed = parseJson(native('codex', ['plugin', 'list', '--json'], env).stdout);
   const installed = field(listed, 'installed');
   const entry = Array.isArray(installed) ? installed.find((p) => field(p, 'pluginId') === PLUGIN_ID) : undefined;
-  const markets = field(parseJson(native('codex', ['plugin', 'marketplace', 'list', '--json'], env).out), 'marketplaces');
+  const markets = field(parseJson(native('codex', ['plugin', 'marketplace', 'list', '--json'], env).stdout), 'marketplaces');
   const market = Array.isArray(markets) ? markets.find((m) => field(m, 'name') === 'straddle') : undefined;
   // Codex loads the copy `codex plugin add` makes in its plugin cache, not the marketplace directory.
   const pluginVersion = text(field(entry, 'version'));
   const cached = pluginVersion ? join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'plugins', 'cache', 'straddle', 'straddle', pluginVersion) : null;
-  const servers = parseJson(native('codex', ['mcp', 'list', '--json'], env).out);
+  const servers = parseJson(native('codex', ['mcp', 'list', '--json'], env).stdout);
   const api = Array.isArray(servers) ? servers.find((s) => field(s, 'name') === 'straddle-api') : undefined;
   const bearer = text(field(field(api, 'transport'), 'bearer_token_env_var'));
   return {
@@ -158,7 +159,7 @@ function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle |
     name: 'cursor',
     label: CLIENT_LABEL.cursor,
     version,
-    loggedIn: /Logged in as /.test(status.out),
+    loggedIn: /Logged in as /.test(status.stdout),
     // A copy in plugins/local is the only install the Wizard can see; team-marketplace installs stay unverified.
     plugin: copies.length
       ? { state: 'installed', version: text(field(manifest(copies[0]!), 'version')) ?? null, verified: bundle !== null && copies.every((d) => matchesBundle(d, bundle)) }
@@ -175,7 +176,7 @@ function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle |
 // `bundle`: the bundle the Wizard is using, which an installed plugin must match to count as verified.
 export function inspectClient(name: ClientName, env: NodeJS.ProcessEnv, bundle: Bundle | null = null): ClientState {
   const probe = native(BINARY[name], ['--version'], env);
-  const version = probe.status === 0 ? (/(\d+\.\d+\.\d+\S*)/.exec(probe.out)?.[1] ?? probe.out) : null;
+  const version = probe.status === 0 ? (/(\d+\.\d+\.\d+\S*)/.exec(probe.stdout)?.[1] ?? probe.stdout) : null;
   if (version === null) {
     return { name, label: CLIENT_LABEL[name], version, loggedIn: null, plugin: { state: name === 'cursor' ? 'unverified' : 'missing', version: null, verified: false }, marketplacePath: null, apiMcp: 'unverified' };
   }
