@@ -319,6 +319,93 @@ test('resume trusts the files over the session: a finished report moves on to Te
   assert.match(toPlan.stdout, /Resume at Plan/);
 });
 
+// The session stops after Test, so Go Live is the only step left.
+const STOP_AFTER_TEST = { ...DEFAULT_SESSIONS, 'straddle-test': { ...DEFAULT_SESSIONS['straddle-test'], stop: true } };
+const statusScript = (repo: string) => spawnSync(process.execPath, [join(ROOT, 'src', 'statusline.ts'), '--repo', repo, '--steps', 'straddle-setup:5,straddle-plan:6,straddle-integrate:7,straddle-test:6,straddle-go-live:6'], { encoding: 'utf8' }).stdout;
+
+test('Test done, Go Live left: the exit summary offers finishing here, and finishing shows the program finished everywhere and never reopens Go Live', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions(STOP_AFTER_TEST);
+
+  // Start, then Finish here.
+  const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '2'] });
+  const status = await runWizard(['status'], { cwd: repo, claude, env: CONFIGURED });
+  const json = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, claude, env: CONFIGURED })).stdout);
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1'] });
+
+  assert.equal(first.code, 0, first.stdout);
+  // Catches: the summary saying it will reopen Go Live no matter what you want.
+  assert.match(first.stdout, /Test is done, and Go Live is the only step left\. If you're not going to Production now, you can finish here\.\nNext\n\s+1\) Resume at Go Live later \(run `wizard resume`\)\n\s+2\) Finish here \(skip Go Live\)\n/);
+  assert.doesNotMatch(first.stdout, /reopen the session at Go Live/);
+  assert.match(first.stdout, /Finished, without Go Live\./);
+  // Catches: status, its JSON and the status line still showing Go Live pending.
+  assert.match(status.stdout, /Saved run\s+integration program, completed: you finished after Test and skipped Go Live\n\s+Progress\s+Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped\n/);
+  assert.deepEqual([json.run.state, json.run.progress, json.run.skipped, json.run.paste], ['completed', 'Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped', ['straddle-go-live'], null]);
+  assert.equal(statusScript(repo), 'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped\n');
+  // Catches: resume silently reopening Go Live after you finished.
+  assert.equal(resumed.code, 0, resumed.stdout);
+  assert.match(resumed.stdout, /You finished the saved integration run after Test and skipped Go Live, so there's nothing to resume\.[^\n]*\nNext\n\s+1\) Leave it finished\n\s+2\) Start fresh \(I keep your current files beside the new ones\)\n/);
+  assert.equal(launches(claude).length, 1);
+  assert.equal(readReceipt(repo).state, 'completed');
+});
+
+test('Test done, Go Live left: choosing resume keeps Go Live next, and `wizard resume` reopens the session there', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions(STOP_AFTER_TEST);
+
+  const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '1'] });
+  const afterFirst = readReceipt(repo);
+  claude.sessions(DEFAULT_SESSIONS);
+  // Resume at Go Live, then Start.
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+
+  assert.equal(first.code, 0, first.stdout);
+  assert.match(first.stdout, /2\) Finish here \(skip Go Live\)\nChoose \[1\]: \n\nNext: run `wizard resume` and I'll reopen the session at Go Live\.\n/);
+  assert.equal(afterFirst.stateReason, 'next: Go Live');
+  // Catches: resume losing its Go Live option, or offering no way to finish.
+  assert.match(resumed.stdout, /Next\n\s+1\) Resume at Go Live\n\s+2\) Finish here \(skip Go Live\)\n\s+3\) Cancel\n/);
+  const [, second] = launches(claude);
+  assert.ok(second!.at(-1)!.startsWith('/straddle:straddle-go-live\nStraddle Wizard program: straddle-go-live. Start at straddle-go-live.\n'), second!.at(-1));
+  assert.equal(readReceipt(repo).state, 'completed');
+  assert.equal(statusLines(claude).at(-1), 'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓');
+});
+
+test('a plan edited after finishing without Go Live voids the finish: resume goes back to Plan and offers no finish', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions(STOP_AFTER_TEST);
+
+  await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '2'] });
+  writeFiles(repo, { 'straddle-integration-plan.md': APPROVED_PLAN.replace('add client', 'add client and payouts') });
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+  const json = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, claude, env: CONFIGURED })).stdout);
+
+  // Catches: a finish made for the earlier plan still closing the program.
+  assert.match(resumed.stdout, /Next\n\s+1\) Resume at Plan\n\s+2\) Cancel\n/);
+  assert.doesNotMatch(resumed.stdout, /nothing to resume|Go Live\s+skipped/);
+  assert.match(json.run.progress, /^Setup ✓ · Plan ▶ \d+ · Integrate ▶ \d+ · Test ▶ \d+ · Go Live$/);
+  assert.deepEqual(json.run.skipped, []);
+});
+
+test('Test not complete: neither the exit summary nor resume offers to finish without Go Live', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions({
+    ...DEFAULT_SESSIONS,
+    'straddle-test': { ...DEFAULT_SESSIONS['straddle-test'], writes: [{ path: 'straddle-test-evidence.md', content: EVIDENCE.replace('Status: complete', 'Status: partial (1 failed)') }], text: handoff('straddle-test', 'failed'), stop: true },
+  });
+
+  const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+
+  // Catches: finishing offered while Test is unfinished.
+  assert.match(first.stdout, /Next: fix what stopped the run \(Test stopped at failed;[^\n]*\), then run `wizard resume` and I'll reopen the session at Test\./);
+  assert.match(resumed.stdout, /Next\n\s+1\) Resume at Test\n\s+2\) Cancel\n/);
+  for (const out of [first.stdout, resumed.stdout]) assert.doesNotMatch(out, /Finish here/);
+});
+
 test('with Straddle files already here, the Wizard asks to start fresh or resume: fresh sets them aside only once the run is confirmed, resume starts at the first unfinished step', async () => {
   const fresh = nextRepo();
   writeFiles(fresh, { 'straddle-setup.md': SETUP_FILE, 'straddle-integration-plan.md': APPROVED_PLAN });

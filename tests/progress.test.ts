@@ -130,3 +130,24 @@ test('a session that leaves Setup for later puts the play marker on the step it 
   assert.equal(statusLine(progress(repo, [], steps, []), 'straddle-plan'), 'Setup · Plan ▶ 0/5 · Integrate · Test · Go Live');
 });
 
+test('finishing without Go Live counts only while Test is complete for the plan you finished at', () => {
+  const skip: ObservedEvent = { at: 't', kind: 'go-live-skipped', planHash: hash };
+  const { 'straddle-go-live-report.md': _goLive, ...tested } = done;
+  const at = (files: Record<string, string>) => {
+    const repo = nextRepo();
+    writeFiles(repo, files);
+    const items = progress(repo, [], steps, [skip]);
+    return [nextStep(items), statusLine(items)];
+  };
+  // Catches: Go Live still pending, and resume reopening it, after you finished without it.
+  assert.deepEqual(at(tested), [null, 'Setup · Plan · Integrate · Test · Go Live skipped']);
+  // Catches: a finish recorded for the earlier plan surviving a plan edit.
+  assert.deepEqual(at({ ...tested, 'straddle-integration-plan.md': approvedPlan.replace('add client', 'add client and payouts') }), ['straddle-plan', 'Setup · Plan ▶ 0/5 · Integrate · Test · Go Live']);
+  // Catches: the same after the changed plan was reapproved and built and tested again.
+  const reapproved = approve(draftPlan.replace('add client', 'add client and payouts'));
+  const newHash = approvalHash(reapproved);
+  assert.deepEqual(at({ ...tested, 'straddle-integration-plan.md': reapproved, 'straddle-integration-report.md': report('complete', newHash), 'straddle-test-evidence.md': evidence('complete', newHash) }), ['straddle-go-live', 'Setup · Plan · Integrate · Test · Go Live ▶ 0/5']);
+  // Catches: a finish counting while Test isn't complete.
+  assert.deepEqual(at({ ...tested, 'straddle-test-evidence.md': evidence('partial (1 failed)') }), ['straddle-test', 'Setup · Plan · Integrate · Test ▶ 0/5 · Go Live']);
+});
+

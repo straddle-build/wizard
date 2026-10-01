@@ -4,6 +4,8 @@ import { field, parseJson, text } from './json.ts';
 // Recorded from native client events: the Claude Code hook, or the Codex session log the Wizard follows.
 // Step entry is not completion or approval. A `marker` event records what the agent printed, which is reported,
 // not observed. `key` marks events swept from a transcript, so a later sweep never records them twice.
+// `go-live-skipped` is the Wizard's record of your choice to finish without Go Live, for the plan hash Test was
+// complete at.
 export type ObservedEvent =
   | { at: string; kind: 'session-start'; session?: string; transcript?: string }
   | { at: string; kind: 'session-end'; reason?: string }
@@ -11,7 +13,8 @@ export type ObservedEvent =
   | { at: string; kind: 'step-entered'; skill: string; step: string; key?: string }
   | { at: string; kind: 'edit'; path: string }
   | { at: string; kind: 'edit-denied'; path: string }
-  | { at: string; kind: 'marker'; marker: ReportedMarker; key: string };
+  | { at: string; kind: 'marker'; marker: ReportedMarker; key: string }
+  | { at: string; kind: 'go-live-skipped'; planHash: string };
 
 // Printed by the model in its visible output. Best-effort: they can be missing, repeated or wrong.
 export interface ReportedMarker {
@@ -54,6 +57,7 @@ const EVENT_FIELDS: Record<ObservedEvent['kind'], { required: string[]; optional
   edit: { required: ['path'], optional: [] },
   'edit-denied': { required: ['path'], optional: [] },
   marker: { required: ['key'], optional: [] },
+  'go-live-skipped': { required: ['planHash'], optional: [] },
 };
 const MARKER_KINDS: Record<ReportedMarker['kind'], true> = { progress: true, abort: true, handoff: true };
 

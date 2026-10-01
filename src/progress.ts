@@ -1,5 +1,6 @@
 // Where a run stands, from two sources the Wizard keeps apart: the contract files the skills write, which the Wizard
-// reads itself, and the events the client exposes (observed step entries, and the markers the agent printed).
+// reads itself, and the events the client exposes (observed step entries, and the markers the agent printed), with
+// the Wizard's own record of a choice to finish without Go Live.
 import { createHash } from 'node:crypto';
 import { readRepoFile } from './discovery.ts';
 import { stepEntries, type ObservedEvent, type ReportedMarker } from './events.ts';
@@ -23,11 +24,12 @@ export function approvalHash(plan: string): string {
   return createHash('sha256').update(kept.map((l) => `${l}\n`).join('')).digest('hex');
 }
 
-export interface StepRecord { done: boolean; detail: string }
+// `hash`: the approved plan hash a finished plan or plan-bound report is for.
+export interface StepRecord { done: boolean; detail: string; hash?: string }
 type Read = (name: string) => { text: string } | { missing: string };
 
 // A plan is done when it says Approved and its recorded hash is the current content's: an edit after approval voids it.
-function planRecord(read: Read, file: string): StepRecord & { hash?: string } {
+function planRecord(read: Read, file: string): StepRecord {
   const plan = read(file);
   if ('missing' in plan) return { done: false, detail: plan.missing };
   const state = header(plan.text, 'Plan state') ?? 'not recorded';
@@ -50,7 +52,7 @@ function reportRecord(read: Read, file: string, complete: string, forPlan: boole
   const plan = planRecord(read, planFile);
   if (!plan.done) return { done: false, detail: `Status: ${status}, but ${planFile} is not approved as it stands` };
   if (header(report.text, 'Plan hash') !== plan.hash) return { done: false, detail: `Status: ${status}, but for an earlier version of ${planFile}` };
-  return { done: true, detail: `Status: ${status}, for the current approved plan` };
+  return { done: true, detail: `Status: ${status}, for the current approved plan`, hash: plan.hash };
 }
 
 // What the step's contract file says, read under discovery's boundary: never a symlink or an excluded path.
@@ -79,10 +81,12 @@ export interface StepProgress {
   done: boolean;
   // Finished for the resume rule: the file says so. A skill without a file is finished when it is ticked.
   finished: boolean;
+  // Finished without running: you chose to finish the program after Test, for the plan Test is complete at.
+  skipped: boolean;
 }
 
 export function progress(repo: string, exclude: readonly string[], steps: ReadonlyArray<{ skill: SkillName; total: number }>, events: readonly ObservedEvent[]): StepProgress[] {
-  return steps.map(({ skill, total }) => {
+  const items = steps.map(({ skill, total }) => {
     const record = stepRecord(repo, exclude, skill);
     const entered = stepEntries(events, skill).length;
     const reported = events.findLast((e) => e.kind === 'marker' && e.marker.skill === skill && e.marker.kind !== 'progress');
@@ -90,8 +94,18 @@ export function progress(repo: string, exclude: readonly string[], steps: Readon
     const agrees = marker?.kind === 'handoff' && SKILLS[skill].advanceOn.includes(marker.status ?? '');
     const done = agrees && (record ? record.done : entered > 0);
     const finished = record ? record.done : done;
-    return { skill, record, entered, total, reported: marker, done, finished };
+    return { skill, record, entered, total, reported: marker, done, finished, skipped: false };
   });
+  // A skip counts only for the plan Test is complete at now, so a changed plan brings Go Live back.
+  const skippable = goLiveSkippable(items);
+  const goLive = items.find((p) => p.skill === 'straddle-go-live');
+  if (goLive && skippable && events.some((e) => e.kind === 'go-live-skipped' && e.planHash === skippable)) Object.assign(goLive, { finished: true, skipped: true });
+  return items;
+}
+
+// When Go Live is the only step left, the plan hash Test is complete at, so you can finish without Go Live; else null.
+export function goLiveSkippable(items: readonly StepProgress[]): string | null {
+  return nextStep(items) === 'straddle-go-live' ? items.find((p) => p.skill === 'straddle-test')?.record?.hash ?? null : null;
 }
 
 // Resume rule: the first step in program order that is not finished.
@@ -105,5 +119,5 @@ export function nextStep(items: readonly StepProgress[]): SkillName | null {
 export function statusLine(items: readonly StepProgress[], start?: SkillName): string {
   const from = Math.max(0, items.findIndex((p) => p.skill === start));
   const current = items.findIndex((p, i) => i >= from && !p.finished);
-  return items.map((p, i) => `${SKILLS[p.skill].title}${p.done ? ' ✓' : i === current || p.entered ? ` ▶ ${p.total ? `${p.entered}/${p.total}` : p.entered}` : ''}`).join(' · ');
+  return items.map((p, i) => `${SKILLS[p.skill].title}${p.done ? ' ✓' : p.skipped ? ' skipped' : i === current || p.entered ? ` ▶ ${p.total ? `${p.entered}/${p.total}` : p.entered}` : ''}`).join(' · ');
 }

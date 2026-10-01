@@ -8,7 +8,7 @@ import {
   type ClientName, type ConfigPlan,
 } from './clients.ts';
 import { straddleConfiguration } from './configuration.ts';
-import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, savedHandoff, savedStatusLine, start, type JourneyOptions } from './journey.ts';
+import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, savedHandoff, savedStatus, start, type JourneyOptions } from './journey.ts';
 import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
 import { loadReceipt, type Mode } from './receipt.ts';
 import { Prompter } from './ui.ts';
@@ -144,7 +144,7 @@ function status(): number {
   const config = straddleConfiguration(env);
   const handoff = loaded.kind === 'found' ? savedHandoff(loaded.receipt, env) : null;
   const run = loaded.kind === 'found'
-    ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client, mode: loaded.receipt.mode, progress: savedStatusLine(loaded.receipt), paste: handoff?.prompt ?? null }
+    ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client, mode: loaded.receipt.mode, ...savedStatus(loaded.receipt), paste: handoff?.prompt ?? null }
     : loaded.kind === 'invalid' ? { error: `unreadable receipt: ${loaded.reason}` } : null;
   const report = {
     wizard: WIZARD_VERSION,
