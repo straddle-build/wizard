@@ -857,9 +857,11 @@ async function resumeRun(io: Prompter, receipt: Receipt, opts: JourneyOptions, c
   if (confirm) {
     printSaved(io, receipt, now);
     if (!start) {
-      io.say(now.items.some((p) => p.skipped)
-        ? `You finished the saved ${receipt.program} run after Test and skipped Go Live, so there's nothing to resume. Run \`wizard go-live\` whenever you want the Production readiness review.`
-        : `Everything in the saved ${receipt.program} run is done and on file. There's nothing to resume.`);
+      if (!now.items.some((p) => p.skipped)) {
+        io.say(`Everything in the saved ${receipt.program} run is done and on file. There's nothing to resume.`);
+        return 0;
+      }
+      io.say(`You finished the saved ${receipt.program} run after Test and skipped Go Live, so there's nothing to resume. Run \`wizard go-live\` whenever you want the Production readiness review.`);
       const fresh = await io.choose('Next', [{ label: 'Leave it finished', value: false }, { label: 'Start fresh (I keep your current files beside the new ones)', value: true }], 0);
       io.say();
       return fresh ? newRun(receipt.program, opts, { kind: 'found', receipt }, true) : 0;
@@ -1015,9 +1017,9 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
 
 // For `wizard status`: the saved program as the status line shows it, from the files and recorded events, and the
 // steps you chose to finish without.
-export function savedStatus(receipt: Receipt): { progress: string; skipped: SkillName[] } {
+export function savedStatus(receipt: Receipt): { progress: string; skippedSteps: SkillName[] } {
   const now = savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers);
-  return { progress: `${statusLine(now.items)}${now.skipped ? ` (${skippedNote(now.skipped)})` : ''}`, skipped: now.items.filter((p) => p.skipped).map((p) => p.skill) };
+  return { progress: `${statusLine(now.items)}${now.skipped ? ` (${skippedNote(now.skipped)})` : ''}`, skippedSteps: now.items.filter((p) => p.skipped).map((p) => p.skill) };
 }
 
 // For `wizard status` on a Manual run: what `wizard resume` would hand off next, from the files and `env`; null when

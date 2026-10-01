@@ -149,5 +149,8 @@ test('finishing without Go Live counts only while Test is complete for the plan 
   assert.deepEqual(at({ ...tested, 'straddle-integration-plan.md': reapproved, 'straddle-integration-report.md': report('complete', newHash), 'straddle-test-evidence.md': evidence('complete', newHash) }), ['straddle-go-live', 'Setup · Plan · Integrate · Test · Go Live ▶ 0/5']);
   // Catches: a finish counting while Test isn't complete.
   assert.deepEqual(at({ ...tested, 'straddle-test-evidence.md': evidence('partial (1 failed)') }), ['straddle-test', 'Setup · Plan · Integrate · Test ▶ 0/5 · Go Live']);
+  // Catches: a skip hiding the not-ready result Go Live reported for this plan.
+  const notReady = done['straddle-go-live-report.md'].replace('Status: ready', 'Status: not ready (no Production webhook secret)');
+  assert.deepEqual(at({ ...tested, 'straddle-go-live-report.md': notReady }), ['straddle-go-live', 'Setup · Plan · Integrate · Test · Go Live ▶ 0/5']);
 });
 

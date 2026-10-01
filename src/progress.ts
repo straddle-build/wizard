@@ -24,7 +24,7 @@ export function approvalHash(plan: string): string {
   return createHash('sha256').update(kept.map((l) => `${l}\n`).join('')).digest('hex');
 }
 
-// `hash`: the approved plan hash a finished plan or plan-bound report is for.
+// `hash`: the plan hash the file is for: a finished plan's approved hash, or the `Plan hash:` a report names.
 export interface StepRecord { done: boolean; detail: string; hash?: string }
 type Read = (name: string) => { text: string } | { missing: string };
 
@@ -46,13 +46,14 @@ function reportRecord(read: Read, file: string, complete: string, forPlan: boole
   const report = read(file);
   if ('missing' in report) return { done: false, detail: report.missing };
   const status = header(report.text, 'Status') ?? 'not recorded';
-  if (statusWord(status) !== complete) return { done: false, detail: `Status: ${status}` };
+  const hash = header(report.text, 'Plan hash');
+  if (statusWord(status) !== complete) return { done: false, detail: `Status: ${status}`, hash };
   if (!forPlan) return { done: true, detail: `Status: ${status}` };
   const planFile = header(report.text, 'Plan') === MIGRATION_PLAN ? MIGRATION_PLAN : INTEGRATION_PLAN;
   const plan = planRecord(read, planFile);
-  if (!plan.done) return { done: false, detail: `Status: ${status}, but ${planFile} is not approved as it stands` };
-  if (header(report.text, 'Plan hash') !== plan.hash) return { done: false, detail: `Status: ${status}, but for an earlier version of ${planFile}` };
-  return { done: true, detail: `Status: ${status}, for the current approved plan`, hash: plan.hash };
+  if (!plan.done) return { done: false, detail: `Status: ${status}, but ${planFile} is not approved as it stands`, hash };
+  if (hash !== plan.hash) return { done: false, detail: `Status: ${status}, but for an earlier version of ${planFile}`, hash };
+  return { done: true, detail: `Status: ${status}, for the current approved plan`, hash };
 }
 
 // What the step's contract file says, read under discovery's boundary: never a symlink or an excluded path.
@@ -104,8 +105,10 @@ export function progress(repo: string, exclude: readonly string[], steps: Readon
 }
 
 // When Go Live is the only step left, the plan hash Test is complete at, so you can finish without Go Live; else null.
+// A Go Live report for that plan (not ready, say) is a real result, so it's never hidden behind a skip.
 export function goLiveSkippable(items: readonly StepProgress[]): string | null {
-  return nextStep(items) === 'straddle-go-live' ? items.find((p) => p.skill === 'straddle-test')?.record?.hash ?? null : null;
+  const tested = nextStep(items) === 'straddle-go-live' ? items.find((p) => p.skill === 'straddle-test')?.record?.hash : undefined;
+  return tested && items.find((p) => p.skill === 'straddle-go-live')?.record?.hash !== tested ? tested : null;
 }
 
 // Resume rule: the first step in program order that is not finished.

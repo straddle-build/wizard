@@ -77,12 +77,10 @@ function isObservedEvent(value: unknown): value is ObservedEvent {
   return markerKind !== undefined && Object.hasOwn(MARKER_KINDS, markerKind) && strings(marker, ['skill'], ['step', 'status', 'reason', 'report']);
 }
 
-// The recorded events, and how many lines were skipped because they aren't one.
-export function readObservedEvents(path: string): { events: ObservedEvent[]; skipped: number } {
-  if (!existsSync(path)) return { events: [], skipped: 0 };
+function parseEvents(content: string): { events: ObservedEvent[]; skipped: number } {
   const events: ObservedEvent[] = [];
   let skipped = 0;
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
+  for (const line of content.split('\n')) {
     if (!line.trim()) continue;
     const value = parseJson(line);
     if (isObservedEvent(value)) events.push(value);
@@ -91,11 +89,19 @@ export function readObservedEvents(path: string): { events: ObservedEvent[]; ski
   return { events, skipped };
 }
 
-// Appends the events not recorded yet: a keyed event already in the file is skipped.
+// The recorded events, and how many lines were skipped because they aren't one.
+export function readObservedEvents(path: string): { events: ObservedEvent[]; skipped: number } {
+  return existsSync(path) ? parseEvents(readFileSync(path, 'utf8')) : { events: [], skipped: 0 };
+}
+
+// Appends the events not recorded yet: a keyed event already in the file is skipped. Every writer appends here. A
+// writer cut off mid-line leaves no final newline, so one goes first and the new events aren't glued onto the broken
+// line and dropped with it.
 export function appendEvents(path: string, events: readonly ObservedEvent[]): void {
-  const seen = new Set(readObservedEvents(path).events.map((e) => text(field(e, 'key'))));
+  const recorded = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const seen = new Set(parseEvents(recorded).events.map((e) => text(field(e, 'key'))));
   const fresh = events.filter((e) => { const key = text(field(e, 'key')); return key === undefined || !seen.has(key); });
-  if (fresh.length) appendFileSync(path, fresh.map((e) => JSON.stringify(e) + '\n').join(''));
+  if (fresh.length) appendFileSync(path, (recorded && !recorded.endsWith('\n') ? '\n' : '') + fresh.map((e) => JSON.stringify(e) + '\n').join(''));
 }
 
 export function stepEntries(events: readonly ObservedEvent[], skill: string): string[] {

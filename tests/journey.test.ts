@@ -328,11 +328,13 @@ test('Test done, Go Live left: the exit summary offers finishing here, and finis
   const claude = fakeClaude();
   claude.sessions(STOP_AFTER_TEST);
 
-  // Start, then Finish here.
+  // Start, then Finish here. Later: Start fresh from resume, Continue, the four choices, Claude Code, Auto, then stop
+  // before the session.
   const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '2'] });
   const status = await runWizard(['status'], { cwd: repo, claude, env: CONFIGURED });
   const json = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, claude, env: CONFIGURED })).stdout);
-  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1'] });
+  const line = statusScript(repo);
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2', '1', '1', '3', '', '1', '1', '1', '2'] });
 
   assert.equal(first.code, 0, first.stdout);
   // Catches: the summary saying it will reopen Go Live no matter what you want.
@@ -341,11 +343,37 @@ test('Test done, Go Live left: the exit summary offers finishing here, and finis
   assert.match(first.stdout, /Finished, without Go Live\./);
   // Catches: status, its JSON and the status line still showing Go Live pending.
   assert.match(status.stdout, /Saved run\s+integration program, completed: you finished after Test and skipped Go Live\n\s+Progress\s+Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped\n/);
-  assert.deepEqual([json.run.state, json.run.progress, json.run.skipped, json.run.paste], ['completed', 'Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped', ['straddle-go-live'], null]);
-  assert.equal(statusScript(repo), 'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped\n');
-  // Catches: resume silently reopening Go Live after you finished.
+  assert.deepEqual([json.run.state, json.run.progress, json.run.skippedSteps, json.run.paste], ['completed', 'Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped', ['straddle-go-live'], null]);
+  assert.equal(line, 'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped\n');
+  // Catches: resume silently reopening Go Live after you finished, or Start fresh not starting over.
   assert.equal(resumed.code, 0, resumed.stdout);
   assert.match(resumed.stdout, /You finished the saved integration run after Test and skipped Go Live, so there's nothing to resume\.[^\n]*\nNext\n\s+1\) Leave it finished\n\s+2\) Start fresh \(I keep your current files beside the new ones\)\n/);
+  assert.equal(launches(claude).length, 1);
+  assert.deepEqual(readdirSync(repo).filter((f) => f.includes('.previous-')).map((f) => f.replace(/\d+$/, 'N')).sort(), ['straddle-integration-plan.md.previous-N', 'straddle-integration-report.md.previous-N', 'straddle-setup.md.previous-N', 'straddle-test-evidence.md.previous-N']);
+  assert.deepEqual([readReceipt(repo).state, readReceipt(repo).stateReason], ['ready', 'stopped before Setup']);
+});
+
+test('Finish here from the `wizard resume` menu keeps the program finished everywhere, even after events.jsonl was cut off mid-line', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions(STOP_AFTER_TEST);
+
+  // Start, then Resume at Go Live later. An interrupted writer leaves the file without its last newline.
+  await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '1'] });
+  const events = join(repo, '.straddle-wizard', 'events.jsonl');
+  writeFileSync(events, `${readFileSync(events, 'utf8')}{"at":"2026-10-01T00:00:00Z","kind":"step-ent`);
+  const finished = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+  const status = await runWizard(['status'], { cwd: repo, claude, env: CONFIGURED });
+  const json = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, claude, env: CONFIGURED })).stdout);
+  const again = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1'] });
+
+  assert.equal(finished.code, 0, finished.stdout);
+  assert.match(finished.stdout, /Next\n\s+1\) Resume at Go Live\n\s+2\) Finish here \(skip Go Live\)\n\s+3\) Cancel\nChoose \[1\]: \n\nFinished, without Go Live\./);
+  // Catches: the finish glued onto the cut-off line and dropped, so everything but the receipt still shows Go Live pending.
+  assert.match(status.stdout, /Saved run\s+integration program, completed: you finished after Test and skipped Go Live\n\s+Progress\s+Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped \(I skipped 1 unreadable line/);
+  assert.deepEqual([json.run.state, json.run.skippedSteps], ['completed', ['straddle-go-live']]);
+  assert.equal(statusScript(repo), 'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live skipped\n');
+  assert.match(again.stdout, /You finished the saved integration run after Test and skipped Go Live, so there's nothing to resume\.[^\n]*\nNext\n\s+1\) Leave it finished\n/);
   assert.equal(launches(claude).length, 1);
   assert.equal(readReceipt(repo).state, 'completed');
 });
@@ -360,6 +388,7 @@ test('Test done, Go Live left: choosing resume keeps Go Live next, and `wizard r
   claude.sessions(DEFAULT_SESSIONS);
   // Resume at Go Live, then Start.
   const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1'] });
+  const afterGoLive = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED });
 
   assert.equal(first.code, 0, first.stdout);
   assert.match(first.stdout, /2\) Finish here \(skip Go Live\)\nChoose \[1\]: \n\nNext: run `wizard resume` and I'll reopen the session at Go Live\.\n/);
@@ -370,6 +399,9 @@ test('Test done, Go Live left: choosing resume keeps Go Live next, and `wizard r
   assert.ok(second!.at(-1)!.startsWith('/straddle:straddle-go-live\nStraddle Wizard program: straddle-go-live. Start at straddle-go-live.\n'), second!.at(-1));
   assert.equal(readReceipt(repo).state, 'completed');
   assert.equal(statusLines(claude).at(-1), 'Straddle: Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓');
+  // Catches: a run that finished with Go Live getting the skipped run's finish menu.
+  assert.equal(afterGoLive.code, 0, afterGoLive.stdout);
+  assert.match(afterGoLive.stdout, /Everything in the saved integration run is done and on file\. There's nothing to resume\.\n$/);
 });
 
 test('a plan edited after finishing without Go Live voids the finish: resume goes back to Plan and offers no finish', async () => {
@@ -386,7 +418,7 @@ test('a plan edited after finishing without Go Live voids the finish: resume goe
   assert.match(resumed.stdout, /Next\n\s+1\) Resume at Plan\n\s+2\) Cancel\n/);
   assert.doesNotMatch(resumed.stdout, /nothing to resume|Go Live\s+skipped/);
   assert.match(json.run.progress, /^Setup ✓ · Plan ▶ \d+ · Integrate ▶ \d+ · Test ▶ \d+ · Go Live$/);
-  assert.deepEqual(json.run.skipped, []);
+  assert.deepEqual(json.run.skippedSteps, []);
 });
 
 test('Test not complete: neither the exit summary nor resume offers to finish without Go Live', async () => {
@@ -403,6 +435,23 @@ test('Test not complete: neither the exit summary nor resume offers to finish wi
   // Catches: finishing offered while Test is unfinished.
   assert.match(first.stdout, /Next: fix what stopped the run \(Test stopped at failed;[^\n]*\), then run `wizard resume` and I'll reopen the session at Test\./);
   assert.match(resumed.stdout, /Next\n\s+1\) Resume at Test\n\s+2\) Cancel\n/);
+  for (const out of [first.stdout, resumed.stdout]) assert.doesNotMatch(out, /Finish here/);
+});
+
+test('Go Live already reported not ready for this plan: no finish is offered, so the not-ready result stays in view', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions({
+    ...DEFAULT_SESSIONS,
+    'straddle-go-live': { ...DEFAULT_SESSIONS['straddle-go-live'], writes: [{ path: 'straddle-go-live-report.md', content: `# Straddle Go Live review\n\nStatus: not ready (no Production webhook secret)\nPlan: straddle-integration-plan.md\nPlan hash: ${PLAN_HASH}\n` }], text: handoff('straddle-go-live', 'not_ready') },
+  });
+
+  const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+
+  // Catches: finishing offered after Go Live ran, which would turn its not-ready row into "skipped".
+  assert.match(first.stdout, /Next: fix what stopped the run \(Go Live stopped at not_ready;[^\n]*\), then run `wizard resume` and I'll reopen the session at Go Live\./);
+  assert.match(resumed.stdout, /Go Live\s+straddle-go-live-report\.md: Status: not ready \(no Production webhook secret\)[^\n]*\n[\s\S]*Next\n\s+1\) Resume at Go Live\n\s+2\) Cancel\n/);
   for (const out of [first.stdout, resumed.stdout]) assert.doesNotMatch(out, /Finish here/);
 });
 
