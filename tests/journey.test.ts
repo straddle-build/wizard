@@ -363,6 +363,7 @@ test('without a Sandbox configuration the session starts at Plan, since Setup st
   assert.doesNotMatch(first.stdout, /end the session/);
   assert.equal(setupRanFirst, false, 'Setup waits for the key instead of running and stopping the session');
   const [one, two] = launches(claude);
+  assert.equal(statusLines(claude)[0], 'Straddle: Setup · Plan ▶ 0/n · Integrate · Test · Go Live', 'a session that skips Setup marks Plan, not Setup');
   assert.ok(one!.at(-1)!.startsWith('/straddle:straddle-plan\nStraddle Wizard program: straddle-plan. Start at straddle-plan.\n'), one!.at(-1));
   assert.equal(resumed.code, 0, resumed.stdout);
   // Plan finished in the first session, so it isn't listed again.
