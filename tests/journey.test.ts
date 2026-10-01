@@ -446,7 +446,7 @@ test('an edit the developer denies in the agent is not reported as a change, and
   assert.equal(existsSync(join(repo, 'src', 'straddle.ts')), false);
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'blocked');
-  assert.match(receipt.stateReason, /Integrate reported blocked/);
+  assert.match(receipt.stateReason, /^Integrate stopped at blocked; straddle-integration-report\.md: not written yet$/);
   assert.ok(!readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8').includes('"kind":"edit"'));
 });
 
@@ -689,14 +689,40 @@ test('wizard skill run <name> launches that versioned skill in the chosen agent'
 
   const r = await runWizard(['skill', 'run', 'straddle-go-live'], { cwd: repo, claude, input: ['1', '1', '1'] });
 
-  // C: a not-ready review isn't a finished Go Live, so the run stops there.
+  // C: a not-ready review isn't a finished Go Live, so the run stops there, naming what the report says.
   assert.equal(r.code, 1, r.stdout + r.stderr);
-  assert.match(r.stdout, /Reason\s+Go Live reported not_ready/);
+  assert.match(r.stdout, /Reason\s+Go Live stopped at not_ready; straddle-go-live-report\.md: not written yet/);
+  // D2: Go Live makes no Sandbox write, so resuming it asks none again.
+  assert.doesNotMatch(r.stdout, /Sandbox write/);
   assert.match(r.stdout, /Your session in Claude Code: Go Live/);
   const [launch] = launches(claude);
   assert.ok(launch!.at(-1)!.startsWith('/straddle:straddle-go-live\nStraddle Wizard program: straddle-go-live. Start at straddle-go-live.\n'));
   assert.ok(launch!.at(-1)!.endsWith('Repository context confirmed in the Straddle Wizard: language TypeScript (detected); framework Next.js (detected).'));
   assert.equal(readReceipt(repo).program, 'skill:straddle-go-live');
+});
+
+test('D2: a partial Test stops the run with the gap its evidence names, and resuming asks every Sandbox write again', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  const partial = EVIDENCE.replace('Status: complete', 'Status: partial (Sandbox webhook not configured)');
+  claude.sessions({ ...DEFAULT_SESSIONS, 'straddle-test': { ...DEFAULT_SESSIONS['straddle-test'], writes: [{ path: 'straddle-test-evidence.md', content: partial }], text: handoff('straddle-test', 'partial'), stop: true } });
+
+  const r = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /Reason\s+Test stopped at partial; straddle-test-evidence\.md: Status: partial \(Sandbox webhook not configured\)/);
+  assert.match(r.stdout, /I'll reopen the session at Test\. Approvals from before don't count there, so every Sandbox write is asked again\./);
+});
+
+test('D1: files that say done while this session reported a failed Test never read as the whole program', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions({ ...DEFAULT_SESSIONS, 'straddle-test': { ...DEFAULT_SESSIONS['straddle-test'], text: handoff('straddle-test', 'failed') } });
+
+  const r = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+
+  assert.doesNotMatch(r.stdout, /That's the whole program/);
+  assert.match(r.stdout, /straddle-test-evidence\.md says done, but your agent reported failed; check that straddle-test-evidence\.md was rewritten\./);
 });
 
 test('unknown command exits with usage error', async () => {
