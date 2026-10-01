@@ -125,3 +125,8 @@ test('resuming from repository state files places the play marker on the first u
   assert.equal(statusLine(progress(repo, [], zeroSteps, [])), 'Setup · Plan · Integrate ▶ 0 · Test · Go Live');
 });
 
+test('a session that leaves Setup for later puts the play marker on the step it starts at', () => {
+  const repo = nextRepo();
+  assert.equal(statusLine(progress(repo, [], steps, []), 'straddle-plan'), 'Setup · Plan ▶ 0/5 · Integrate · Test · Go Live');
+});
+

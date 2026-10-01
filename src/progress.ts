@@ -100,8 +100,10 @@ export function nextStep(items: readonly StepProgress[]): SkillName | null {
 }
 
 // `Setup ✓ · Plan ▶ 2/6 · Integrate · Test · Go Live`: ticked steps, then the current step and any later step the
-// agent has entered with their observed step counts, then the steps still to come.
-export function statusLine(items: readonly StepProgress[]): string {
-  const current = items.findIndex((p) => !p.finished);
+// agent has entered with their observed step counts, then the steps still to come. The current step is the first
+// unfinished one from `start`, where the session began: a session that leaves Setup for later starts past it.
+export function statusLine(items: readonly StepProgress[], start?: SkillName): string {
+  const from = Math.max(0, items.findIndex((p) => p.skill === start));
+  const current = items.findIndex((p, i) => i >= from && !p.finished);
   return items.map((p, i) => `${SKILLS[p.skill].title}${p.done ? ' ✓' : i === current || p.entered ? ` ▶ ${p.total ? `${p.entered}/${p.total}` : p.entered}` : ''}`).join(' · ');
 }
