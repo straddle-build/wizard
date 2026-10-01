@@ -11,9 +11,9 @@ import {
 import { checklistPage, followCodex } from './codex.ts';
 import { straddleConfiguration } from './configuration.ts';
 import { changedFiles, discover, readRepoFile, snapshot, type RepoFacts } from './discovery.ts';
-import { readObservedEvents, transcriptAssistantText, verifyChecklist } from './events.ts';
+import { appendEvents, readObservedEvents, transcriptAssistantText, verifyChecklist } from './events.ts';
 import { CONTRACT_FILES, SKILLS, programFor, programSkills, stepTitles, type ProgramName, type SkillName } from './programs.ts';
-import { header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
+import { goLiveSkippable, header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
 import { SESSION_ID, WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Mode, type Receipt, type RunState, type SessionRun } from './receipt.ts';
 import type { Prompter } from './ui.ts';
 import { WIZARD_VERSION } from './version.ts';
@@ -376,7 +376,7 @@ function stepRows(items: readonly StepProgress[], observed: boolean): string[] {
   const width = Math.max(...items.map((p) => SKILLS[p.skill].title.length)) + 2;
   return items.map((p) => {
     const route = SKILLS[p.skill];
-    const file = p.record && route.record ? `${route.record.file}: ${p.record.detail}` : 'writes no status file';
+    const file = p.skipped ? 'skipped: you finished after Test' : p.record && route.record ? `${route.record.file}: ${p.record.detail}` : 'writes no status file';
     const said = !p.reported ? 'no handoff reported'
       : p.reported.kind === 'abort' ? `reported STRADDLE_ABORT${p.reported.reason ? ` (${p.reported.reason})` : ''}`
         : `reported ${p.reported.status ?? 'a handoff with no status'}`;
@@ -719,7 +719,17 @@ function printInStraddle(io: Prompter, receipt: Receipt): void {
   io.say();
 }
 
-function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bundle | null): number {
+// You end the program after Test without Go Live. The choice goes in events.jsonl for the plan Test is complete at, so
+// `wizard status`, the status line and resume show the program finished until that plan changes.
+function finishWithoutGoLive(io: Prompter, receipt: Receipt, planHash: string): number {
+  appendEvents(eventsPath(receipt.repo), [{ at: new Date().toISOString(), kind: 'go-live-skipped', planHash }]);
+  io.say('Finished, without Go Live. `wizard status` and `wizard resume` now show the program as finished; if the plan changes, Go Live is back on the list. Run `wizard go-live` whenever you want the Production readiness review.');
+  return finish(receipt, 'completed', 'you finished after Test and skipped Go Live');
+}
+
+const FINISH_HERE = 'Finish here (skip Go Live)';
+
+async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bundle | null): Promise<number> {
   io.say(io.bold(`Straddle Wizard report: ${receipt.program} program, ${receipt.state}`));
   row(io, 'Reason', receipt.stateReason);
   row(io, 'Repository', receipt.repo);
@@ -768,22 +778,30 @@ function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bund
     io.say();
   }
   // A file that says done while the agent's latest report for it doesn't agree, as when the client refused the rewrite.
-  const contradicted = now.items.filter((p) => p.finished && !p.done && p.reported);
+  const contradicted = now.items.filter((p) => p.finished && !p.done && !p.skipped && p.reported);
   if (receipt.state === 'completed') {
     for (const p of contradicted) {
       const file = SKILLS[p.skill].record!.file;
       io.say(`${file} says done, but your agent reported ${p.reported!.kind === 'abort' ? 'STRADDLE_ABORT' : p.reported!.status ?? 'no status'}; check that ${file} was rewritten.`);
     }
-    if (!contradicted.length) io.say(receipt.program === 'integration'
-      ? "That's the whole program: your integration is built, tested in Sandbox, and reviewed for Go Live. Review the changed files and the checklist before you merge."
-      : 'Next: review the changed files and the checklist before you merge.');
+    if (!contradicted.length) io.say(receipt.program !== 'integration' ? 'Next: review the changed files and the checklist before you merge.'
+      : now.items.some((p) => p.skipped) ? "That's the program, finished without Go Live: your integration is built and tested in Sandbox. Review the changed files and the checklist before you merge, and run `wizard go-live` when you want the Production readiness review."
+        : "That's the whole program: your integration is built, tested in Sandbox, and reviewed for Go Live. Review the changed files and the checklist before you merge.");
   } else {
     const where = next ? ` at ${SKILLS[next].title}` : '';
     const asksWrites = now.items.some((p) => !p.finished && SKILLS[p.skill].sendsStraddleRequests);
     const reopen = receipt.mode === 'manual' ? `I'll read the files and tell you what to paste${where}` : `I'll reopen the session${where}`;
-    io.say(receipt.state === 'ready'
+    const nextLine = receipt.state === 'ready'
       ? `Next: run \`wizard resume\` and ${reopen}.`
-      : `Next: fix what stopped the run (${receipt.stateReason}), then run \`wizard resume\` and ${reopen}.${asksWrites ? " Approvals from before don't count there, so every Sandbox write is asked again." : ''}`);
+      : `Next: fix what stopped the run (${receipt.stateReason}), then run \`wizard resume\` and ${reopen}.${asksWrites ? " Approvals from before don't count there, so every Sandbox write is asked again." : ''}`;
+    const skippable = goLiveSkippable(now.items);
+    if (skippable) {
+      io.say("Test is done, and Go Live is the only step left. If you're not going to Production now, you can finish here.");
+      const finishHere = await io.choose('Next', [{ label: 'Resume at Go Live later (run `wizard resume`)', value: false }, { label: FINISH_HERE, value: true }], 0);
+      io.say();
+      if (finishHere) return finishWithoutGoLive(io, receipt, skippable);
+    }
+    io.say(nextLine);
   }
   return EXIT_CODE[receipt.state];
 }
@@ -839,12 +857,24 @@ async function resumeRun(io: Prompter, receipt: Receipt, opts: JourneyOptions, c
   if (confirm) {
     printSaved(io, receipt, now);
     if (!start) {
-      io.say(`Everything in the saved ${receipt.program} run is done and on file. There's nothing to resume.`);
-      return 0;
+      if (!now.items.some((p) => p.skipped)) {
+        io.say(`Everything in the saved ${receipt.program} run is done and on file. There's nothing to resume.`);
+        return 0;
+      }
+      io.say(`You finished the saved ${receipt.program} run after Test and skipped Go Live, so there's nothing to resume. Run \`wizard go-live\` whenever you want the Production readiness review.`);
+      const fresh = await io.choose('Next', [{ label: 'Leave it finished', value: false }, { label: 'Start fresh (I keep your current files beside the new ones)', value: true }], 0);
+      io.say();
+      return fresh ? newRun(receipt.program, opts, { kind: 'found', receipt }, true) : 0;
     }
-    const go = await io.choose('Next', [{ label: `Resume at ${SKILLS[start].title}`, value: true }, { label: 'Cancel', value: false }], 0);
+    const skippable = goLiveSkippable(now.items);
+    const go = await io.choose('Next', [
+      { label: `Resume at ${SKILLS[start].title}`, value: 'resume' as const },
+      ...(skippable ? [{ label: FINISH_HERE, value: 'finish' as const }] : []),
+      { label: 'Cancel', value: 'cancel' as const },
+    ], 0);
     io.say();
-    if (!go) { io.say('Cancelled. The saved run is unchanged.'); return 130; }
+    if (go === 'finish') return finishWithoutGoLive(io, receipt, skippable!);
+    if (go !== 'resume') { io.say('Cancelled. The saved run is unchanged.'); return 130; }
   }
   active.receipt = receipt;
   receipt.wizardPid = process.pid;
@@ -985,10 +1015,11 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
   return runProgram(io, receipt, opts, facts.providers);
 }
 
-// For `wizard status`: the saved program as the status line shows it, from the files and recorded events.
-export function savedStatusLine(receipt: Receipt): string {
+// For `wizard status`: the saved program as the status line shows it, from the files and recorded events, and the
+// steps you chose to finish without.
+export function savedStatus(receipt: Receipt): { progress: string; skippedSteps: SkillName[] } {
   const now = savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers);
-  return `${statusLine(now.items)}${now.skipped ? ` (${skippedNote(now.skipped)})` : ''}`;
+  return { progress: `${statusLine(now.items)}${now.skipped ? ` (${skippedNote(now.skipped)})` : ''}`, skippedSteps: now.items.filter((p) => p.skipped).map((p) => p.skill) };
 }
 
 // For `wizard status` on a Manual run: what `wizard resume` would hand off next, from the files and `env`; null when

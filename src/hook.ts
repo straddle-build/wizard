@@ -6,7 +6,7 @@
 // an attempted call the client or developer denies is never recorded as progress or a change.
 // Stop (each turn end), SessionEnd and every PostToolUse sweep the transcript for markers, recording each one once.
 // PreToolUse enforces "no code edit before the durable plan exists" for Claude Code's file-edit tools.
-import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { STEP_FILES, appendEvents, transcriptMarkers, type ObservedEvent } from './events.ts';
@@ -28,7 +28,7 @@ const input = field(payload, 'tool_input');
 const at = new Date().toISOString();
 
 function record(event: ObservedEvent): void {
-  appendFileSync(eventsFile, JSON.stringify(event) + '\n');
+  appendEvents(eventsFile, [event]);
 }
 
 function repoRelative(path: string): string | null {

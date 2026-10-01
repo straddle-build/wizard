@@ -4,6 +4,8 @@ import { field, parseJson, text } from './json.ts';
 // Recorded from native client events: the Claude Code hook, or the Codex session log the Wizard follows.
 // Step entry is not completion or approval. A `marker` event records what the agent printed, which is reported,
 // not observed. `key` marks events swept from a transcript, so a later sweep never records them twice.
+// `go-live-skipped` is the Wizard's record of your choice to finish without Go Live, for the plan hash Test was
+// complete at.
 export type ObservedEvent =
   | { at: string; kind: 'session-start'; session?: string; transcript?: string }
   | { at: string; kind: 'session-end'; reason?: string }
@@ -11,7 +13,8 @@ export type ObservedEvent =
   | { at: string; kind: 'step-entered'; skill: string; step: string; key?: string }
   | { at: string; kind: 'edit'; path: string }
   | { at: string; kind: 'edit-denied'; path: string }
-  | { at: string; kind: 'marker'; marker: ReportedMarker; key: string };
+  | { at: string; kind: 'marker'; marker: ReportedMarker; key: string }
+  | { at: string; kind: 'go-live-skipped'; planHash: string };
 
 // Printed by the model in its visible output. Best-effort: they can be missing, repeated or wrong.
 export interface ReportedMarker {
@@ -54,6 +57,7 @@ const EVENT_FIELDS: Record<ObservedEvent['kind'], { required: string[]; optional
   edit: { required: ['path'], optional: [] },
   'edit-denied': { required: ['path'], optional: [] },
   marker: { required: ['key'], optional: [] },
+  'go-live-skipped': { required: ['planHash'], optional: [] },
 };
 const MARKER_KINDS: Record<ReportedMarker['kind'], true> = { progress: true, abort: true, handoff: true };
 
@@ -73,12 +77,10 @@ function isObservedEvent(value: unknown): value is ObservedEvent {
   return markerKind !== undefined && Object.hasOwn(MARKER_KINDS, markerKind) && strings(marker, ['skill'], ['step', 'status', 'reason', 'report']);
 }
 
-// The recorded events, and how many lines were skipped because they aren't one.
-export function readObservedEvents(path: string): { events: ObservedEvent[]; skipped: number } {
-  if (!existsSync(path)) return { events: [], skipped: 0 };
+function parseEvents(content: string): { events: ObservedEvent[]; skipped: number } {
   const events: ObservedEvent[] = [];
   let skipped = 0;
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
+  for (const line of content.split('\n')) {
     if (!line.trim()) continue;
     const value = parseJson(line);
     if (isObservedEvent(value)) events.push(value);
@@ -87,11 +89,19 @@ export function readObservedEvents(path: string): { events: ObservedEvent[]; ski
   return { events, skipped };
 }
 
-// Appends the events not recorded yet: a keyed event already in the file is skipped.
+// The recorded events, and how many lines were skipped because they aren't one.
+export function readObservedEvents(path: string): { events: ObservedEvent[]; skipped: number } {
+  return existsSync(path) ? parseEvents(readFileSync(path, 'utf8')) : { events: [], skipped: 0 };
+}
+
+// Appends the events not recorded yet: a keyed event already in the file is skipped. Every writer appends here. A
+// writer cut off mid-line leaves no final newline, so one goes first and the new events aren't glued onto the broken
+// line and dropped with it.
 export function appendEvents(path: string, events: readonly ObservedEvent[]): void {
-  const seen = new Set(readObservedEvents(path).events.map((e) => text(field(e, 'key'))));
+  const recorded = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const seen = new Set(parseEvents(recorded).events.map((e) => text(field(e, 'key'))));
   const fresh = events.filter((e) => { const key = text(field(e, 'key')); return key === undefined || !seen.has(key); });
-  if (fresh.length) appendFileSync(path, fresh.map((e) => JSON.stringify(e) + '\n').join(''));
+  if (fresh.length) appendFileSync(path, (recorded && !recorded.endsWith('\n') ? '\n' : '') + fresh.map((e) => JSON.stringify(e) + '\n').join(''));
 }
 
 export function stepEntries(events: readonly ObservedEvent[], skill: string): string[] {
