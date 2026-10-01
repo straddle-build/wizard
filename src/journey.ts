@@ -517,7 +517,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const done = atStart.filter((p) => p.finished).map((p) => SKILLS[p.skill].title);
   const render = () => {
     const now = currentProgress(receipt, steps);
-    return [`Straddle Wizard: ${stepTitles(skills)} in Codex`, '', statusLine(now.items), '', ...stepRows(now.items, true), ...(now.skipped ? [skippedNote(now.skipped)] : []), '', LEGEND].join('\n');
+    return [`Straddle Wizard: ${stepTitles(skills)} in Codex`, '', statusLine(now.items, begin), '', ...stepRows(now.items, true), ...(now.skipped ? [skippedNote(now.skipped)] : []), '', LEGEND].join('\n');
   };
   const page = client === 'codex' ? await checklistPage(render) : null;
   io.say(io.bold(`Your session in ${label}: ${stepTitles(run)}`));
@@ -538,7 +538,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
   const gate = [...new Set(run.flatMap((s) => SKILLS[s].editGate))];
   const hook = [{ type: 'command', command: [process.execPath, HOOK_SCRIPT, '--events', eventsFile, '--repo', repo, '--gate', gate.join(',')].map(quote).join(' ') }];
-  const statusCommand = [process.execPath, STATUSLINE_SCRIPT, '--repo', repo, '--steps', steps.map((s) => `${s.skill}:${s.total}`).join(','), ...receipt.exclude.flatMap((e) => ['--exclude', e])];
+  const statusCommand = [process.execPath, STATUSLINE_SCRIPT, '--repo', repo, '--steps', steps.map((s) => `${s.skill}:${s.total}`).join(','), '--start', begin, ...receipt.exclude.flatMap((e) => ['--exclude', e])];
   // The status line, progress hooks and the pre-plan edit hook; nothing else. Claude Code merges this file with the
   // developer's own settings and keeps their permissions, default mode and env, which the Wizard never sets.
   writeFileSync(settingsPath, JSON.stringify({
@@ -588,9 +588,10 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   else if (exit.code !== 0) finish(receipt, 'blocked', `${ended} during ${SKILLS[next].title}; I don't advance past a failed session`);
   else if (!run.includes(next) && (sends > 0 || setupLeft)) finish(receipt, 'blocked', `configuration error: ${config.errors.join('; ')}`);
   else {
-    const said = atEnd.items.find((p) => p.skill === next)!.reported;
+    const at = atEnd.items.find((p) => p.skill === next)!;
+    const said = at.reported;
     if (said?.kind === 'abort') interrupted(io, receipt, session, `your agent reported STRADDLE_ABORT for ${SKILLS[next].title}: ${said.reason ?? 'no reason given'}`);
-    else if (said?.kind === 'handoff' && !SKILLS[next].advanceOn.includes(said.status ?? '')) finish(receipt, 'blocked', `${SKILLS[next].title} reported ${said.status ?? 'no status'}`);
+    else if (said?.kind === 'handoff' && !SKILLS[next].advanceOn.includes(said.status ?? '')) finish(receipt, 'blocked', `${SKILLS[next].title} stopped at ${said.status ?? 'no status'}${at.record ? `; ${SKILLS[next].record!.file}: ${at.record.detail}` : ''}`);
     else finish(receipt, 'ready', `next: ${SKILLS[next].title}`);
   }
   io.say();
@@ -699,15 +700,22 @@ function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bund
     for (const line of gaps.length ? gaps : [`Status: ${header(goLive.text, 'Status') ?? 'not recorded'}`]) io.say(`  ${line.trim()}`);
     io.say();
   }
+  // A file that says done while the agent's latest report for it doesn't agree, as when the client refused the rewrite.
+  const contradicted = now.items.filter((p) => p.finished && !p.done && p.reported);
   if (receipt.state === 'completed') {
-    io.say(receipt.program === 'integration'
+    for (const p of contradicted) {
+      const file = SKILLS[p.skill].record!.file;
+      io.say(`${file} says done, but your agent reported ${p.reported!.kind === 'abort' ? 'STRADDLE_ABORT' : p.reported!.status ?? 'no status'}; check that ${file} was rewritten.`);
+    }
+    if (!contradicted.length) io.say(receipt.program === 'integration'
       ? "That's the whole program: your integration is built, tested in Sandbox, and reviewed for Go Live. Review the changed files and the checklist before you merge."
       : 'Next: review the changed files and the checklist before you merge.');
   } else {
     const where = next ? ` at ${SKILLS[next].title}` : '';
+    const asksWrites = now.items.some((p) => !p.finished && SKILLS[p.skill].sendsStraddleRequests);
     io.say(receipt.state === 'ready'
       ? `Next: run \`wizard resume\` and I'll reopen the session${where}.`
-      : `Next: fix what stopped the run (${receipt.stateReason}), then run \`wizard resume\` and I'll reopen the session${where}. Approvals from before don't count there, so every Sandbox write is asked again.`);
+      : `Next: fix what stopped the run (${receipt.stateReason}), then run \`wizard resume\` and I'll reopen the session${where}.${asksWrites ? " Approvals from before don't count there, so every Sandbox write is asked again." : ''}`);
   }
   return EXIT_CODE[receipt.state];
 }
