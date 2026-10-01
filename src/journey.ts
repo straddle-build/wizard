@@ -265,7 +265,7 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
   const bundle = check.bundle;
   receipt.bundle = { kind: bundle.kind, pluginVersion: bundle.pluginVersion, contentSha256: bundle.contentSha256, path: bundle.path };
   const name = receipt.client!;
-  // Claude Code sessions always load exactly the Wizard's bundle; they ignore user settings, where an install is enabled.
+  // Claude Code sessions always load exactly the Wizard's bundle with --plugin-dir, so nothing needs installing.
   if (name === 'claude') receipt.pluginLoad = 'session';
   let repaired = false;
   for (;;) {
