@@ -84,7 +84,7 @@ export const CURSOR_CHAT = 'c0ffee00-1111-2222-3333-444455556666';
 export function fakeClients(status: string): { env: { HOME: string; PATH: string }; calls: () => string[] } {
   const dir = tempDir('fake-clients');
   const log = join(dir, 'calls.log');
-  const chat = `if [ "$1" = --workspace ]; then d="$HOME/.cursor/projects/$(printf %s "$2" | tr '/.' '--' | sed 's/^-*//')/agent-transcripts/${CURSOR_CHAT}"; mkdir -p "$d"; echo '{}' >> "$d/${CURSOR_CHAT}.jsonl"; fi\n`;
+  const chat = `if [ "$1" = --workspace ]; then d="$HOME/.cursor/projects/$(cd "$2" && pwd -P | tr '/.' '--' | sed 's/^-*//')/agent-transcripts/${CURSOR_CHAT}"; mkdir -p "$d"; echo '{}' >> "$d/${CURSOR_CHAT}.jsonl"; fi\n`;
   for (const [bin, version] of [['claude', '2.1.283 (Claude Code)'], ['codex', 'codex-cli 0.130.0'], ['cursor-agent', '2026.09.28-64d2043']]) {
     writeFileSync(join(dir, bin), `#!/bin/sh\necho "${bin} $*" >> '${log}'\ncase "$1" in --version) echo '${version}';; status) echo '${status}';; esac\n${bin === 'cursor-agent' ? chat : ''}`);
     chmodSync(join(dir, bin), 0o755);

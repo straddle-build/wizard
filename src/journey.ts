@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -162,15 +162,13 @@ async function askChoices(io: Prompter, language: string): Promise<Choices | nul
   return { products, integrationType, sdk, notificationPath };
 }
 
+// Every supported agent, installed here or not: Manual needs none of them on PATH, and Auto's readiness check stops
+// at one that isn't installed. The default is the first one installed.
 async function chooseClient(io: Prompter, env: NodeJS.ProcessEnv): Promise<ClientName | null> {
-  const options: Array<{ label: string; value: ClientName | null; hint?: string }> = [];
-  for (const name of CLIENT_NAMES) {
-    const state = inspectClient(name, env);
-    // Cursor is always offered: its IDE can run the skills in Manual mode without cursor-agent installed.
-    if (state.version || name === 'cursor') options.push({ label: state.version ? `${state.label} ${state.version}` : state.label, value: name, hint: EVENT_SURFACE_NOTE[name] });
-  }
+  const states = CLIENT_NAMES.map((name) => inspectClient(name, env));
+  const options: Array<{ label: string; value: ClientName | null; hint?: string }> = states.map((state) => ({ label: state.version ? `${state.label} ${state.version}` : `${state.label} (not installed here)`, value: state.name, hint: EVENT_SURFACE_NOTE[state.name] }));
   options.push({ label: 'Cancel', value: null });
-  const picked = await io.choose('Which coding agent should do the work?', options, 0);
+  const picked = await io.choose('Which coding agent should do the work?', options, Math.max(0, states.findIndex((s) => s.version)));
   io.say();
   return picked;
 }
@@ -510,34 +508,40 @@ interface Ready { bundle: Bundle; client: ClientState }
 // `Setup, Plan and Integrate`.
 const titleList = (titles: readonly string[]) => titles.length > 1 ? `${titles.slice(0, -1).join(', ')} and ${titles.at(-1)}` : titles[0] ?? '';
 
-// One agent session for the rest of the program: `start` and every unfinished step after it, never a finished one. When
-// the configuration isn't ready, Setup waits (it stops at the error) and the session ends before the first step that
-// can send Straddle requests.
+// The steps one session runs from `start`: `start` and every unfinished step after it, never a finished one. When the
+// configuration isn't ready, Setup waits (it stops at the error) and the session ends before the first step that can
+// send Straddle requests (`sends`; 0 means the session can't start). `wizard`, `wizard resume` and `wizard status` share it.
+function sessionSteps(repo: string, items: readonly StepProgress[], start: SkillName, env: NodeJS.ProcessEnv) {
+  const skills = items.map((p) => p.skill);
+  let run = skills.slice(skills.indexOf(start)).filter((s) => s === start || !items.find((p) => p.skill === s)!.finished);
+  const config = straddleConfiguration(env);
+  const setupLeft = config.errors.length > 0 && run[0] === 'straddle-setup' && run.length > 1;
+  if (setupLeft) run = run.slice(1);
+  const sends = config.errors.length ? run.findIndex((s) => SKILLS[s].sendsStraddleRequests) : -1;
+  const first = SKILLS[run[0]!];
+  const missing = first.requiresAnyOf.length && !first.requiresAnyOf.some((f) => existsSync(join(repo, f))) ? first.requiresAnyOf : null;
+  return { run, config, setupLeft, sends, missing, runnable: sends > 0 ? run.slice(0, sends) : run };
+}
+
 async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: SkillName, ready: Ready, opts: JourneyOptions): Promise<number> {
   const { repo } = receipt;
   const client = receipt.client!;
   const label = CLIENT_LABEL[client];
   const skills = steps.map((s) => s.skill);
   const atStart = currentProgress(receipt, steps).items;
-  let run = skills.slice(skills.indexOf(start)).filter((s) => s === start || !atStart.find((p) => p.skill === s)!.finished);
-
-  const config = straddleConfiguration(opts.env);
-  const setupLeft = config.errors.length > 0 && run[0] === 'straddle-setup' && run.length > 1;
-  if (setupLeft) run = run.slice(1);
+  const { run: planned, config, setupLeft, sends, missing, runnable: run } = sessionSteps(repo, atStart, start, opts.env);
   const begin = run[0]!;
   const first = SKILLS[begin];
 
-  if (first.requiresAnyOf.length && !first.requiresAnyOf.some((f) => existsSync(join(repo, f)))) {
-    io.say(`${first.title} needs ${first.requiresAnyOf.join(' or ')}. Run \`wizard plan\` first: no code changes happen before there's a plan.`);
-    return finish(receipt, 'blocked', `${first.title} needs ${first.requiresAnyOf.join(' or ')}`);
+  if (missing) {
+    io.say(`${first.title} needs ${missing.join(' or ')}. Run \`wizard plan\` first: no code changes happen before there's a plan.`);
+    return finish(receipt, 'blocked', `${first.title} needs ${missing.join(' or ')}`);
   }
   if (begin === 'straddle-integrate' || begin === 'straddle-test') showPlan(io, receipt, begin);
 
-  const sends = config.errors.length ? run.findIndex((s) => SKILLS[s].sendsStraddleRequests) : -1;
   if (sends >= 0 || setupLeft) {
-    printConfigurationError(io, config.errors, opts.env, sends < 0 ? run : run.slice(0, sends), sends < 0 ? undefined : run[sends], setupLeft);
+    printConfigurationError(io, config.errors, opts.env, sends < 0 ? planned : planned.slice(0, sends), sends < 0 ? undefined : planned[sends], setupLeft);
     if (sends === 0) return finish(receipt, 'blocked', `configuration error: ${config.errors.join('; ')}`);
-    if (sends > 0) run = run.slice(0, sends);
   }
 
   const previous = receipt.sessions.findLast((s) => s.client === client && s.sessionId);
@@ -590,6 +594,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   saveReceipt(receipt);
 
   const follower = client === 'codex' ? followCodex(opts.env, repo, eventsFile, Date.now() - 1000, previous?.sessionId ?? null) : null;
+  const chatsBefore = client === 'cursor' ? cursorTranscripts(opts.env, repo) : null;
   const command = launchCommand({ client, skill: begin, repo, context: programPrompt(run, receipt, previous !== undefined), settingsPath, pluginDir: ready.bundle.path, resume: previous?.sessionId ?? null });
   const exit = await runInteractive(command, repo, opts.env);
   const rollout = follower?.stop();
@@ -599,9 +604,9 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   session.exit = { code: exit.code, signal: exit.signal };
   const events = readObservedEvents(eventsFile).events.filter((e) => e.at >= session.startedAt);
   const claudeSession = events.findLast((e) => e.kind === 'session-start' && e.session);
-  const chat = client === 'cursor' ? cursorChat(opts.env, repo, Date.parse(session.startedAt) - 1000) : null;
+  const chat = chatsBefore ? cursorChat(opts.env, repo, previous?.sessionId ?? null, chatsBefore) : null;
   session.sessionId = rollout?.session ?? (claudeSession?.kind === 'session-start' ? claudeSession.session ?? null : chat?.id ?? null);
-  const transcripts = chat ? [chat.transcript] : [...new Set(events.flatMap((e) => (e.kind === 'session-start' && e.transcript ? [e.transcript] : [])))];
+  const transcripts = chat?.transcript ? [chat.transcript] : [...new Set(events.flatMap((e) => (e.kind === 'session-start' && e.transcript ? [e.transcript] : [])))];
   session.checklist = verifyChecklist(rollout ? rollout.text.join('\n') : transcripts.map(transcriptAssistantText).join('\n'));
   const after = snapshot(repo, receipt.exclude);
   session.changedFiles = changedFiles(before, after);
@@ -636,16 +641,29 @@ function interrupted(io: Prompter, receipt: Receipt, session: SessionRun, reason
   finish(receipt, 'aborted', reason);
 }
 
-// cursor-agent keeps each chat at ~/.cursor/projects/<repo path, / and . as ->/agent-transcripts/<id>/<id>.jsonl, in
-// Claude Code's transcript format. The chat written since `since`, newest first, is the session to resume.
-function cursorChat(env: NodeJS.ProcessEnv, repo: string, since: number): { id: string; transcript: string } | null {
-  const dir = join(env.HOME || homedir(), '.cursor', 'projects', repo.replace(/[/.]/g, '-').replace(/^-+/, ''), 'agent-transcripts');
-  let found: { id: string; transcript: string; at: number } | null = null;
+// cursor-agent keeps each chat at ~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl, in Claude Code's
+// transcript format; the slug is the workspace's real path with / and . as -. Chat id → transcript.
+function cursorTranscripts(env: NodeJS.ProcessEnv, repo: string): Map<string, string> {
+  const dir = join(env.HOME || homedir(), '.cursor', 'projects', realpathSync(repo).replace(/[/.]/g, '-').replace(/^-+/, ''), 'agent-transcripts');
+  const found = new Map<string, string>();
   for (const id of existsSync(dir) ? readdirSync(dir) : []) {
     const transcript = join(dir, id, `${id}.jsonl`);
-    if (!SESSION_ID.test(id) || !existsSync(transcript)) continue;
-    const at = statSync(transcript).mtimeMs;
-    if (at >= since && (!found || at > found.at)) found = { id, transcript, at };
+    if (SESSION_ID.test(id) && existsSync(transcript)) found.set(id, transcript);
+  }
+  return found;
+}
+
+// The chat this Wizard launched: the one it resumed, else the first chat created in this workspace after launch (not
+// in `before`). Another Cursor chat in the same repo can still be writing its own transcript, so which file changed
+// last says nothing.
+function cursorChat(env: NodeJS.ProcessEnv, repo: string, resumed: string | null, before: ReadonlyMap<string, string>): { id: string; transcript: string | null } | null {
+  const now = cursorTranscripts(env, repo);
+  if (resumed) return { id: resumed, transcript: now.get(resumed) ?? null };
+  let found: { id: string; transcript: string; at: number } | null = null;
+  for (const [id, transcript] of now) {
+    if (before.has(id)) continue;
+    const at = statSync(transcript).birthtimeMs;
+    if (!found || at < found.at) found = { id, transcript, at };
   }
   return found;
 }
@@ -973,12 +991,13 @@ export function savedStatusLine(receipt: Receipt): string {
   return `${statusLine(now.items)}${now.skipped ? ` (${skippedNote(now.skipped)})` : ''}`;
 }
 
-// For `wizard status` on a Manual run: what to paste next, from the files; null when nothing is left.
-export function savedHandoff(receipt: Receipt): Handoff | null {
+// For `wizard status` on a Manual run: what `wizard resume` would hand off next, from the files and `env`; null when
+// nothing is left or the next session can't start.
+export function savedHandoff(receipt: Receipt, env: NodeJS.ProcessEnv): Handoff | null {
   if (receipt.mode !== 'manual' || !receipt.client) return null;
   const now = savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers);
   const next = nextStep(now.items);
   if (!next) return null;
-  const skills = now.items.map((p) => p.skill);
-  return handoffFor(receipt, skills.slice(skills.indexOf(next)).filter((s) => s === next || !now.items.find((p) => p.skill === s)!.finished));
+  const { sends, missing, runnable } = sessionSteps(receipt.repo, now.items, next, env);
+  return sends === 0 || missing ? null : handoffFor(receipt, runnable);
 }

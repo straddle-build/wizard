@@ -142,7 +142,7 @@ function status(): number {
   const check = findBundle({ override: bundlePath, env });
   const clients = CLIENT_NAMES.map((name) => inspectClient(name, env, check.ok ? check.bundle : null));
   const config = straddleConfiguration(env);
-  const handoff = loaded.kind === 'found' ? savedHandoff(loaded.receipt) : null;
+  const handoff = loaded.kind === 'found' ? savedHandoff(loaded.receipt, env) : null;
   const run = loaded.kind === 'found'
     ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client, mode: loaded.receipt.mode, progress: savedStatusLine(loaded.receipt), paste: handoff?.prompt ?? null }
     : loaded.kind === 'invalid' ? { error: `unreadable receipt: ${loaded.reason}` } : null;
