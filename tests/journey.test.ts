@@ -393,8 +393,11 @@ test('readiness says the session runs with the developer\'s own settings and pro
   // Continue, then stop at Start: only the readiness screen matters.
   const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '2'] });
 
-  assert.match(r.stdout, /Session settings\s+yours: /);
-  assert.doesNotMatch(r.stdout, /Isolated|asks before edits/);
+  assert.match(r.stdout, /Session settings\s+yours: I start Claude Code with your own settings, including your permission mode and any `env` values/);
+  // A Claude Code settings `env` block overrides the shell in the session, so the shell values the Wizard checked are labelled as such.
+  assert.match(r.stdout, /Straddle key\s+STRADDLE_API_KEY is set in your shell/);
+  assert.match(r.stdout, /Environment\s+sandbox \(STRADDLE_ENVIRONMENT\) in your shell; any `env` value in your Claude Code settings overrides it in the session, and the skills check the environment again there/);
+  assert.doesNotMatch(r.stdout, /Isolated|asks before edits|add only/);
 });
 
 test('Integrate never starts before the durable plan exists', async () => {
