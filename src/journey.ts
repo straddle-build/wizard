@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PLUGIN_RELEASES, bundleLabel, downloadRelease, listReleases, loadCachedRelease, loadLocalBundle, pickRelease, releaseDir, type Bundle, type BundleCheck } from './bundle.ts';
 import {
-  CLIENT_LABEL, EVENT_SURFACE, EVENT_SURFACE_NOTE, displayCommand, inspectClient, installPlan, launchCommand, runCommands, updatePlan,
-  type ClientName, type ClientState, type Command, type CommandResult, type ConfigPlan,
+  CLIENT_LABEL, CLIENT_NAMES, EVENT_SURFACE, EVENT_SURFACE_NOTE, displayCommand, inspectClient, installPlan, launchCommand, manualHandoff, runCommands, updatePlan,
+  type ClientName, type ClientState, type Command, type CommandResult, type ConfigPlan, type Handoff,
 } from './clients.ts';
 import { checklistPage, followCodex } from './codex.ts';
 import { straddleConfiguration } from './configuration.ts';
@@ -13,7 +14,7 @@ import { changedFiles, discover, readRepoFile, snapshot, type RepoFacts } from '
 import { readObservedEvents, transcriptAssistantText, verifyChecklist } from './events.ts';
 import { CONTRACT_FILES, SKILLS, programFor, programSkills, stepTitles, type ProgramName, type SkillName } from './programs.ts';
 import { header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
-import { WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Receipt, type RunState, type SessionRun } from './receipt.ts';
+import { SESSION_ID, WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Mode, type Receipt, type RunState, type SessionRun } from './receipt.ts';
 import type { Prompter } from './ui.ts';
 import { WIZARD_VERSION } from './version.ts';
 
@@ -23,6 +24,7 @@ export interface JourneyOptions {
   io: Prompter;
   bundlePath: string | undefined;
   client: ClientName | undefined;
+  mode: Mode | undefined;
   exclude: string[];
 }
 
@@ -162,12 +164,26 @@ async function askChoices(io: Prompter, language: string): Promise<Choices | nul
 
 async function chooseClient(io: Prompter, env: NodeJS.ProcessEnv): Promise<ClientName | null> {
   const options: Array<{ label: string; value: ClientName | null; hint?: string }> = [];
-  for (const name of ['claude', 'codex'] as const) {
+  for (const name of CLIENT_NAMES) {
     const state = inspectClient(name, env);
-    if (state.version) options.push({ label: `${state.label} ${state.version}`, value: name, hint: EVENT_SURFACE_NOTE[name] });
+    // Cursor is always offered: its IDE can run the skills in Manual mode without cursor-agent installed.
+    if (state.version || name === 'cursor') options.push({ label: state.version ? `${state.label} ${state.version}` : state.label, value: name, hint: EVENT_SURFACE_NOTE[name] });
   }
-  options.push({ label: 'Cursor', value: 'cursor', hint: EVENT_SURFACE_NOTE.cursor }, { label: 'Cancel', value: null });
+  options.push({ label: 'Cancel', value: null });
   const picked = await io.choose('Which coding agent should do the work?', options, 0);
+  io.say();
+  return picked;
+}
+
+// Auto is the default when the chosen agent is installed here and logged in, else Manual.
+async function chooseMode(io: Prompter, client: ClientName, env: NodeJS.ProcessEnv): Promise<Mode | null> {
+  const state = inspectClient(client, env);
+  const ready = state.version !== null && state.loggedIn === true;
+  const picked = await io.choose('How do you want to run the setup?', [
+    { label: 'Auto', value: 'auto' as const, hint: `I start ${state.label} here and it works through the steps` },
+    { label: 'Manual', value: 'manual' as const, hint: 'I set everything up and tell you what to paste into your own agent' },
+    { label: 'Cancel', value: null },
+  ], ready ? 0 : 1);
   io.say();
   return picked;
 }
@@ -235,22 +251,29 @@ export function printPlan(say: (line: string) => void, plan: ConfigPlan): void {
 function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: ClientState, env: NodeJS.ProcessEnv): void {
   const config = straddleConfiguration(env);
   io.say(io.bold(`Checking ${client.label}`));
+  row(io, 'Mode', receipt.mode === 'manual'
+    ? "Manual: I start no agent; I tell you what to paste into yours (change with `wizard resume --mode auto`)"
+    : `Auto: I start ${client.label} here (change with \`wizard resume --mode manual\`)`);
   row(io, 'Skill bundle', bundleLabel(bundle));
   row(io, 'Agent', client.version ? `${client.label} ${client.version}` : `${client.label}: not found`);
   if (client.loggedIn !== null) row(io, 'Agent login', client.loggedIn ? 'logged in' : 'not logged in');
   const installed = client.plugin.state === 'installed'
     ? `installed ${client.plugin.version ?? ''}, ${client.plugin.verified ? "matches the Wizard's bundle" : "differs from the Wizard's bundle"}`
     : client.plugin.state === 'missing' ? 'not installed' : "unverified (I can't inspect this client)";
-  if (receipt.pluginLoad === 'session') {
+  if (receipt.pluginLoad === 'session' && client.name === 'cursor') {
+    row(io, 'Straddle plugin', `loaded into the Wizard's session from that bundle with --plugin-dir (your Cursor install: ${installed})`);
+    row(io, 'API MCP', 'declared by that plugin, which Cursor names plugin-<bundle folder>-straddle-api; cursor-agent sends STRADDLE_API_KEY from your shell');
+    row(io, 'Session settings', "yours: I start cursor-agent with your own approval mode, sandbox and workspace trust, and don't change them.");
+  } else if (receipt.pluginLoad === 'session') {
     row(io, 'Straddle plugin', `loaded into the Wizard's session from that bundle with --plugin-dir (your Claude Code install: ${installed})`);
     row(io, 'API MCP', 'declared by that plugin; Claude Code sends STRADDLE_API_KEY from its session environment: your shell, or your Claude Code settings `env` if it sets the key');
     row(io, 'Session settings', "yours: I start Claude Code with your own settings, including your permission mode and any `env` values, and don't change them. My session settings add the checklist status line, which replaces yours for this session, progress hooks and the pre-plan edit hook.");
   } else {
     row(io, 'Straddle plugin', installed);
     row(io, 'API MCP', client.apiMcp);
-    if (client.name === 'codex') row(io, 'Session settings', "yours: I start Codex with your own sandbox, approval policy and configuration and don't change them.");
+    if (client.name === 'codex' && receipt.mode !== 'manual') row(io, 'Session settings', "yours: I start Codex with your own sandbox, approval policy and configuration and don't change them.");
   }
-  const override = receipt.pluginLoad === 'session' ? '; any `env` value in your Claude Code settings overrides it in the session, and the skills check the environment again there' : '';
+  const override = receipt.pluginLoad === 'session' && client.name === 'claude' ? '; any `env` value in your Claude Code settings overrides it in the session, and the skills check the environment again there' : '';
   row(io, 'Straddle key', config.key === 'present' ? "STRADDLE_API_KEY is set in your shell (I didn't read the value)" : 'STRADDLE_API_KEY is not set in your shell');
   row(io, 'Environment', `${config.environment} in your shell${override}`);
   io.say();
@@ -266,20 +289,24 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
   const bundle = check.bundle;
   receipt.bundle = { kind: bundle.kind, pluginVersion: bundle.pluginVersion, contentSha256: bundle.contentSha256, path: bundle.path };
   const name = receipt.client!;
-  // Claude Code sessions load the Wizard's bundle with --plugin-dir, which wins over an installed `straddle` plugin, so
-  // nothing needs installing. A managed enabledPlugins lock or a `"straddle@inline": false` entry can still keep it out.
-  if (name === 'claude') receipt.pluginLoad = 'session';
+  const manual = receipt.mode === 'manual';
+  // Auto Claude Code and Cursor sessions load the Wizard's bundle with --plugin-dir, which wins over an installed
+  // `straddle` plugin, so nothing needs installing. A managed enabledPlugins lock or a `"straddle@inline": false` entry
+  // can still keep it out of Claude Code.
+  receipt.pluginLoad = !manual && name !== 'codex' ? 'session' : null;
   let repaired = false;
   for (;;) {
     const client = inspectClient(name, opts.env, bundle);
     printReadiness(io, receipt, bundle, client, opts.env);
-    if (name === 'cursor') { receipt.pluginLoad = 'manual'; return { bundle, client }; }
+    // Manual into an agent I can't see or install into: the handoff steps say to install the plugin there.
+    if (manual && (name === 'cursor' || !client.version || client.plugin.state === 'unverified')) { receipt.pluginLoad = 'manual'; return { bundle, client }; }
     if (!client.version) {
       io.say(`${client.label} isn't installed or isn't on your PATH. Install it, or run \`wizard\` again and pick another agent.`);
       return finish(receipt, 'blocked', `${client.label} not found`);
     }
-    if (client.loggedIn === false) {
-      io.say(`${client.label} isn't logged in. Run \`${name === 'claude' ? 'claude auth login' : 'codex login'}\` in your terminal, then choose Recheck. I never handle your agent's credentials.`);
+    // Manual: you log in to your own agent; I start none.
+    if (!manual && client.loggedIn === false) {
+      io.say(`${client.label} isn't logged in. Run \`${{ claude: 'claude auth login', codex: 'codex login', cursor: 'cursor-agent login' }[name]}\` in your terminal, then choose Recheck. I never handle your agent's credentials.`);
       const next = await io.choose('Next', [{ label: 'Recheck', value: 'recheck' as const }, { label: 'Stop here (resume later with `wizard resume`)', value: 'stop' as const }]);
       if (next === 'recheck') continue;
       return finish(receipt, 'blocked', `${client.label} is not logged in`);
@@ -519,14 +546,16 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
     const now = currentProgress(receipt, steps);
     return [`Straddle Wizard: ${stepTitles(skills)} in Codex`, '', statusLine(now.items, begin), '', ...stepRows(now.items, true), ...(now.skipped ? [skippedNote(now.skipped)] : []), '', LEGEND].join('\n');
   };
-  const page = client === 'codex' ? await checklistPage(render) : null;
+  const manual = receipt.mode === 'manual';
+  const page = client === 'codex' && !manual ? await checklistPage(render) : null;
   io.say(io.bold(`Your session in ${label}: ${stepTitles(run)}`));
   if (done.length) io.say(`  ${titleList(done)} ${done.length === 1 ? 'is' : 'are'} done; I read that from ${done.length === 1 ? 'its file' : 'their files'}. I'll start at ${first.title}.`);
-  if (client === 'cursor') return manualHandoff(io, receipt, steps, run);
-  io.say(`  ${label} opens here and runs ${run.length === 1 ? 'the step' : 'these steps'} in one session. ${page ? `Follow the checklist at ${page.url}` : 'Its status line shows the checklist as it goes'}.`);
+  if (manual) return manualSession(io, receipt, steps, run);
+  const watch = page ? `Follow the checklist at ${page.url}` : client === 'claude' ? 'Its status line shows the checklist as it goes' : "I can't watch Cursor's progress; when it stops I read the files the skills wrote";
+  io.say(`  ${label} opens here and runs ${run.length === 1 ? 'the step' : 'these steps'} in one session. ${watch}.`);
   io.say('  Answer its questions there, and approve or deny each change and each Sandbox request. Starting isn\'t approval of anything.');
   if (previous) io.say("  I'm reopening your earlier session, so I tell your agent that approvals from before don't count: every Sandbox write gets a fresh preview and question.");
-  io.say(`  To stop, exit ${label} (${client === 'claude' ? '/exit' : 'Ctrl-C twice'}). Run \`wizard resume\` later and I'll reopen the session at the next unfinished step.`);
+  io.say(`  To stop, exit ${label} (${client === 'codex' ? 'Ctrl-C twice' : '/exit'}). Run \`wizard resume\` later and I'll reopen the session at the next unfinished step.`);
   const go = await io.choose('Next', [{ label: 'Start', value: true }, { label: 'Stop here (resume later with `wizard resume`)', value: false }], 0);
   io.say();
   if (!go) { page?.close(); return finish(receipt, 'ready', `stopped before ${first.title}`); }
@@ -541,7 +570,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const statusCommand = [process.execPath, STATUSLINE_SCRIPT, '--repo', repo, '--steps', steps.map((s) => `${s.skill}:${s.total}`).join(','), '--start', begin, ...receipt.exclude.flatMap((e) => ['--exclude', e])];
   // The status line, progress hooks and the pre-plan edit hook; nothing else. Claude Code merges this file with the
   // developer's own settings and keeps their permissions, default mode and env, which the Wizard never sets.
-  writeFileSync(settingsPath, JSON.stringify({
+  if (client === 'claude') writeFileSync(settingsPath, JSON.stringify({
     statusLine: { type: 'command', command: statusCommand.map(quote).join(' '), padding: 0 },
     hooks: {
       SessionStart: [{ hooks: hook }],
@@ -570,8 +599,9 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   session.exit = { code: exit.code, signal: exit.signal };
   const events = readObservedEvents(eventsFile).events.filter((e) => e.at >= session.startedAt);
   const claudeSession = events.findLast((e) => e.kind === 'session-start' && e.session);
-  session.sessionId = rollout?.session ?? (claudeSession?.kind === 'session-start' ? claudeSession.session ?? null : null);
-  const transcripts = [...new Set(events.flatMap((e) => (e.kind === 'session-start' && e.transcript ? [e.transcript] : [])))];
+  const chat = client === 'cursor' ? cursorChat(opts.env, repo, Date.parse(session.startedAt) - 1000) : null;
+  session.sessionId = rollout?.session ?? (claudeSession?.kind === 'session-start' ? claudeSession.session ?? null : chat?.id ?? null);
+  const transcripts = chat ? [chat.transcript] : [...new Set(events.flatMap((e) => (e.kind === 'session-start' && e.transcript ? [e.transcript] : [])))];
   session.checklist = verifyChecklist(rollout ? rollout.text.join('\n') : transcripts.map(transcriptAssistantText).join('\n'));
   const after = snapshot(repo, receipt.exclude);
   session.changedFiles = changedFiles(before, after);
@@ -606,19 +636,38 @@ function interrupted(io: Prompter, receipt: Receipt, session: SessionRun, reason
   finish(receipt, 'aborted', reason);
 }
 
-// Cursor has no session the Wizard can start or watch, so the developer runs the program there and the files decide.
-async function manualHandoff(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[]): Promise<number> {
-  io.say("  I can't drive Cursor, so here's the handoff:");
-  io.say(`    1. Open ${receipt.repo} in Cursor with the Straddle plugin installed from its team marketplace.`);
-  io.say('    2. Ask the Cursor agent:');
-  for (const line of [`Use the ${run[0]} skill.`, ...programPrompt(run, receipt, false).split('\n')]) io.say(`         ${line}`);
-  io.say('    3. Answer its questions and approvals in Cursor, then come back here.');
-  io.say("  I can't see Cursor's progress, so I show none. When you're back, I read the files the skills wrote.");
+// cursor-agent keeps each chat at ~/.cursor/projects/<repo path, / and . as ->/agent-transcripts/<id>/<id>.jsonl, in
+// Claude Code's transcript format. The chat written since `since`, newest first, is the session to resume.
+function cursorChat(env: NodeJS.ProcessEnv, repo: string, since: number): { id: string; transcript: string } | null {
+  const dir = join(env.HOME || homedir(), '.cursor', 'projects', repo.replace(/[/.]/g, '-').replace(/^-+/, ''), 'agent-transcripts');
+  let found: { id: string; transcript: string; at: number } | null = null;
+  for (const id of existsSync(dir) ? readdirSync(dir) : []) {
+    const transcript = join(dir, id, `${id}.jsonl`);
+    if (!SESSION_ID.test(id) || !existsSync(transcript)) continue;
+    const at = statSync(transcript).mtimeMs;
+    if (at >= since && (!found || at > found.at)) found = { id, transcript, at };
+  }
+  return found;
+}
+
+function handoffFor(receipt: Receipt, run: readonly SkillName[]): Handoff {
+  return manualHandoff({ client: receipt.client!, skill: run[0]!, repo: receipt.repo, context: programPrompt(run, receipt, false) });
+}
+
+// Manual: the developer runs the program in their own agent and the files decide. I start no process.
+async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[]): Promise<number> {
+  const label = CLIENT_LABEL[receipt.client!];
+  const { prompt, steps: todo } = handoffFor(receipt, run);
+  io.say("  Manual: I start no agent. Here's the handoff:");
+  todo.slice(0, 2).forEach((s, i) => io.say(`    ${i + 1}. ${s}`));
+  for (const line of prompt.split('\n')) io.say(`         ${line}`);
+  todo.slice(2).forEach((s, i) => io.say(`    ${i + 3}. ${s}`));
+  io.say(`  I can't see ${label}'s progress, so I show none. When you're back, I read the files the skills wrote.`);
   io.say();
   const back = await io.choose('Next', [{ label: "I'm back: read the files", value: true }, { label: 'Stop here (resume later with `wizard resume`)', value: false }], 0);
   io.say();
-  receipt.sessions.push({ client: 'cursor', sessionId: null, skills: [...run], startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), exit: null, changedFiles: [], evidenceLimits: ['I compared no files for a Cursor session'], checklist: [] });
-  if (!back) return finish(receipt, 'ready', `handed off to Cursor at ${SKILLS[run[0]!].title}`);
+  receipt.sessions.push({ client: receipt.client!, sessionId: null, skills: [...run], startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), exit: null, changedFiles: [], evidenceLimits: ['I compared no files for a Manual session'], checklist: [] });
+  if (!back) return finish(receipt, 'ready', `handed off to ${label} at ${SKILLS[run[0]!].title}`);
   const now = currentProgress(receipt, steps);
   const next = nextStep(now.items);
   finish(receipt, next ? 'ready' : 'completed', next ? `next: ${SKILLS[next].title}` : 'every step is done and on file');
@@ -661,7 +710,7 @@ function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bund
   row(io, 'Run record', `${WIZARD_DIR}/receipt.json and ${WIZARD_DIR}/events.jsonl`);
   io.say();
   io.say(io.bold('Steps'));
-  printSteps(io, now, receipt.client !== null && EVENT_SURFACE[receipt.client] === 'observed');
+  printSteps(io, now, receipt.client !== null && receipt.mode !== 'manual' && EVENT_SURFACE[receipt.client] === 'observed');
   io.say(`  ${LEGEND}`);
   io.say();
   const changed = [...new Set(receipt.sessions.flatMap((s) => s.changedFiles))].sort();
@@ -713,9 +762,10 @@ function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bund
   } else {
     const where = next ? ` at ${SKILLS[next].title}` : '';
     const asksWrites = now.items.some((p) => !p.finished && SKILLS[p.skill].sendsStraddleRequests);
+    const reopen = receipt.mode === 'manual' ? `I'll read the files and tell you what to paste${where}` : `I'll reopen the session${where}`;
     io.say(receipt.state === 'ready'
-      ? `Next: run \`wizard resume\` and I'll reopen the session${where}.`
-      : `Next: fix what stopped the run (${receipt.stateReason}), then run \`wizard resume\` and I'll reopen the session${where}.${asksWrites ? " Approvals from before don't count there, so every Sandbox write is asked again." : ''}`);
+      ? `Next: run \`wizard resume\` and ${reopen}.`
+      : `Next: fix what stopped the run (${receipt.stateReason}), then run \`wizard resume\` and ${reopen}.${asksWrites ? " Approvals from before don't count there, so every Sandbox write is asked again." : ''}`);
   }
   return EXIT_CODE[receipt.state];
 }
@@ -749,11 +799,12 @@ function printSaved(io: Prompter, receipt: Receipt, now: Progress): void {
   io.say(io.bold(`Saved run: ${receipt.program} program, ${receipt.state}: ${receipt.stateReason}`));
   row(io, 'Updated', receipt.updatedAt);
   row(io, 'Agent', receipt.client ? CLIENT_LABEL[receipt.client] : 'not chosen');
+  row(io, 'Mode', receipt.mode === 'manual' ? 'Manual (I tell you what to paste)' : receipt.mode === 'auto' ? 'Auto (I start your agent here)' : "not chosen yet; I'll ask");
   row(io, 'Language', answerText(receipt.context.language, []));
   row(io, 'Framework', answerText(receipt.context.framework, []));
   row(io, 'Choices', choicesText(receipt));
   if (receipt.exclude.length) row(io, 'Never opened', receipt.exclude.join(', '));
-  printSteps(io, now, receipt.client !== null && EVENT_SURFACE[receipt.client] === 'observed');
+  printSteps(io, now, receipt.client !== null && receipt.mode !== 'manual' && EVENT_SURFACE[receipt.client] === 'observed');
   io.say("  Sandbox write approvals from earlier sessions don't carry over. A recorded plan approval does, while the plan is unchanged.");
   io.say('  I recheck the skills, your agent and your files before we continue.');
   io.say();
@@ -790,6 +841,10 @@ async function resumeRun(io: Prompter, receipt: Receipt, opts: JourneyOptions, c
     receipt.client = await chooseClient(io, opts.env);
     if (!receipt.client) return finish(receipt, 'aborted', 'you cancelled at agent choice');
   }
+  // A run saved before the Wizard asked has no mode; `--mode` changes a saved one.
+  receipt.mode = opts.mode ?? receipt.mode ?? await chooseMode(io, receipt.client, opts.env);
+  if (!receipt.mode) return finish(receipt, 'aborted', 'you cancelled at the Auto or Manual choice');
+  saveReceipt(receipt);
   return runProgram(io, receipt, opts, providers);
 }
 
@@ -902,6 +957,8 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
   }
   receipt.client = opts.client ?? await chooseClient(io, opts.env);
   if (!receipt.client) return cancel('you cancelled at agent choice');
+  receipt.mode = opts.mode ?? await chooseMode(io, receipt.client, opts.env);
+  if (!receipt.mode) return cancel('you cancelled at the Auto or Manual choice');
   if (fresh) {
     keepAside(io, join(repo, WIZARD_DIR), ['events.jsonl'], suffix);
     if (program === 'integration') keepAside(io, repo, CONTRACT_FILES, `previous-${stamp}`);
@@ -914,4 +971,14 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
 export function savedStatusLine(receipt: Receipt): string {
   const now = savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers);
   return `${statusLine(now.items)}${now.skipped ? ` (${skippedNote(now.skipped)})` : ''}`;
+}
+
+// For `wizard status` on a Manual run: what to paste next, from the files; null when nothing is left.
+export function savedHandoff(receipt: Receipt): Handoff | null {
+  if (receipt.mode !== 'manual' || !receipt.client) return null;
+  const now = savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers);
+  const next = nextStep(now.items);
+  if (!next) return null;
+  const skills = now.items.map((p) => p.skill);
+  return handoffFor(receipt, skills.slice(skills.indexOf(next)).filter((s) => s === next || !now.items.find((p) => p.skill === s)!.finished));
 }

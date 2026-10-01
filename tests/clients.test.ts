@@ -1,28 +1,15 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadLocalBundle } from '../src/bundle.ts';
 import { CLIENT_NAMES, inspectClient, launchCommand, manualHandoff } from '../src/clients.ts';
-import { SKILLS_SOURCE, tempDir } from './helpers.ts';
+import { SKILLS_SOURCE, fakeClients } from './helpers.ts';
 
 const PROGRAM_LINE = 'Straddle Wizard program: straddle-plan → straddle-integrate. Start at straddle-plan.';
 const CONTEXT = `${PROGRAM_LINE}\nRepository context confirmed in the Straddle Wizard: language TypeScript (detected); framework Next.js (detected).`;
 // Flags that would replace the developer's own Cursor approval mode, sandbox, MCP approvals or workspace trust.
 const PERMISSION_FLAGS = /^(-f|--force|--yolo|--sandbox|--approve-mcps|--trust|--auto-review)(=|$)/;
-
-// Fake claude, codex and cursor-agent that record every call. `cursor-agent status` prints STATUS.
-function fakeClients(status: string): { env: NodeJS.ProcessEnv; calls: () => string[] } {
-  const dir = tempDir('fake-clients');
-  const log = join(dir, 'calls.log');
-  for (const [bin, version] of [['claude', '2.1.283 (Claude Code)'], ['codex', 'codex-cli 0.130.0'], ['cursor-agent', '2026.09.28-64d2043']]) {
-    writeFileSync(join(dir, bin), `#!/bin/sh\necho "${bin} $*" >> '${log}'\ncase "$1" in --version) echo '${version}';; status) echo '${status}';; esac\n`);
-    chmodSync(join(dir, bin), 0o755);
-  }
-  const home = join(dir, 'home');
-  mkdirSync(home);
-  return { env: { HOME: home, PATH: [dir, '/usr/bin', '/bin'].join(':') }, calls: () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []) };
-}
 
 const LAUNCH = { client: 'cursor', skill: 'straddle-plan', repo: '/repo', context: CONTEXT, settingsPath: '/run/session.settings.json', pluginDir: '/bundle' } as const;
 for (const [name, resume, expected] of [

@@ -20,7 +20,7 @@ export const EVENT_SURFACE: Record<ClientName, 'observed' | 'unsupported'> = { c
 export const EVENT_SURFACE_NOTE: Record<ClientName, string> = {
   claude: 'live checklist in its status line, from Claude Code hooks',
   codex: 'live checklist on a local page, from its session log',
-  cursor: "manual: you run the skills in Cursor, and I read the files they write",
+  cursor: 'no live checklist: I read the files the skills write when it stops',
 };
 
 const BINARY: Record<ClientName, string> = { claude: 'claude', codex: 'codex', cursor: 'cursor-agent' };

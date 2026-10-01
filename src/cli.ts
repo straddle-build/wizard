@@ -8,9 +8,9 @@ import {
   type ClientName, type ConfigPlan,
 } from './clients.ts';
 import { straddleConfiguration } from './configuration.ts';
-import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, savedStatusLine, start, type JourneyOptions } from './journey.ts';
+import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, savedHandoff, savedStatusLine, start, type JourneyOptions } from './journey.ts';
 import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
-import { loadReceipt } from './receipt.ts';
+import { loadReceipt, type Mode } from './receipt.ts';
 import { Prompter } from './ui.ts';
 import { WIZARD_VERSION } from './version.ts';
 
@@ -30,6 +30,7 @@ Sets up Straddle in your repo with your own coding agent, in one guided session.
 Options
   --dir <path>        Repo to work in (default: current directory)
   --client <name>     claude, codex or cursor
+  --mode <mode>       auto (I start your agent here) or manual (I tell you what to paste into your own agent)
   --bundle <path>     Use this local Straddle skills directory instead of a plugin release, for testing (or STRADDLE_WIZARD_BUNDLE)
   --exclude <glob>    Extra sensitive path I never open (repeatable, or STRADDLE_WIZARD_EXCLUDE=a,b)
   --yes               Download the skills and run install/update/remove/mcp commands without asking
@@ -46,6 +47,7 @@ function readArgs() {
       options: {
         dir: { type: 'string' },
         client: { type: 'string' },
+        mode: { type: 'string' },
         bundle: { type: 'string' },
         exclude: { type: 'string', multiple: true },
         yes: { type: 'boolean' },
@@ -74,6 +76,11 @@ function clientOption(): ClientName | undefined {
   if (values.client === undefined) return undefined;
   if ((CLIENT_NAMES as readonly string[]).includes(values.client)) return values.client as ClientName;
   fail(`Unknown client "${values.client}". Use claude, codex or cursor.`);
+}
+
+function modeOption(): Mode | undefined {
+  if (values.mode === undefined || values.mode === 'auto' || values.mode === 'manual') return values.mode;
+  fail(`Unknown mode "${values.mode}". Use auto or manual.`);
 }
 
 function pickClient(): ClientName {
@@ -135,8 +142,9 @@ function status(): number {
   const check = findBundle({ override: bundlePath, env });
   const clients = CLIENT_NAMES.map((name) => inspectClient(name, env, check.ok ? check.bundle : null));
   const config = straddleConfiguration(env);
+  const handoff = loaded.kind === 'found' ? savedHandoff(loaded.receipt) : null;
   const run = loaded.kind === 'found'
-    ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client, progress: savedStatusLine(loaded.receipt) }
+    ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client, mode: loaded.receipt.mode, progress: savedStatusLine(loaded.receipt), paste: handoff?.prompt ?? null }
     : loaded.kind === 'invalid' ? { error: `unreadable receipt: ${loaded.reason}` } : null;
   const report = {
     wizard: WIZARD_VERSION,
@@ -163,6 +171,10 @@ function status(): number {
   if (config.errors.length) say(`  Configuration error for Straddle requests: ${config.errors.join('; ')}`);
   say(`  Saved run      ${run === null ? 'none' : 'error' in run ? run.error : `${run.program} program, ${run.state}: ${run.reason}`}`);
   if (run && 'progress' in run) say(`  Progress       ${run.progress}`);
+  if (handoff) {
+    say(`  Paste next     ${handoff.steps[1]}`);
+    for (const line of handoff.prompt.split('\n')) say(`                   ${line}`);
+  }
   return 0;
 }
 
@@ -182,7 +194,7 @@ async function skillList(): Promise<number> {
 
 async function journey(run: (opts: JourneyOptions) => Promise<number>): Promise<number> {
   process.on('SIGINT', () => handleInterrupt(io()));
-  return run({ repo, env, io: io(), bundlePath, client: clientOption(), exclude });
+  return run({ repo, env, io: io(), bundlePath, client: clientOption(), mode: modeOption(), exclude });
 }
 
 async function main(): Promise<number> {

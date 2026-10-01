@@ -10,6 +10,8 @@ export const RECEIPT_SCHEMA = 'straddle-wizard/receipt@2';
 export const WIZARD_DIR = '.straddle-wizard';
 
 export type RunState = 'ready' | 'running' | 'blocked' | 'aborted' | 'completed';
+// Auto: the Wizard starts the developer's agent here. Manual: it says what to paste into their own agent.
+export type Mode = 'auto' | 'manual';
 
 export interface Answer<T extends string = string> { value: T; source: 'detected' | 'developer' }
 
@@ -50,6 +52,7 @@ export interface Receipt {
   wizardPid: number;
   program: ProgramName;
   client: ClientName | null;
+  mode: Mode | null;
   pluginLoad: 'installed' | 'session' | 'manual' | null;
   repo: string;
   exclude: string[];
@@ -70,6 +73,7 @@ export function newReceipt(opts: { repo: string; program: ProgramName; pid: numb
     wizardPid: opts.pid,
     program: opts.program,
     client: null,
+    mode: null,
     pluginLoad: null,
     repo: opts.repo,
     exclude: [],
@@ -99,8 +103,8 @@ export function saveReceipt(receipt: Receipt): void {
 export type LoadedReceipt = { kind: 'none' } | { kind: 'invalid'; reason: string } | { kind: 'found'; receipt: Receipt };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-// Claude Code and Codex session ids. The id becomes a command argument and part of a file name lookup.
-const SESSION_ID = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
+// Claude Code, Codex and Cursor session ids. The id becomes a command argument and part of a file name lookup.
+export const SESSION_ID = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
 const RUN_STATES: Record<string, true> = { ready: true, running: true, blocked: true, aborted: true, completed: true };
 const PLUGIN_LOADS: Record<string, true> = { installed: true, session: true, manual: true };
 
@@ -116,6 +120,9 @@ function receiptProblem(r: unknown): string | null {
   if (client !== null && !(CLIENT_NAMES as readonly unknown[]).includes(client)) return 'unknown client';
   const pluginLoad = field(r, 'pluginLoad');
   if (pluginLoad !== null && !(typeof pluginLoad === 'string' && Object.hasOwn(PLUGIN_LOADS, pluginLoad))) return 'unknown plugin load';
+  const mode = field(r, 'mode');
+  // A run saved before the Wizard asked has no mode; resume asks for it.
+  if (mode !== undefined && mode !== null && mode !== 'auto' && mode !== 'manual') return 'unknown mode';
   const state = field(r, 'state');
   if (typeof state !== 'string' || !Object.hasOwn(RUN_STATES, state) || typeof field(r, 'stateReason') !== 'string') return 'missing state';
   if (typeof field(r, 'wizardPid') !== 'number' || typeof field(r, 'updatedAt') !== 'string') return 'missing run details';
@@ -168,6 +175,7 @@ export function loadReceipt(repo: string): LoadedReceipt {
   if (problem) return { kind: 'invalid', reason: problem };
   const receipt = parsed as Receipt;
   receipt.repo = repo;
+  receipt.mode ??= null;
   if (receipt.state === 'running' && !pidAlive(receipt.wizardPid)) {
     receipt.state = 'aborted';
     receipt.stateReason = 'the Wizard stopped while your agent was running; the work already done stays';
