@@ -66,7 +66,7 @@ test('Manual never starts a client process', () => {
   assert.deepEqual(fake.calls(), ['cursor-agent --version', 'cursor-agent status']);
 });
 
-test('Cursor: login from `cursor-agent status`, a local plugin copy checked against the bundle, and straddle-api matched by name suffix', () => {
+test('Cursor: login from `cursor-agent status`, a local plugin copy checked against the bundle, and straddle-api claimed only from a file that declares it, matched by name suffix', () => {
   const check = loadLocalBundle(SKILLS_SOURCE);
   assert.ok(check.ok);
   const fake = fakeClients('✓ Logged in as dev@example.com');
@@ -79,10 +79,14 @@ test('Cursor: login from `cursor-agent status`, a local plugin copy checked agai
   assert.equal(state.loggedIn, true);
   assert.deepEqual(state.plugin, { state: 'installed', version: check.bundle.pluginVersion, verified: true });
   assert.equal(state.apiMcp, 'plugin-straddle-straddle-api in ~/.cursor/mcp.json');
+  // Without a configured server, the local plugin's own mcp.json declares it, under Cursor's prefixed name.
+  writeFileSync(join(cursor, 'mcp.json'), JSON.stringify({ mcpServers: { 'straddle-api-old': {} } }));
+  assert.match(inspectClient('cursor', fake.env, check.bundle).apiMcp, /^declared by the Straddle plugin in .+\/plugins\/local\/straddle, which Cursor names plugin-straddle-straddle-api;/);
 
   const out = fakeClients('Not logged in');
   const bare = inspectClient('cursor', out.env, check.bundle);
   assert.equal(bare.loggedIn, false);
   assert.deepEqual(bare.plugin, { state: 'unverified', version: null, verified: false });
-  assert.match(bare.apiMcp, /^declared by the Straddle plugin as plugin-<plugin dir>-straddle-api/);
+  // An empty Cursor home: cursor-agent being installed is no evidence of a Straddle server.
+  assert.match(bare.apiMcp, /^not detected: no straddle-api/);
 });

@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { matchesBundle, type Bundle } from './bundle.ts';
 import { field, parseJson, text } from './json.ts';
 
@@ -144,11 +144,16 @@ function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle |
   const status = native('cursor-agent', ['status'], env);
   const home = join(env.HOME || homedir(), '.cursor');
   const read = (path: string) => (existsSync(path) ? parseJson(readFileSync(path, 'utf8')) : null);
+  const manifest = (dir: string) => read(join(dir, '.cursor-plugin', 'plugin.json'));
+  // Server names from a server map, or from the mcp.json a plugin manifest points to (Straddle's says "./mcp.json").
+  const names = (servers: unknown, dir: string): string[] => {
+    const map = typeof servers === 'string' ? field(read(join(dir, servers)), 'mcpServers') : servers;
+    return Object.keys(map && typeof map === 'object' ? map : {});
+  };
   const local = join(home, 'plugins', 'local');
-  const copies = (existsSync(local) ? readdirSync(local) : []).map((d) => join(local, d))
-    .filter((d) => field(read(join(d, '.cursor-plugin', 'plugin.json')), 'name') === 'straddle');
-  const servers = field(read(join(home, 'mcp.json')), 'mcpServers');
-  const api = Object.keys(servers && typeof servers === 'object' ? servers : {}).find((n) => isStraddleServer(n, 'straddle-api'));
+  const copies = (existsSync(local) ? readdirSync(local) : []).map((d) => join(local, d)).filter((d) => field(manifest(d), 'name') === 'straddle');
+  const configured = names(field(read(join(home, 'mcp.json')), 'mcpServers'), home).find((n) => isStraddleServer(n, 'straddle-api'));
+  const declaring = copies.find((d) => names(field(manifest(d), 'mcpServers'), d).some((n) => isStraddleServer(n, 'straddle-api')));
   return {
     name: 'cursor',
     label: CLIENT_LABEL.cursor,
@@ -156,12 +161,14 @@ function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle |
     loggedIn: /Logged in as /.test(status.out),
     // A copy in plugins/local is the only install the Wizard can see; team-marketplace installs stay unverified.
     plugin: copies.length
-      ? { state: 'installed', version: text(field(read(join(copies[0]!, '.cursor-plugin', 'plugin.json')), 'version')) ?? null, verified: bundle !== null && copies.every((d) => matchesBundle(d, bundle)) }
+      ? { state: 'installed', version: text(field(manifest(copies[0]!), 'version')) ?? null, verified: bundle !== null && copies.every((d) => matchesBundle(d, bundle)) }
       : { state: 'unverified', version: null, verified: false },
     marketplacePath: null,
-    apiMcp: api
-      ? `${api} in ~/.cursor/mcp.json`
-      : 'declared by the Straddle plugin as plugin-<plugin dir>-straddle-api; cursor-agent sends STRADDLE_API_KEY from the environment it starts in',
+    apiMcp: configured
+      ? `${configured} in ~/.cursor/mcp.json`
+      : declaring
+        ? `declared by the Straddle plugin in ${declaring}, which Cursor names plugin-${basename(declaring)}-straddle-api; cursor-agent sends STRADDLE_API_KEY from the environment it starts in`
+        : 'not detected: no straddle-api in ~/.cursor/mcp.json or a local Straddle plugin (I can\'t see team-marketplace installs)',
   };
 }
 
