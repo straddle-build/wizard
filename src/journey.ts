@@ -243,15 +243,16 @@ function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: 
     : client.plugin.state === 'missing' ? 'not installed' : "unverified (I can't inspect this client)";
   if (receipt.pluginLoad === 'session') {
     row(io, 'Straddle plugin', `loaded into the Wizard's session from that bundle with --plugin-dir (your Claude Code install: ${installed})`);
-    row(io, 'API MCP', 'declared by that plugin; Claude Code sends STRADDLE_API_KEY from the environment it starts in');
-    row(io, 'Session settings', "Isolated. Your user and project allow and deny rules, hooks, plugins, default mode and settings-based login (apiKeyHelper, env) don't apply. The session starts in Claude Code's default permission mode. Your organization's managed policy still applies and can allow edits, commands or MCP calls without asking. I don't read it.");
+    row(io, 'API MCP', 'declared by that plugin; Claude Code sends STRADDLE_API_KEY from its session environment: your shell, or your Claude Code settings `env` if it sets the key');
+    row(io, 'Session settings', "yours: I start Claude Code with your own settings, including your permission mode and any `env` values, and don't change them. My session settings add the checklist status line, which replaces yours for this session, progress hooks and the pre-plan edit hook.");
   } else {
     row(io, 'Straddle plugin', installed);
     row(io, 'API MCP', client.apiMcp);
-    if (client.name === 'codex') row(io, 'Session settings', 'not isolated: the session runs with --sandbox workspace-write and --ask-for-approval on-request; the rest of your Codex configuration, hooks, MCP servers and plugins still apply');
+    if (client.name === 'codex') row(io, 'Session settings', "yours: I start Codex with your own sandbox, approval policy and configuration and don't change them.");
   }
-  row(io, 'Straddle key', config.key === 'present' ? "STRADDLE_API_KEY is set (I didn't read the value)" : 'STRADDLE_API_KEY is not set');
-  row(io, 'Environment', config.environment);
+  const override = receipt.pluginLoad === 'session' ? '; any `env` value in your Claude Code settings overrides it in the session, and the skills check the environment again there' : '';
+  row(io, 'Straddle key', config.key === 'present' ? "STRADDLE_API_KEY is set in your shell (I didn't read the value)" : 'STRADDLE_API_KEY is not set in your shell');
+  row(io, 'Environment', `${config.environment} in your shell${override}`);
   io.say();
 }
 
@@ -265,7 +266,8 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
   const bundle = check.bundle;
   receipt.bundle = { kind: bundle.kind, pluginVersion: bundle.pluginVersion, contentSha256: bundle.contentSha256, path: bundle.path };
   const name = receipt.client!;
-  // Claude Code sessions always load exactly the Wizard's bundle; they ignore user settings, where an install is enabled.
+  // Claude Code sessions load the Wizard's bundle with --plugin-dir, which wins over an installed `straddle` plugin, so
+  // nothing needs installing. A managed enabledPlugins lock or a `"straddle@inline": false` entry can still keep it out.
   if (name === 'claude') receipt.pluginLoad = 'session';
   let repaired = false;
   for (;;) {
@@ -537,10 +539,9 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const gate = [...new Set(run.flatMap((s) => SKILLS[s].editGate))];
   const hook = [{ type: 'command', command: [process.execPath, HOOK_SCRIPT, '--events', eventsFile, '--repo', repo, '--gate', gate.join(',')].map(quote).join(' ') }];
   const statusCommand = [process.execPath, STATUSLINE_SCRIPT, '--repo', repo, '--steps', steps.map((s) => `${s.skill}:${s.total}`).join(','), '--start', begin, ...receipt.exclude.flatMap((e) => ['--exclude', e])];
-  // Flag settings override the developer's user settings, so an auto or accept-edits default mode never approves
-  // the session's tool calls. Managed policy still wins, as it should, and can allow them without a prompt.
+  // The status line, progress hooks and the pre-plan edit hook; nothing else. Claude Code merges this file with the
+  // developer's own settings and keeps their permissions, default mode and env, which the Wizard never sets.
   writeFileSync(settingsPath, JSON.stringify({
-    permissions: { defaultMode: 'default' },
     statusLine: { type: 'command', command: statusCommand.map(quote).join(' '), padding: 0 },
     hooks: {
       SessionStart: [{ hooks: hook }],

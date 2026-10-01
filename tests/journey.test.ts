@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { launchCommand } from '../src/clients.ts';
 import { approvalHash } from '../src/progress.ts';
 import { ROOT, SKILLS_SOURCE, fakeClaude, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
 
@@ -161,7 +162,7 @@ test('--client picks the agent for a guided run instead of asking', async () => 
   assert.equal(readReceipt(repo).client, 'cursor');
 });
 
-test('default journey: one isolated agent session walks the whole program, with a live checklist that ticks only what is on file and reported', async () => {
+test('default journey: one agent session walks the whole program, with a live checklist that ticks only what is on file and reported', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
   claude.sessions(DEFAULT_SESSIONS);
@@ -185,19 +186,21 @@ test('default journey: one isolated agent session walks the whole program, with 
   assert.match(r.stdout, /That's the whole program/);
   assert.equal(existsSync(join(repo, 'src', 'early.ts')), false);
 
-  // One launch, in isolated settings, naming the whole program.
+  // One launch, with the developer's own settings, naming the whole program.
   const [launch, ...others] = launches(claude);
   assert.equal(others.length, 0);
   // N1: the program line begins a line of its own, after the skill invocation.
   assert.ok(launch!.at(-1)!.startsWith(`/straddle:straddle-setup\n${PROGRAM_LINE}\n`), launch!.at(-1));
   assert.ok(!launch!.at(-1)!.includes(REOPENED), 'a new session has no earlier approvals to disown');
   assert.ok(!launch!.some((a) => /--resume|--continue|dangerously|bypass|--permission-mode/.test(a)), `native approvals stay interactive: ${launch}`);
-  // The developer's allow rules, hooks, plugins and auto or accept-edits default never approve the session's tool calls.
-  assert.equal(launch![launch!.indexOf('--setting-sources') + 1], '');
-  assert.equal(launch![launch!.indexOf('--plugin-dir') + 1], SKILLS_SOURCE);
+  // The Wizard never changes the developer's settings: its settings file adds only the status line and the progress
+  // hooks, no permission, default mode or sandbox key, and the developer's own sources load.
   const settings = JSON.parse(readFileSync(launch![launch!.indexOf('--settings') + 1]!, 'utf8'));
-  assert.equal(settings.permissions?.defaultMode, 'default');
+  assert.deepEqual(Object.keys(settings), ['statusLine', 'hooks']);
   assert.equal(settings.statusLine?.type, 'command');
+  assert.deepEqual(Object.keys(settings.hooks), ['SessionStart', 'SessionEnd', 'Stop', 'PreToolUse', 'PostToolUse']);
+  assert.ok(!launch!.includes('--setting-sources'), `the developer's settings load: ${launch}`);
+  assert.equal(launch![launch!.indexOf('--plugin-dir') + 1], SKILLS_SOURCE);
 
   // The status line Claude Code showed at the start and after each step.
   assert.deepEqual(statusLines(claude), [
@@ -219,6 +222,18 @@ test('default journey: one isolated agent session walks the whole program, with 
   const events = readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8');
   for (const secret of [JSON.stringify(receipt), events]) assert.ok(!secret.includes('sk_test_value_in_test_env'), 'no record holds the key');
 });
+
+const LAUNCH = { skill: 'straddle-plan', repo: '/repo', context: 'ctx', settingsPath: '/run/session.settings.json', pluginDir: '/bundle' };
+for (const [name, req, expected] of [
+  ['Claude Code, new', { ...LAUNCH, client: 'claude', resume: null }, { bin: 'claude', args: ['--settings', '/run/session.settings.json', '--plugin-dir', '/bundle', '/straddle:straddle-plan\nctx'] }],
+  ['Claude Code, resumed', { ...LAUNCH, client: 'claude', resume: 'abc' }, { bin: 'claude', args: ['--settings', '/run/session.settings.json', '--plugin-dir', '/bundle', '--resume', 'abc', '/straddle:straddle-plan\nctx'] }],
+  ['Codex, new', { ...LAUNCH, client: 'codex', resume: null }, { bin: 'codex', args: ['-C', '/repo', 'Use the straddle-plan skill.\nctx'] }],
+  ['Codex, resumed', { ...LAUNCH, client: 'codex', resume: 'abc' }, { bin: 'codex', args: ['resume', '-C', '/repo', 'abc', 'Use the straddle-plan skill.\nctx'] }],
+] as const) {
+  test(`${name}: launches with the developer's own settings, no permission, sandbox or approval flag`, () => {
+    assert.deepEqual(launchCommand(req), expected);
+  });
+}
 
 test('interrupted mid-program: resume reopens the same session at the first unfinished step, from the files', async () => {
   const repo = nextRepo();
@@ -370,7 +385,7 @@ test('another payment provider in the repo adds Migrate to the program', async (
   assert.match(r.stdout, /Your session in Claude Code: Setup → Plan → Migrate → Integrate → Test → Go Live/);
 });
 
-test('readiness does not promise Claude Code permission prompts that a managed policy can switch off', async () => {
+test('readiness says the session runs with the developer\'s own settings and promises no permission prompt', async () => {
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
   const claude = fakeClaude();
@@ -378,9 +393,11 @@ test('readiness does not promise Claude Code permission prompts that a managed p
   // Continue, then stop at Start: only the readiness screen matters.
   const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '2'] });
 
-  assert.match(r.stdout, /Session settings\s+Isolated\. /);
-  assert.doesNotMatch(r.stdout, /asks before edits/);
-  assert.match(r.stdout, /managed policy still applies and can allow edits, commands or MCP calls without asking/);
+  assert.match(r.stdout, /Session settings\s+yours: I start Claude Code with your own settings, including your permission mode and any `env` values/);
+  // A Claude Code settings `env` block overrides the shell in the session, so the shell values the Wizard checked are labelled as such.
+  assert.match(r.stdout, /Straddle key\s+STRADDLE_API_KEY is set in your shell/);
+  assert.match(r.stdout, /Environment\s+sandbox \(STRADDLE_ENVIRONMENT\) in your shell; any `env` value in your Claude Code settings overrides it in the session, and the skills check the environment again there/);
+  assert.doesNotMatch(r.stdout, /Isolated|asks before edits|add only/);
 });
 
 test('Integrate never starts before the durable plan exists', async () => {
