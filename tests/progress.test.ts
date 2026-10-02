@@ -77,6 +77,15 @@ test('Migrate is finished when its report says migrated for the current migratio
   assert.equal(nextWithMigrate({ ...base, 'straddle-migration-plan.md': reapproved, 'straddle-migration-report.md': migrationReport('migrated') }, [migrated]), 'straddle-migrate');
 });
 
+test('a report\'s Plan: line names its plan however the path is written, so `./straddle-migration-plan.md` is checked against the migration plan', () => {
+  const migrationPlan = approve(draftPlan.replace('add client', 'add Straddle beside Stripe'));
+  const repo = nextRepo();
+  writeFiles(repo, { ...done, 'straddle-migration-plan.md': migrationPlan, 'straddle-migration-report.md': migrationReport('migrated', approvalHash(migrationPlan)).replace('Plan: straddle-migration-plan.md', 'Plan: ./straddle-migration-plan.md') });
+
+  const migrate = progress(repo, [], withMigrate, []).find((p) => p.skill === 'straddle-migrate')!;
+  assert.deepEqual([migrate.finished, migrate.record!.detail], [true, 'Status: migrated, for the current approved plan']);
+});
+
 test('a failed Test or not-ready Go Live handoff never shows a tick, even when an earlier successful file is still on disk', () => {
   const repo = nextRepo();
   writeFiles(repo, done);

@@ -2,6 +2,7 @@
 // reads itself, and the events the client exposes (observed step entries, and the markers the agent printed), with
 // the Wizard's own record of a choice to finish without Go Live.
 import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
 import { readRepoFile } from './discovery.ts';
 import { stepEntries, type ObservedEvent, type ReportedMarker } from './events.ts';
 import { INTEGRATION_PLAN, MIGRATION_PLAN, SKILLS, type SkillName } from './programs.ts';
@@ -49,7 +50,8 @@ function reportRecord(read: Read, file: string, complete: string, forPlan: boole
   const hash = header(report.text, 'Plan hash');
   if (statusWord(status) !== complete) return { done: false, detail: `Status: ${status}`, hash };
   if (!forPlan) return { done: true, detail: `Status: ${status}` };
-  const planFile = header(report.text, 'Plan') === MIGRATION_PLAN ? MIGRATION_PLAN : INTEGRATION_PLAN;
+  // `./straddle-migration-plan.md` names the same file.
+  const planFile = posix.normalize(header(report.text, 'Plan') ?? '.') === MIGRATION_PLAN ? MIGRATION_PLAN : INTEGRATION_PLAN;
   const plan = planRecord(read, planFile);
   if (!plan.done) return { done: false, detail: `Status: ${status}, but ${planFile} is not approved as it stands`, hash };
   if (hash !== plan.hash) return { done: false, detail: `Status: ${status}, but for an earlier version of ${planFile}`, hash };
