@@ -192,15 +192,16 @@ const PLAID_PROCESSOR = plaidPattern(String.raw`processor_?token_?create`, Strin
 const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rb)$/;
 // Tests, mocks, fixtures and installed packages name Plaid calls without the app making them.
 const NOT_APP_CODE = /(?:^|\/)(?:tests?|__tests__|__mocks__|mocks?|fixtures?|specs?|site-packages)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
-// A line that starts as a comment; `#` only in Python and Ruby, where JavaScript's `#field` can't occur.
-const COMMENT_START = /^\s*(?:\/\/|\/\*|\*)/;
-const HASH_COMMENT_START = /^\s*#/;
+// Comment spans, for the Link matchers only: Python docstrings, Ruby =begin blocks and `#` comments in .py/.rb files, and
+// `/* */` and `//` comments elsewhere. Strings that look like comments are stripped too; that only loses Link evidence.
+const HASH_COMMENTS = /"""[\s\S]*?"""|'''[\s\S]*?'''|^=begin[\s\S]*?^=end|#.*$/gm;
+const SLASH_COMMENTS = /\/\*[\s\S]*?\*\/|\/\/.*$/gm;
 interface PlaidUsage { migrate: boolean; link: boolean; processorTokens: boolean; complete: boolean }
 
 // Which Plaid roles the app's source files show. Read under the same boundary as hashing: walked files only, no
 // symlinks. `complete` is false when the walk hid a directory, a symlink or a source file, or a source file couldn't be
 // read, so missing calls are unknown, not absent. Transfer and Identity Verification count anywhere in the text, comments
-// included; Link counts only on lines that don't start as comments. A misread either way keeps Migrate.
+// included; Link counts only outside comments. A misread either way keeps Migrate.
 function plaidUsage(root: string, scan: Walk): PlaidUsage {
   const usage: PlaidUsage = { migrate: false, link: false, processorTokens: false, complete: !scan.truncated };
   if (scan.hidden.some((p) => !NOT_APP_CODE.test(`${p}/`)) || scan.excluded.some((e) => e.reason === 'unreadable' || (SOURCE.test(e.path) && !NOT_APP_CODE.test(e.path)))) usage.complete = false;
@@ -211,8 +212,7 @@ function plaidUsage(root: string, scan: Walk): PlaidUsage {
     try {
       if (file.size > MAX_HASH_BYTES) { usage.complete = false; continue; }
       const code = readFileSync(file.fd, 'utf8');
-      const hash = /\.(?:py|rb)$/.test(rel);
-      const live = code.split('\n').filter((line) => !COMMENT_START.test(line) && !(hash && HASH_COMMENT_START.test(line))).join('\n');
+      const live = /\.(?:py|rb)$/.test(rel) ? code.replace(HASH_COMMENTS, '') : code.replace(SLASH_COMMENTS, '');
       const idvLink = PLAID_LINK_TOKEN.test(code) && PLAID_IDV_PRODUCT.test(code);
       const processor = PLAID_PROCESSOR.test(live);
       usage.migrate ||= idvLink || PLAID_MIGRATE.test(code);

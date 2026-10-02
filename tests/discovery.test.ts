@@ -98,16 +98,26 @@ const PLAID_CALLS = {
     python: { 'app/notes.py': '# client.transfer_create(request)\n' },
     go: { 'notes.go': '// resp, _, err := client.PlaidApi.TransferCreate(ctx).Execute()\n' },
   },
-  // A Link call that's commented out is no bank connection, so it can't remove Migrate.
+  // A Link call that's commented out is no bank connection, so it can't remove Migrate: line comments, unstarred and
+  // starred blocks, trailing comments and Python docstrings.
   commentedLink: {
-    node: { 'src/old-link.ts': '// await plaid.linkTokenCreate(request)\n/*\n * await plaid.itemPublicTokenExchange({ public_token })\n */\n' },
-    python: { 'app/old_link.py': '# client.link_token_create(request)\n    # client.item_public_token_exchange(exchange_request)\n' },
-    go: { 'old_link.go': '// resp, _, err := client.PlaidApi.LinkTokenCreate(ctx).Execute()\n' },
+    node: {
+      'src/old-link.ts': '// await plaid.linkTokenCreate(request)\n/*\n * await plaid.itemPublicTokenExchange({ public_token })\n */\n',
+      'src/old-block.ts': '/*\nawait plaid.linkTokenCreate(request)\n*/\nexport const unused = 1; // await plaid.itemPublicTokenExchange({ public_token })\n',
+    },
+    python: {
+      'app/old_link.py': '# client.link_token_create(request)\n    # client.item_public_token_exchange(exchange_request)\n',
+      'app/old_doc.py': '"""\nclient.link_token_create(request)\n"""\nunused = 1  # client.item_public_token_exchange(exchange_request)\n',
+    },
+    go: {
+      'old_link.go': '// resp, _, err := client.PlaidApi.LinkTokenCreate(ctx).Execute()\n',
+      'old_block.go': '/*\nresp, _, err := client.PlaidApi.LinkTokenCreate(ctx).Execute()\n*/\nvar unused = 1 // client.PlaidApi.ItemPublicTokenExchange(ctx).Execute()\n',
+    },
   },
   commentedProcessor: {
-    node: { 'src/old-processor.ts': '// await plaid.processorTokenCreate({ access_token, account_id, processor })\n' },
-    python: { 'app/old_processor.py': '# client.processor_token_create(processor_request)\n' },
-    go: { 'old_processor.go': '// resp, _, err := client.PlaidApi.ProcessorTokenCreate(ctx).Execute()\n' },
+    node: { 'src/old-processor.ts': '// await plaid.processorTokenCreate({ access_token, account_id, processor })\nexport const unused = 1; // await plaid.processorTokenCreate(request)\n' },
+    python: { 'app/old_processor.py': "# client.processor_token_create(processor_request)\n'''\nclient.processor_token_create(processor_request)\n'''\n" },
+    go: { 'old_processor.go': '// resp, _, err := client.PlaidApi.ProcessorTokenCreate(ctx).Execute()\n/*\nresp, _, err := client.PlaidApi.ProcessorTokenCreate(ctx).Execute()\n*/\n' },
   },
 };
 const WITH_MIGRATE = ['straddle-setup', 'straddle-plan', 'straddle-migrate', 'straddle-integrate', 'straddle-test', 'straddle-go-live'];
@@ -184,7 +194,7 @@ test('Plaid Link keeps Migrate when the scan may not see some source, and only t
   });
 });
 
-test('Plaid calls count wherever the app makes them: under env/, around comments and strings, in a #field, destructured, in a template literal, and in Ruby without parentheses', () => {
+test('Plaid calls count wherever the app makes them: under env/, around comments and strings, in a #field, destructured, in a template literal, and in Ruby without parentheses, but not a Ruby Link call in =begin or # comments', () => {
   const RUBY = { Gemfile: "source 'https://rubygems.org'\ngem 'rails'\ngem 'plaid'\n", 'app/services/link.rb': 'client.link_token_create request\nclient.item_public_token_exchange request\n' };
   const repos: Array<[string, Record<string, string>]> = [
     ['env directory', { 'src/env/payments.ts': 'await plaid.transferCreate(request);\n' }],
@@ -206,12 +216,13 @@ test('Plaid calls count wherever the app makes them: under env/, around comments
     link: facts(RUBY),
     transfer: facts({ ...RUBY, 'app/services/pay.rb': 'client.transfer_create request\n' }),
     identityVerification: facts({ ...RUBY, 'app/services/kyc.rb': 'client.identity_verification_get request\n' }),
+    commentedLink: facts({ Gemfile: RUBY.Gemfile, 'app/services/old.rb': '=begin\nclient.link_token_create request\n=end\nunused = 1 # client.item_public_token_exchange request\n' }),
   };
 
   const migrate = { steps: WITH_MIGRATE, bankLink: LINK };
   assert.deepEqual({ node, ruby }, {
     node: { 'env directory': migrate, 'after a block comment': migrate, 'between a "/*" string and a JSDoc': migrate, '#field': migrate, destructured: migrate, 'template literal': migrate },
-    ruby: { link: { steps: WITHOUT_MIGRATE, bankLink: LINK }, transfer: migrate, identityVerification: migrate },
+    ruby: { link: { steps: WITHOUT_MIGRATE, bankLink: LINK }, transfer: migrate, identityVerification: migrate, commentedLink: { steps: WITH_MIGRATE, bankLink: null } },
   });
 });
 
