@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { field, parseJson } from './json.ts';
 
@@ -69,7 +69,17 @@ function walk(repo: string, exclude: readonly string[]): Walk {
         try { target = realpathSync(abs); } catch { target = null; }
         const inside = target !== null && (target === root || target.startsWith(root + sep));
         result.excluded.push({ path: rel, reason: inside ? 'symlink not followed' : 'symlink escapes the repository' });
-        if (!/\.[A-Za-z0-9]+$/.test(name) || SOURCE.test(name)) result.hidden.push(rel);
+        // Whether the unfollowed link could hide app source, from its target's metadata only (stat opens no file): a
+        // directory or a source file could, a document can't, and a target that can't be inspected could. A dependency
+        // tree's name never counts, as for a real directory.
+        if (!Object.hasOwn(SKIPPED_DIRS, name)) {
+          let hides = true;
+          try {
+            const linked = statSync(abs);
+            hides = linked.isDirectory() || (linked.isFile() && (SOURCE.test(name) || SOURCE.test(target ?? '')));
+          } catch { /* dangling or unreadable: hides = true */ }
+          if (hides) result.hidden.push(rel);
+        }
         continue;
       }
       const reason = sensitiveReason(name) ?? (configured.some((re) => re.test(rel)) ? 'configured sensitive path' : null);
@@ -182,17 +192,12 @@ const PLAID_PROCESSOR = plaidPattern(String.raw`processor_?token_?create`, Strin
 const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rb)$/;
 // Tests, mocks, fixtures and installed packages name Plaid calls without the app making them.
 const NOT_APP_CODE = /(?:^|\/)(?:tests?|__tests__|__mocks__|mocks?|fixtures?|specs?|site-packages)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
-// Comment spans, leaving the code around them: `/* */` and `//` (after a line start or space, so URLs stay), and `#`
-// only in Python and Ruby, where JavaScript's `#field` can't occur.
-const BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g;
-const LINE_COMMENT = /(^|\s)\/\/.*$/gm;
-const HASH_COMMENT = /(^|\s)#.*$/gm;
-
 interface PlaidUsage { migrate: boolean; link: boolean; processorTokens: boolean; complete: boolean }
 
 // Which Plaid roles the app's source files show. Read under the same boundary as hashing: walked files only, no
 // symlinks. `complete` is false when the walk hid a directory, a symlink or a source file, or a source file couldn't be
-// read, so missing calls are unknown, not absent.
+// read, so missing calls are unknown, not absent. Comments aren't parsed out: a Plaid call named only in a comment
+// keeps Migrate, the safe direction.
 function plaidUsage(root: string, scan: Walk): PlaidUsage {
   const usage: PlaidUsage = { migrate: false, link: false, processorTokens: false, complete: !scan.truncated };
   if (scan.hidden.some((p) => !NOT_APP_CODE.test(`${p}/`)) || scan.excluded.some((e) => e.reason === 'unreadable' || (SOURCE.test(e.path) && !NOT_APP_CODE.test(e.path)))) usage.complete = false;
@@ -202,8 +207,7 @@ function plaidUsage(root: string, scan: Walk): PlaidUsage {
     if (!file) { usage.complete = false; continue; }
     try {
       if (file.size > MAX_HASH_BYTES) { usage.complete = false; continue; }
-      const text = readFileSync(file.fd, 'utf8');
-      const code = /\.(?:py|rb)$/.test(rel) ? text.replace(HASH_COMMENT, '$1') : text.replace(BLOCK_COMMENT, ' ').replace(LINE_COMMENT, '$1');
+      const code = readFileSync(file.fd, 'utf8');
       const linkToken = PLAID_LINK_TOKEN.test(code);
       const idvLink = linkToken && PLAID_IDV_PRODUCT.test(code);
       const processor = PLAID_PROCESSOR.test(code);

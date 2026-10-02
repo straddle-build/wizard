@@ -77,21 +77,26 @@ const PLAID_CALLS = {
     python: { 'app/balance.py': 'client.accounts_balance_get(request)\n' },
     go: { 'balance.go': 'resp, _, err := client.PlaidApi.AccountsBalanceGet(ctx).AccountsBalanceGetRequest(request).Execute()\n' },
   },
-  // Transfer named where the app doesn't call it: comments, the app's own names and routes, tests and a virtualenv.
+  // Transfer named where the app doesn't call it: the app's own names and routes, tests and installed packages.
   notCalls: {
     node: {
-      'src/notes.ts': '// await plaid.transferCreate(request)\n/**\n * plaid.identityVerificationCreate(request)\n */\nexport const TRANSFER_CREATE = "transfer/create";\nawait fetch("/api/transfer/create");\n',
+      'src/notes.ts': 'export const TRANSFER_CREATE = "transfer/create";\nawait fetch("/api/transfer/create");\n',
       'src/__tests__/pay.test.ts': 'const plaid = { transferCreate: vi.fn() };\nawait plaid.transferCreate(request);\n',
     },
     python: {
-      'app/views.py': '# client.transfer_create(request)\ndef transfer_create(request):\n    return None\n',
+      'app/views.py': 'def transfer_create(request):\n    return None\n',
       'tests/test_pay.py': 'client.transfer_create(request)\n',
       'env/lib/python3.12/site-packages/plaid/api/plaid_api.py': "self.transfer_create_endpoint = _Endpoint(settings={'endpoint_path': '/transfer/create'})\nself.api_client.call_api('/transfer/create')\n",
     },
     go: {
-      'notes.go': '// resp, _, err := client.PlaidApi.TransferCreate(ctx).Execute()\n',
       'pay_test.go': 'resp, _, err := client.PlaidApi.TransferCreate(ctx).Execute()\n',
     },
+  },
+  // Comments aren't parsed out, so a call named in one counts: the safe direction.
+  commentOnly: {
+    node: { 'src/notes.ts': '// await plaid.transferCreate(request)\n' },
+    python: { 'app/notes.py': '# client.transfer_create(request)\n' },
+    go: { 'notes.go': '// resp, _, err := client.PlaidApi.TransferCreate(ctx).Execute()\n' },
   },
 };
 const WITH_MIGRATE = ['straddle-setup', 'straddle-plan', 'straddle-migrate', 'straddle-integrate', 'straddle-test', 'straddle-go-live'];
@@ -111,7 +116,8 @@ for (const ecosystem of ['node', 'python', 'go'] as const) {
     ['processor tokens add no Migrate and are reported', ['processorTokens'], { steps: WITHOUT_MIGRATE, bankLink: { source: 'plaid', processorTokens: true } }],
     ['a repo with Link and Transfer adds Migrate and reports Plaid Link', ['link', 'transfer'], { steps: WITH_MIGRATE, bankLink: LINK }],
     ['a Plaid dependency with no Link, Transfer or Identity Verification call keeps Migrate and claims no Link', ['balanceOnly'], { steps: WITH_MIGRATE, bankLink: null }],
-    ['Link with Transfer named only in comments, tests, its own routes or a virtualenv adds no Migrate', ['link', 'notCalls'], { steps: WITHOUT_MIGRATE, bankLink: LINK }],
+    ['Link with Transfer named only in tests, its own names and routes, or installed packages adds no Migrate', ['link', 'notCalls'], { steps: WITHOUT_MIGRATE, bankLink: LINK }],
+    ['Link with Transfer named in a comment keeps Migrate', ['link', 'commentOnly'], { steps: WITH_MIGRATE, bankLink: LINK }],
   ];
   for (const [name, calls, expected] of cases) {
     test(`Plaid (${ecosystem}): ${name}`, () => {
@@ -125,36 +131,52 @@ for (const ecosystem of ['node', 'python', 'go'] as const) {
   }
 }
 
-test('Plaid Link with source the scan may not see keeps Migrate, since that source could call Transfer', () => {
+test('Plaid Link keeps Migrate when the scan may not see some source, and only then', () => {
   const outside = tempDir('plaid-shared');
-  writeFiles(outside, { 'pay.ts': 'export const CENTS = 100;\n' });
-  const hidden: Array<[string, Record<string, string>, string[], string?]> = [
-    ['an excluded file', { 'src/private/helpers.ts': 'export const CENTS = 100;\n' }, ['src/private/**']],
-    ['an excluded directory', { 'src/private/helpers.ts': 'export const CENTS = 100;\n' }, ['src/private']],
-    ['a directory with a sensitive name', { 'src/credentials/helpers.ts': 'export const CENTS = 100;\n' }, []],
-    ['a symlinked directory', {}, [], 'shared'],
-  ];
-  const providers = (files: Record<string, string>, exclude: string[], link?: string) => {
+  writeFiles(outside, { 'pay.ts': 'export const CENTS = 100;\n', LICENSE: 'MIT\n' });
+  const helpers = 'export const CENTS = 100;\n';
+  // Files, --exclude globs, and symlinks by name and target.
+  const cases: Record<string, [Record<string, string>, string[], Record<string, string>]> = {
+    'nothing hidden': [{ 'src/private/helpers.ts': helpers }, [], {}],
+    'CLAUDE.md -> AGENTS.md': [{ 'AGENTS.md': '# Agents\n' }, [], { 'CLAUDE.md': 'AGENTS.md' }],
+    'an extensionless LICENSE symlink to a file': [{}, [], { LICENSE: join(outside, 'LICENSE') }],
+    'a symlinked node_modules': [{}, [], { node_modules: outside }],
+    'an excluded file': [{ 'src/private/helpers.ts': helpers }, ['src/private/**'], {}],
+    'an excluded directory': [{ 'src/private/helpers.ts': helpers }, ['src/private'], {}],
+    'a directory with a sensitive name': [{ 'src/credentials/helpers.ts': helpers }, [], {}],
+    'a symlinked directory': [{}, [], { shared: outside }],
+    'a symlinked directory with a dotted name': [{}, [], { 'shared.v1': outside }],
+    'a dangling symlink': [{}, [], { ghost: join(outside, 'missing') }],
+  };
+  const providers = ([files, exclude, links]: [Record<string, string>, string[], Record<string, string>]) => {
     const repo = tempDir('plaid-hidden');
     writeFiles(repo, Object.assign({}, PLAID_MANIFESTS.node, PLAID_CALLS.link.node, files));
-    if (link) symlinkSync(outside, join(repo, link));
+    for (const [name, target] of Object.entries(links)) symlinkSync(target, join(repo, name));
     return discover(repo, exclude).providers;
   };
 
-  const seen = providers({ 'src/private/helpers.ts': 'export const CENTS = 100;\n' }, []);
-  const unseen = Object.fromEntries(hidden.map(([name, files, exclude, link]) => [name, providers(files, exclude, link)]));
+  const result = Object.fromEntries(Object.entries(cases).map(([name, setup]) => [name, providers(setup)]));
 
-  assert.deepEqual({ seen, unseen }, {
-    seen: [],
-    unseen: { 'an excluded file': ['plaid'], 'an excluded directory': ['plaid'], 'a directory with a sensitive name': ['plaid'], 'a symlinked directory': ['plaid'] },
+  assert.deepEqual(result, {
+    'nothing hidden': [],
+    'CLAUDE.md -> AGENTS.md': [],
+    'an extensionless LICENSE symlink to a file': [],
+    'a symlinked node_modules': [],
+    'an excluded file': ['plaid'],
+    'an excluded directory': ['plaid'],
+    'a directory with a sensitive name': ['plaid'],
+    'a symlinked directory': ['plaid'],
+    'a symlinked directory with a dotted name': ['plaid'],
+    'a dangling symlink': ['plaid'],
   });
 });
 
-test('Plaid calls count wherever the app makes them: under env/, after a comment, in a #field, destructured, in a template literal, and in Ruby without parentheses', () => {
+test('Plaid calls count wherever the app makes them: under env/, around comments and strings, in a #field, destructured, in a template literal, and in Ruby without parentheses', () => {
   const RUBY = { Gemfile: "source 'https://rubygems.org'\ngem 'rails'\ngem 'plaid'\n", 'app/services/link.rb': 'client.link_token_create request\nclient.item_public_token_exchange request\n' };
   const repos: Array<[string, Record<string, string>]> = [
     ['env directory', { 'src/env/payments.ts': 'await plaid.transferCreate(request);\n' }],
     ['after a block comment', { 'src/pay.ts': '/* payment */ await plaid.transferCreate(request);\n' }],
+    ['between a "/*" string and a JSDoc', { 'src/pay.ts': "app.use('/api/*', auth);\nawait plaid.transferCreate(request);\n/** Audit trail. */\nexport const audited = true;\n" }],
     ['#field', { 'src/account.ts': 'class Account {\n  #transfer = plaid.transferCreate(request);\n}\n' }],
     ['destructured', { 'src/pay.ts': 'const { transferCreate } = plaid;\nawait transferCreate.call(plaid, request);\n' }],
     ['template literal', { 'src/pay.ts': 'await axios.post(`${PLAID_BASE}/transfer/create`, body);\n' }],
@@ -175,7 +197,7 @@ test('Plaid calls count wherever the app makes them: under env/, after a comment
 
   const migrate = { steps: WITH_MIGRATE, bankLink: LINK };
   assert.deepEqual({ node, ruby }, {
-    node: { 'env directory': migrate, 'after a block comment': migrate, '#field': migrate, destructured: migrate, 'template literal': migrate },
+    node: { 'env directory': migrate, 'after a block comment': migrate, 'between a "/*" string and a JSDoc': migrate, '#field': migrate, destructured: migrate, 'template literal': migrate },
     ruby: { link: { steps: WITHOUT_MIGRATE, bankLink: LINK }, transfer: migrate, identityVerification: migrate },
   });
 });
