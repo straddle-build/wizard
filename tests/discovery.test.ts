@@ -31,27 +31,87 @@ const PLAID_CALLS = {
     python: { 'app/pay.py': 'from plaid.model.transfer_create_request import TransferCreateRequest\nresponse = client.transfer_create(request)\n' },
     go: { 'pay.go': 'resp, _, err := client.PlaidApi.TransferCreate(ctx).TransferCreateRequest(request).Execute()\n' },
   },
+  transferIntent: {
+    node: { 'src/pay.ts': 'const { data } = await plaid.transferIntentCreate({ mode: "PAYMENT", amount, description });\n' },
+    python: { 'app/pay.py': 'response = client.transfer_intent_create(request)\n' },
+    go: { 'pay.go': 'resp, _, err := client.PlaidApi.TransferIntentCreate(ctx).TransferIntentCreateRequest(request).Execute()\n' },
+  },
+  transferRecurring: {
+    node: { 'src/pay.ts': 'await plaid.transferRecurringCreate({ access_token, account_id, schedule });\n' },
+    python: { 'app/pay.py': 'response = client.transfer_recurring_create(request)\n' },
+    go: { 'pay.go': 'resp, _, err := client.PlaidApi.TransferRecurringCreate(ctx).TransferRecurringCreateRequest(request).Execute()\n' },
+  },
+  bankTransfer: {
+    node: { 'src/pay.ts': 'await plaid.bankTransferCreate({ idempotency_key, access_token, account_id });\n' },
+    python: { 'app/pay.py': 'response = client.bank_transfer_create(request)\n' },
+    go: { 'pay.go': 'resp, _, err := client.PlaidApi.BankTransferCreate(ctx).BankTransferCreateRequest(request).Execute()\n' },
+  },
   identityVerification: {
     node: { 'src/kyc.ts': 'await plaid.identityVerificationCreate({ template_id, client_user_id, gave_consent: true });\n' },
     python: { 'app/kyc.py': 'response = client.identity_verification_create(request)\n' },
     go: { 'kyc.go': 'resp, _, err := client.PlaidApi.IdentityVerificationCreate(ctx).IdentityVerificationCreateRequest(request).Execute()\n' },
   },
+  identityVerificationGet: {
+    node: { 'src/kyc.ts': 'const { data } = await plaid.identityVerificationGet({ identity_verification_id });\n' },
+    python: { 'app/kyc.py': 'response = client.identity_verification_get(request)\n' },
+    go: { 'kyc.go': 'resp, _, err := client.PlaidApi.IdentityVerificationGet(ctx).IdentityVerificationGetRequest(request).Execute()\n' },
+  },
+  // Plaid's standard Identity Verification flow starts from a Link token; the create call is optional.
+  identityVerificationLink: {
+    node: { 'src/kyc.ts': 'await plaid.linkTokenCreate({ user: { client_user_id }, products: [Products.IdentityVerification], identity_verification: { template_id } });\n' },
+    python: { 'app/kyc.py': 'request = LinkTokenCreateRequest(products=[Products("identity_verification")], user=user)\nclient.link_token_create(request)\n' },
+    go: { 'kyc.go': 'request.SetProducts([]plaid.Products{plaid.PRODUCTS_IDENTITY_VERIFICATION})\nresp, _, err := client.PlaidApi.LinkTokenCreate(ctx).LinkTokenCreateRequest(*request).Execute()\n' },
+  },
   link: {
-    node: { 'src/link.ts': 'await plaid.linkTokenCreate(request);\nconst { data } = await plaid.itemPublicTokenExchange({ public_token });\nawait plaid.processorTokenCreate({ access_token, account_id, processor });\n' },
-    python: { 'app/link.py': 'client.link_token_create(request)\nexchange = client.item_public_token_exchange(exchange_request)\nclient.processor_token_create(processor_request)\n' },
-    go: { 'link.go': 'resp, _, err := client.PlaidApi.ProcessorTokenCreate(ctx).ProcessorTokenCreateRequest(request).Execute()\n' },
+    node: { 'src/link.ts': 'await plaid.linkTokenCreate({ products: [Products.Auth] });\nconst { data } = await plaid.itemPublicTokenExchange({ public_token });\n' },
+    python: { 'app/link.py': 'client.link_token_create(request)\nexchange = client.item_public_token_exchange(exchange_request)\n' },
+    go: { 'link.go': 'resp, _, err := client.PlaidApi.ItemPublicTokenExchange(ctx).ItemPublicTokenExchangeRequest(request).Execute()\n' },
+  },
+  processorTokens: {
+    node: { 'src/processor.ts': 'await plaid.processorTokenCreate({ access_token, account_id, processor });\n' },
+    python: { 'app/processor.py': 'client.processor_token_create(processor_request)\n' },
+    go: { 'processor.go': 'resp, _, err := client.PlaidApi.ProcessorTokenCreate(ctx).ProcessorTokenCreateRequest(request).Execute()\n' },
+  },
+  balanceOnly: {
+    node: { 'src/balance.ts': 'await plaid.accountsBalanceGet({ access_token });\n' },
+    python: { 'app/balance.py': 'client.accounts_balance_get(request)\n' },
+    go: { 'balance.go': 'resp, _, err := client.PlaidApi.AccountsBalanceGet(ctx).AccountsBalanceGetRequest(request).Execute()\n' },
+  },
+  // Transfer named where the app doesn't call it: comments, the app's own names and routes, tests and a virtualenv.
+  notCalls: {
+    node: {
+      'src/notes.ts': '// await plaid.transferCreate(request)\n * plaid.identityVerificationCreate(request)\nexport const TRANSFER_CREATE = "transfer/create";\nawait fetch("/api/transfer/create");\n',
+      'src/__tests__/pay.test.ts': 'const plaid = { transferCreate: vi.fn() };\nawait plaid.transferCreate(request);\n',
+    },
+    python: {
+      'app/views.py': '# client.transfer_create(request)\ndef transfer_create(request):\n    return None\n',
+      'tests/test_pay.py': 'client.transfer_create(request)\n',
+      'env/lib/python3.12/site-packages/plaid/api/plaid_api.py': "self.transfer_create_endpoint = _Endpoint(settings={'endpoint_path': '/transfer/create'})\nself.api_client.call_api('/transfer/create')\n",
+    },
+    go: {
+      'notes.go': '// resp, _, err := client.PlaidApi.TransferCreate(ctx).Execute()\n',
+      'pay_test.go': 'resp, _, err := client.PlaidApi.TransferCreate(ctx).Execute()\n',
+    },
   },
 };
 const WITH_MIGRATE = ['straddle-setup', 'straddle-plan', 'straddle-migrate', 'straddle-integrate', 'straddle-test', 'straddle-go-live'];
 const WITHOUT_MIGRATE = ['straddle-setup', 'straddle-plan', 'straddle-integrate', 'straddle-test', 'straddle-go-live'];
+const LINK = { source: 'plaid', processorTokens: false };
 
 for (const ecosystem of ['node', 'python', 'go'] as const) {
-  const cases: Array<[string, Array<keyof typeof PLAID_CALLS>, { steps: string[]; providers: string[]; bankLink: string[] }]> = [
-    ['a Transfer repo adds Migrate', ['transfer'], { steps: WITH_MIGRATE, providers: ['plaid'], bankLink: [] }],
-    ['an Identity Verification repo adds Migrate', ['identityVerification'], { steps: WITH_MIGRATE, providers: ['plaid'], bankLink: [] }],
-    ['a Link-only repo adds no Migrate and reports Plaid Link', ['link'], { steps: WITHOUT_MIGRATE, providers: [], bankLink: ['plaid'] }],
-    ['a repo with Link and Transfer adds Migrate and reports Plaid Link', ['link', 'transfer'], { steps: WITH_MIGRATE, providers: ['plaid'], bankLink: ['plaid'] }],
-    ['a Plaid dependency with no Transfer or Identity Verification call adds no Migrate', [], { steps: WITHOUT_MIGRATE, providers: [], bankLink: ['plaid'] }],
+  const cases: Array<[string, Array<keyof typeof PLAID_CALLS>, { steps: string[]; bankLink: typeof LINK | null }]> = [
+    ['a Transfer repo adds Migrate', ['transfer'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['a Transfer UI repo adds Migrate', ['transferIntent'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['a recurring Transfer repo adds Migrate', ['transferRecurring'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['a legacy Bank Transfers repo adds Migrate', ['bankTransfer'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['an Identity Verification repo adds Migrate', ['identityVerification'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['an Identity Verification repo that only reads results adds Migrate', ['identityVerificationGet'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['Identity Verification started from a Link token adds Migrate and is no bank connection', ['identityVerificationLink'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['a Link-only repo adds no Migrate and reports Plaid Link', ['link'], { steps: WITHOUT_MIGRATE, bankLink: LINK }],
+    ['processor tokens add no Migrate and are reported', ['processorTokens'], { steps: WITHOUT_MIGRATE, bankLink: { source: 'plaid', processorTokens: true } }],
+    ['a repo with Link and Transfer adds Migrate and reports Plaid Link', ['link', 'transfer'], { steps: WITH_MIGRATE, bankLink: LINK }],
+    ['a Plaid dependency with no Link, Transfer or Identity Verification call keeps Migrate and claims no Link', ['balanceOnly'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['Link with Transfer named only in comments, tests, its own routes or a virtualenv adds no Migrate', ['link', 'notCalls'], { steps: WITHOUT_MIGRATE, bankLink: LINK }],
   ];
   for (const [name, calls, expected] of cases) {
     test(`Plaid (${ecosystem}): ${name}`, () => {
@@ -60,10 +120,20 @@ for (const ecosystem of ['node', 'python', 'go'] as const) {
 
       const facts = discover(repo, []);
 
-      assert.deepEqual({ steps: programSkills('integration', facts.providers), providers: facts.providers, bankLink: facts.bankLink }, expected);
+      assert.deepEqual({ steps: programSkills('integration', facts.providers), bankLink: facts.bankLink }, expected);
     });
   }
 }
+
+test('Plaid Link with a source file the scan may not open keeps Migrate, since that file could call Transfer', () => {
+  const repo = tempDir('plaid-excluded');
+  writeFiles(repo, Object.assign({}, PLAID_MANIFESTS.node, PLAID_CALLS.link.node, { 'src/private/helpers.ts': 'export const CENTS = 100;\n' }));
+
+  const complete = discover(repo, []);
+  const excluded = discover(repo, ['src/private/**']);
+
+  assert.deepEqual({ complete: complete.providers, excluded: excluded.providers, bankLink: excluded.bankLink }, { complete: [], excluded: ['plaid'], bankLink: LINK });
+});
 
 test('reports unknown instead of guessing when no manifest names a language', () => {
   const repo = tempDir('empty');

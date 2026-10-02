@@ -124,10 +124,11 @@ export interface RepoFacts {
   language: Detected;
   framework: Detected;
   straddleSdk: StraddleSdk | null;
-  // Providers to migrate from. Plaid counts only when the code calls Plaid Transfer or Identity Verification.
+  // Providers to migrate from. A declared Plaid leaves only when the whole scan shows Link calls and no Transfer or
+  // Identity Verification call.
   providers: string[];
-  // A bank connection already in use (Plaid Link and its processor tokens): a Plan decision, not a migration.
-  bankLink: BankLink[];
+  // A bank connection the code already uses (Plaid Link): a Plan decision, not a migration. Null when none was found.
+  bankLink: BankLink | null;
   files: number;
   excluded: Exclusion[];
   truncated: boolean;
@@ -151,34 +152,50 @@ const PROVIDERS: Array<[RegExp, string]> = [
   [/^(dwolla-v2|dwollav2|dwolla_v2|dwolla)$/, 'dwolla'],
   [/^(modern-treasury|modern_treasury|github\.com\/modern-treasury\/.*)$/, 'modern-treasury'],
 ];
+export const PROVIDER_NAMES: readonly string[] = PROVIDERS.map(([, name]) => name);
 
-export type BankLink = 'plaid';
+// `processorTokens`: the code calls processorTokenCreate, so it hands Plaid processor tokens to a partner.
+export interface BankLink { source: 'plaid'; processorTokens: boolean }
 
-// Plaid is a competitor for payments (Transfer) and KYC (Identity Verification), and a bank connection (Link,
-// processor tokens) Straddle accepts. Method names as plaid-node, plaid-python and plaid-go spell them, and the endpoints.
-const PLAID_MIGRATE = /\b(?:transfer_?(?:authorization_?)?create|identity_?verification_?create)\b|\/(?:transfer\/(?:authorization\/)?|identity_verification\/)create\b/i;
-const PLAID_LINK = /\b(?:link_?token_?create|item_?public_?token_?exchange|processor_?token_?create)\b|\/(?:link\/token\/create|item\/public_token\/exchange|processor\/token\/create)\b/i;
-const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rb|cs)$/;
+// Plaid is a competitor for payments (Transfer, Transfer UI, recurring and legacy Bank Transfers) and KYC (Identity
+// Verification, also started from a Link token whose products include identity_verification), and a bank connection
+// (Link, processor tokens) Straddle accepts. Calls on a receiver as plaid-node, plaid-python, plaid-go and plaid-ruby
+// spell them, and the endpoints as quoted strings.
+const PLAID_MIGRATE = /\.(?:(?:bank_?)?transfer_?(?:authorization_?|intent_?|recurring_?)?create|identity_?verification_?(?:create|get|list|retry))\s*\(|['"`](?:https:\/\/[a-z]+\.plaid\.com)?\/(?:(?:bank_)?transfer\/(?:authorization\/|intent\/|recurring\/)?create|identity_verification\/(?:create|get|list|retry))\b/i;
+const PLAID_LINK_TOKEN = /\.link_?token_?create\s*\(|['"`](?:https:\/\/[a-z]+\.plaid\.com)?\/link\/token\/create\b/i;
+const PLAID_IDV_PRODUCT = /['"]identity_verification['"]|Products\.IdentityVerification\b|PRODUCTS_IDENTITY_VERIFICATION\b/;
+const PLAID_EXCHANGE = /\.item_?public_?token_?exchange\s*\(|['"`](?:https:\/\/[a-z]+\.plaid\.com)?\/item\/public_token\/exchange\b/i;
+const PLAID_PROCESSOR = /\.processor_?token_?create\s*\(|['"`](?:https:\/\/[a-z]+\.plaid\.com)?\/processor\/token\/create\b/i;
+const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rb)$/;
+// Tests, mocks, fixtures and Python environments name Plaid calls without the app making them.
+const NOT_APP_CODE = /(?:^|\/)(?:tests?|__tests__|__mocks__|mocks?|fixtures?|specs?|env|venv|\.venv|\.tox|\.nox|site-packages)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
+const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*|#)/;
 
-// Which Plaid roles the source files show. Read under the same boundary as hashing: walked files only, no symlinks.
-function plaidUsage(root: string, files: readonly string[]): { migrate: boolean; link: boolean } {
-  let migrate = false;
-  let link = false;
-  for (const rel of files) {
-    if (!SOURCE.test(rel)) continue;
+interface PlaidUsage { migrate: boolean; link: boolean; processorTokens: boolean; complete: boolean }
+
+// Which Plaid roles the app's source files show. Read under the same boundary as hashing: walked files only, no
+// symlinks. `complete` is false when a source file couldn't be read, so missing calls are unknown, not absent.
+function plaidUsage(root: string, scan: Walk): PlaidUsage {
+  const usage: PlaidUsage = { migrate: false, link: false, processorTokens: false, complete: !scan.truncated };
+  if (scan.excluded.some((e) => e.reason === 'unreadable' || (SOURCE.test(e.path) && !NOT_APP_CODE.test(e.path)))) usage.complete = false;
+  for (const rel of scan.files) {
+    if (!SOURCE.test(rel) || NOT_APP_CODE.test(rel)) continue;
     const file = openRegular(join(root, rel));
-    if (!file) continue;
+    if (!file) { usage.complete = false; continue; }
     try {
-      if (file.size > MAX_HASH_BYTES) continue;
-      const text = readFileSync(file.fd, 'utf8');
-      migrate ||= PLAID_MIGRATE.test(text);
-      link ||= PLAID_LINK.test(text);
-    } catch { /* unreadable: no evidence either way */ } finally {
+      if (file.size > MAX_HASH_BYTES) { usage.complete = false; continue; }
+      const code = readFileSync(file.fd, 'utf8').split('\n').filter((line) => !COMMENT_LINE.test(line)).join('\n');
+      const linkToken = PLAID_LINK_TOKEN.test(code);
+      const idvLink = linkToken && PLAID_IDV_PRODUCT.test(code);
+      const processor = PLAID_PROCESSOR.test(code);
+      usage.migrate ||= idvLink || PLAID_MIGRATE.test(code);
+      usage.link ||= (linkToken && !idvLink) || processor || PLAID_EXCHANGE.test(code);
+      usage.processorTokens ||= processor;
+    } catch { usage.complete = false; } finally {
       closeSync(file.fd);
     }
-    if (migrate && link) break;
   }
-  return { migrate, link };
+  return usage;
 }
 
 interface Manifest { ecosystem: Ecosystem; language: string; evidence: string[]; deps: Map<string, string>; file: string }
@@ -271,12 +288,13 @@ export function discover(root: string, exclude: readonly string[]): RepoFacts {
       if (provider) providers.add(provider[1]);
     }
   }
-  // A Plaid dependency without Transfer or Identity Verification calls is a bank connection, not a provider.
-  let bankLink: BankLink[] = [];
+  // Plaid leaves the providers only on evidence: Link calls found, no Transfer or Identity Verification call, and a
+  // scan that read every source file. Anything less keeps Migrate, as for any declared provider.
+  let bankLink: BankLink | null = null;
   if (providers.has('plaid')) {
-    const plaid = plaidUsage(root, scan.files);
-    if (!plaid.migrate) providers.delete('plaid');
-    if (plaid.link || !plaid.migrate) bankLink = ['plaid'];
+    const plaid = plaidUsage(root, scan);
+    if (plaid.link) bankLink = { source: 'plaid', processorTokens: plaid.processorTokens };
+    if (plaid.link && !plaid.migrate && plaid.complete) providers.delete('plaid');
   }
 
   return {

@@ -85,8 +85,8 @@ function printWelcome(io: Prompter, facts: RepoFacts, context: Receipt['context'
   row(io, 'Language', answerText(context.language, facts.language.evidence));
   row(io, 'Framework', answerText(context.framework, facts.framework.evidence));
   row(io, 'Straddle SDK', facts.straddleSdk ? `${facts.straddleSdk.package} ${facts.straddleSdk.version} (declared in ${facts.straddleSdk.manifest})`.trim() : 'none declared');
-  row(io, 'Provider code', facts.providers.length ? facts.providers.join(', ') : 'none in your manifests');
-  if (facts.bankLink.length) row(io, 'Bank connection', 'Plaid Link found: Plan will ask whether to keep Plaid tokens or move to Straddle Bridge');
+  row(io, 'Provider code', facts.providers.length ? facts.providers.join(', ') : 'none to migrate from');
+  if (facts.bankLink) row(io, 'Bank connection', 'Plaid Link found: Plan will ask whether to keep Plaid tokens or move to Straddle Bridge');
   row(io, 'Program', stepTitles(skills) + (skills.includes('straddle-migrate') && program === 'integration' ? ` (Migrate, because you already use ${facts.providers.join(', ')})` : ''));
   row(io, 'Purpose', programFor(program).purpose);
   if (facts.errors.length) {
@@ -97,7 +97,7 @@ function printWelcome(io: Prompter, facts: RepoFacts, context: Receipt['context'
   io.say('  Your coding agent reads and edits this repo on your machine. I read dependency manifests and file names, and hash');
   io.say(`  other files locally so I can tell you what changed. I never open .env files, keys or credential files (${facts.excluded.length} skipped),`);
   io.say('  and I send nothing to Straddle.');
-  if (facts.bankLink.length || facts.providers.includes('plaid')) io.say('  Plaid is declared, so I also searched your source files for its Transfer, Identity Verification and Link calls.');
+  if (facts.bankLink || facts.providers.includes('plaid')) io.say('  Plaid is declared, so I also searched your source files for its Transfer, Identity Verification and Link calls.');
   io.say();
 }
 
@@ -449,7 +449,8 @@ function showAuditFindings(io: Prompter, receipt: Receipt): void {
 function contextForAgent(receipt: Receipt): string {
   const { language, framework, choices: c } = receipt.context;
   const origin = (a: Answer) => (a.source === 'developer' ? 'corrected by the developer' : 'detected');
-  const bank = receipt.context.bankLink?.length ? ' Bank connection already in the repo: Plaid Link with processor tokens (detected; a Plan decision, not a provider to migrate from).' : '';
+  const link = receipt.context.bankLink;
+  const bank = link ? ` Bank connection already in the repo: Plaid Link${link.processorTokens ? ' with processor tokens' : ''} (detected; a Plan decision, not part of a migration).` : '';
   const context = `Repository context confirmed in the Straddle Wizard: language ${language.value} (${origin(language)}); framework ${framework.value} (${origin(framework)}).${bank}`;
   if (!c) return context;
   const decided = ([['products', c.products], ['integration type', c.integrationType], ['SDK', c.sdk], ['notification path', c.notificationPath]] as const)
@@ -861,10 +862,18 @@ function savedProgress(receipt: Receipt, providers: readonly string[]): Progress
   return currentProgress(receipt, programSkills(receipt.program, providers).map((skill) => ({ skill, total: 0 })));
 }
 
-async function resumeRun(io: Prompter, receipt: Receipt, opts: JourneyOptions, confirm: boolean): Promise<number> {
+// The run's providers and bank connection as recorded when it started, so Migrate replacing Plaid Transfer calls
+// doesn't drop Migrate from the run. A receipt saved before the Wizard recorded them gets them from the repo now.
+// Resume records them; status and Manual's next step read the same values without saving.
+function withRunFacts(receipt: Receipt): Receipt {
+  if (receipt.context.providers) return receipt;
   const facts = discover(receipt.repo, receipt.exclude);
-  const providers = facts.providers;
-  receipt.context.bankLink = facts.bankLink;
+  return { ...receipt, context: { ...receipt.context, providers: facts.providers, bankLink: facts.bankLink } };
+}
+
+async function resumeRun(io: Prompter, saved: Receipt, opts: JourneyOptions, confirm: boolean): Promise<number> {
+  const receipt = withRunFacts(saved);
+  const providers = receipt.context.providers!;
   const now = savedProgress(receipt, providers);
   const start = nextStep(now.items);
   if (confirm) {
@@ -938,7 +947,7 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
     if (loaded.kind === 'found') {
       const saved = loaded.receipt;
       saved.exclude = [...new Set([...saved.exclude, ...opts.exclude])];
-      const now = savedProgress(saved, discover(repo, saved.exclude).providers);
+      const now = savedProgress(saved, withRunFacts(saved).context.providers!);
       printSaved(io, saved, now);
       const at = nextStep(now.items);
       label = at ? `Resume the ${saved.program} run at ${SKILLS[at].title}` : null;
@@ -983,6 +992,7 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
     language: { value: facts.language.value, source: 'detected' },
     framework: { value: facts.framework.value, source: 'detected' },
     choices: null,
+    providers: facts.providers,
     bankLink: facts.bankLink,
   };
   for (;;) {
@@ -1036,15 +1046,16 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
 // For `wizard status`: the saved program as the status line shows it, from the files and recorded events, and the
 // steps you chose to finish without.
 export function savedStatus(receipt: Receipt): { progress: string; skippedSteps: SkillName[] } {
-  const now = savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers);
+  const now = savedProgress(receipt, withRunFacts(receipt).context.providers!);
   return { progress: `${statusLine(now.items)}${now.skipped ? ` (${skippedNote(now.skipped)})` : ''}`, skippedSteps: now.items.filter((p) => p.skipped).map((p) => p.skill) };
 }
 
 // For `wizard status` on a Manual run: what `wizard resume` would hand off next, from the files and `env`; null when
 // nothing is left or the next session can't start.
-export function savedHandoff(receipt: Receipt, env: NodeJS.ProcessEnv): Handoff | null {
-  if (receipt.mode !== 'manual' || !receipt.client) return null;
-  const now = savedProgress(receipt, discover(receipt.repo, receipt.exclude).providers);
+export function savedHandoff(saved: Receipt, env: NodeJS.ProcessEnv): Handoff | null {
+  if (saved.mode !== 'manual' || !saved.client) return null;
+  const receipt = withRunFacts(saved);
+  const now = savedProgress(receipt, receipt.context.providers!);
   const next = nextStep(now.items);
   if (!next) return null;
   const { sends, missing, runnable } = sessionSteps(receipt.repo, now.items, next, env);
