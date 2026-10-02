@@ -98,6 +98,17 @@ const PLAID_CALLS = {
     python: { 'app/notes.py': '# client.transfer_create(request)\n' },
     go: { 'notes.go': '// resp, _, err := client.PlaidApi.TransferCreate(ctx).Execute()\n' },
   },
+  // A Link call that's commented out is no bank connection, so it can't remove Migrate.
+  commentedLink: {
+    node: { 'src/old-link.ts': '// await plaid.linkTokenCreate(request)\n/*\n * await plaid.itemPublicTokenExchange({ public_token })\n */\n' },
+    python: { 'app/old_link.py': '# client.link_token_create(request)\n    # client.item_public_token_exchange(exchange_request)\n' },
+    go: { 'old_link.go': '// resp, _, err := client.PlaidApi.LinkTokenCreate(ctx).Execute()\n' },
+  },
+  commentedProcessor: {
+    node: { 'src/old-processor.ts': '// await plaid.processorTokenCreate({ access_token, account_id, processor })\n' },
+    python: { 'app/old_processor.py': '# client.processor_token_create(processor_request)\n' },
+    go: { 'old_processor.go': '// resp, _, err := client.PlaidApi.ProcessorTokenCreate(ctx).Execute()\n' },
+  },
 };
 const WITH_MIGRATE = ['straddle-setup', 'straddle-plan', 'straddle-migrate', 'straddle-integrate', 'straddle-test', 'straddle-go-live'];
 const WITHOUT_MIGRATE = ['straddle-setup', 'straddle-plan', 'straddle-integrate', 'straddle-test', 'straddle-go-live'];
@@ -118,6 +129,8 @@ for (const ecosystem of ['node', 'python', 'go'] as const) {
     ['a Plaid dependency with no Link, Transfer or Identity Verification call keeps Migrate and claims no Link', ['balanceOnly'], { steps: WITH_MIGRATE, bankLink: null }],
     ['Link with Transfer named only in tests, its own names and routes, or installed packages adds no Migrate', ['link', 'notCalls'], { steps: WITHOUT_MIGRATE, bankLink: LINK }],
     ['Link with Transfer named in a comment keeps Migrate', ['link', 'commentOnly'], { steps: WITH_MIGRATE, bankLink: LINK }],
+    ['a Plaid Link call only in a comment keeps Migrate and claims no Link', ['commentedLink'], { steps: WITH_MIGRATE, bankLink: null }],
+    ['a processor-token call only in a comment claims no processor tokens', ['link', 'commentedProcessor'], { steps: WITHOUT_MIGRATE, bankLink: LINK }],
   ];
   for (const [name, calls, expected] of cases) {
     test(`Plaid (${ecosystem}): ${name}`, () => {
