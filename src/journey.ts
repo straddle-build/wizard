@@ -362,9 +362,12 @@ function stepCounts(bundle: Bundle | null, skills: readonly SkillName[]): Steps 
 // The steps as the files and recorded events show them, and how many event lines were skipped as unreadable.
 interface Progress { items: StepProgress[]; skipped: number }
 
+// Claude Code and Codex in Auto show the Wizard the agent's handoffs; Cursor and Manual don't.
+const observedRun = (receipt: Receipt) => receipt.client !== null && receipt.mode !== 'manual' && EVENT_SURFACE[receipt.client] === 'observed';
+
 function currentProgress(receipt: Receipt, steps: Steps): Progress {
   const { events, skipped } = readObservedEvents(eventsPath(receipt.repo));
-  return { items: progress(receipt.repo, receipt.exclude, steps, events), skipped };
+  return { items: progress(receipt.repo, receipt.exclude, steps, events, observedRun(receipt)), skipped };
 }
 
 const skippedNote = (skipped: number) =>
@@ -391,6 +394,7 @@ function printSteps(io: Prompter, { items, skipped }: Progress, observed: boolea
 }
 
 const LEGEND = "✓ means the file and your agent's handoff agree. I read each file myself; a handoff is what your agent reported.";
+const FILE_LEGEND = "✓ means the file says the step is done. I read each file myself; I can't see your agent's handoffs here.";
 
 // ---------- Session ----------
 
@@ -738,8 +742,8 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   row(io, 'Run record', `${WIZARD_DIR}/receipt.json and ${WIZARD_DIR}/events.jsonl`);
   io.say();
   io.say(io.bold('Steps'));
-  printSteps(io, now, receipt.client !== null && receipt.mode !== 'manual' && EVENT_SURFACE[receipt.client] === 'observed');
-  io.say(`  ${LEGEND}`);
+  printSteps(io, now, observedRun(receipt));
+  io.say(`  ${observedRun(receipt) ? LEGEND : FILE_LEGEND}`);
   io.say();
   const changed = [...new Set(receipt.sessions.flatMap((s) => s.changedFiles))].sort();
   io.say(io.bold('Changed files (I compared them before and after each session)'));
@@ -840,7 +844,7 @@ function printSaved(io: Prompter, receipt: Receipt, now: Progress): void {
   row(io, 'Framework', answerText(receipt.context.framework, []));
   row(io, 'Choices', choicesText(receipt));
   if (receipt.exclude.length) row(io, 'Never opened', receipt.exclude.join(', '));
-  printSteps(io, now, receipt.client !== null && receipt.mode !== 'manual' && EVENT_SURFACE[receipt.client] === 'observed');
+  printSteps(io, now, observedRun(receipt));
   io.say("  Sandbox write approvals from earlier sessions don't carry over. A recorded plan approval does, while the plan is unchanged.");
   io.say('  I recheck the skills, your agent and your files before we continue.');
   io.say();

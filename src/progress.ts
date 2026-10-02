@@ -78,7 +78,7 @@ export interface StepProgress {
   // The agent's last handoff or abort for this skill.
   reported: ReportedMarker | undefined;
   // Ticked: the Wizard's own evidence (the file, or observed step entries for a skill without one) and the agent's
-  // report agree.
+  // report agree. Where the Wizard sees no report (Cursor, Manual), the file alone.
   done: boolean;
   // Finished for the resume rule: the file says so. A skill without a file is finished when it is ticked.
   finished: boolean;
@@ -86,14 +86,15 @@ export interface StepProgress {
   skipped: boolean;
 }
 
-export function progress(repo: string, exclude: readonly string[], steps: ReadonlyArray<{ skill: SkillName; total: number }>, events: readonly ObservedEvent[]): StepProgress[] {
+// `observed`: the client shows the Wizard the agent's handoffs (Claude Code and Codex in Auto).
+export function progress(repo: string, exclude: readonly string[], steps: ReadonlyArray<{ skill: SkillName; total: number }>, events: readonly ObservedEvent[], observed = true): StepProgress[] {
   const items = steps.map(({ skill, total }) => {
     const record = stepRecord(repo, exclude, skill);
     const entered = stepEntries(events, skill).length;
     const reported = events.findLast((e) => e.kind === 'marker' && e.marker.skill === skill && e.marker.kind !== 'progress');
     const marker = reported?.kind === 'marker' ? reported.marker : undefined;
     const agrees = marker?.kind === 'handoff' && SKILLS[skill].advanceOn.includes(marker.status ?? '');
-    const done = agrees && (record ? record.done : entered > 0);
+    const done = observed ? agrees && (record ? record.done : entered > 0) : record?.done === true;
     const finished = record ? record.done : done;
     return { skill, record, entered, total, reported: marker, done, finished, skipped: false };
   });

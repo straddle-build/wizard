@@ -997,6 +997,23 @@ test('a Manual report shows the skill\'s "Verify before merging" checklist, sinc
   assert.match(r.stdout, /Verify before merging \(from the straddle-setup 0\.1\.0 skill; I can't see what your agent printed\)\n\s+- \[ \] No API key, token, or `\.env` content appears in this report or the conversation\.\n/);
 });
 
+test('Cursor and Manual reports tick a step whose file says done, with no handoff to compare; Claude Code still needs its handoff', async () => {
+  for (const [client, mode, tick] of [['cursor', 'auto', '✓'], ['cursor', 'manual', '✓'], ['codex', 'manual', '✓'], ['claude', 'auto', ' ']] as const) {
+    const repo = nextRepo();
+    writeFiles(repo, { 'straddle-setup.md': SETUP_FILE });
+    const fake = fakeClients('✓ Logged in as dev@example.com');
+    const claude = fakeClaude();
+    // Claude Code's session prints no handoff, so its file alone doesn't tick Setup.
+    claude.sessions({ 'straddle-setup': { text: 'Setup is done.' } });
+
+    // The choices, then Start (Auto) or "I'm back" (Manual).
+    const r = await runWizard(['setup', '--client', client, '--mode', mode], { cwd: repo, claude: client === 'claude' ? claude : undefined, env: { ...CONFIGURED, ...(client === 'claude' ? {} : fake.env) }, input: [...CHOICES, '1'] });
+
+    assert.equal(r.code, 0, `${client} ${mode}: ${r.stdout}${r.stderr}`);
+    assert.equal(/\n {2}(.) Setup +straddle-setup\.md: Status: complete · no handoff reported/.exec(r.stdout)?.[1], tick, `${client} ${mode}: ${r.stdout}`);
+  }
+});
+
 test('Cursor Auto starts cursor-agent with no permission flag, writes no Claude settings, and resume reopens its own chat, never another Cursor chat in the repo', async () => {
   const repo = nextRepo();
   const fake = fakeClients('✓ Logged in as dev@example.com');
