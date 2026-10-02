@@ -863,12 +863,15 @@ function savedProgress(receipt: Receipt, providers: readonly string[]): Progress
 }
 
 // The run's providers and bank connection as recorded when it started, so Migrate replacing Plaid Transfer calls
-// doesn't drop Migrate from the run. A receipt saved before the Wizard recorded them gets them from the repo now.
-// Resume records them; status and Manual's next step read the same values without saving.
+// doesn't drop Migrate from the run. A receipt saved before the Wizard recorded them started under the earlier rule,
+// where a declared Plaid always added Migrate, so it keeps that program and gets only the bank connection from the
+// repo now. Resume records them; status and Manual's next step read the same values without saving.
 function withRunFacts(receipt: Receipt): Receipt {
   if (receipt.context.providers) return receipt;
   const facts = discover(receipt.repo, receipt.exclude);
-  return { ...receipt, context: { ...receipt.context, providers: facts.providers, bankLink: facts.bankLink } };
+  // A bank connection is detected only where Plaid is declared.
+  const providers = facts.bankLink && !facts.providers.includes('plaid') ? [...facts.providers, 'plaid'].sort() : facts.providers;
+  return { ...receipt, context: { ...receipt.context, providers, bankLink: facts.bankLink } };
 }
 
 async function resumeRun(io: Prompter, saved: Receipt, opts: JourneyOptions, confirm: boolean): Promise<number> {

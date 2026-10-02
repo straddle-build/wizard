@@ -46,12 +46,13 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${body}$`);
 }
 
-interface Walk { files: string[]; excluded: Exclusion[]; truncated: boolean }
+// `hidden`: excluded directories, and symlinks that may lead to one or to source, whose contents the walk never saw.
+interface Walk { files: string[]; excluded: Exclusion[]; hidden: string[]; truncated: boolean }
 
 function walk(repo: string, exclude: readonly string[]): Walk {
   const root = realpathSync(repo);
   const configured = exclude.map(globToRegExp);
-  const result: Walk = { files: [], excluded: [], truncated: false };
+  const result: Walk = { files: [], excluded: [], hidden: [], truncated: false };
   const visit = (dir: string, depth: number) => {
     let names: string[];
     // A directory that cannot be listed, or an entry that disappears while it is walked, is skipped and named.
@@ -68,10 +69,15 @@ function walk(repo: string, exclude: readonly string[]): Walk {
         try { target = realpathSync(abs); } catch { target = null; }
         const inside = target !== null && (target === root || target.startsWith(root + sep));
         result.excluded.push({ path: rel, reason: inside ? 'symlink not followed' : 'symlink escapes the repository' });
+        if (!/\.[A-Za-z0-9]+$/.test(name) || SOURCE.test(name)) result.hidden.push(rel);
         continue;
       }
       const reason = sensitiveReason(name) ?? (configured.some((re) => re.test(rel)) ? 'configured sensitive path' : null);
-      if (reason) { result.excluded.push({ path: rel, reason }); continue; }
+      if (reason) {
+        result.excluded.push({ path: rel, reason });
+        if (info.isDirectory()) result.hidden.push(rel);
+        continue;
+      }
       if (info.isDirectory()) {
         if (depth >= MAX_DEPTH) { result.truncated = true; continue; }
         visit(abs, depth + 1);
@@ -159,32 +165,45 @@ export interface BankLink { source: 'plaid'; processorTokens: boolean }
 
 // Plaid is a competitor for payments (Transfer, Transfer UI, recurring and legacy Bank Transfers) and KYC (Identity
 // Verification, also started from a Link token whose products include identity_verification), and a bank connection
-// (Link, processor tokens) Straddle accepts. Calls on a receiver as plaid-node, plaid-python, plaid-go and plaid-ruby
-// spell them, and the endpoints as quoted strings.
-const PLAID_MIGRATE = /\.(?:(?:bank_?)?transfer_?(?:authorization_?|intent_?|recurring_?)?create|identity_?verification_?(?:create|get|list|retry))\s*\(|['"`](?:https:\/\/[a-z]+\.plaid\.com)?\/(?:(?:bank_)?transfer\/(?:authorization\/|intent\/|recurring\/)?create|identity_verification\/(?:create|get|list|retry))\b/i;
-const PLAID_LINK_TOKEN = /\.link_?token_?create\s*\(|['"`](?:https:\/\/[a-z]+\.plaid\.com)?\/link\/token\/create\b/i;
+// (Link, processor tokens) Straddle accepts. A method matches called on a receiver as plaid-node, plaid-python,
+// plaid-go and plaid-ruby spell it (Ruby needs no parentheses) or destructured, and an endpoint as a quoted path,
+// a full Plaid URL or a template literal's path after `${base}`.
+function plaidPattern(methods: string, paths: string): RegExp {
+  return new RegExp(String.raw`\.(?:${methods})(?:\s*\(|[ \t]+[\w@:])|[{,]\s*(?:${methods})\s*[,}]|['"\x60}](?:https:\/\/[a-z]+\.plaid\.com)?\/(?:${paths})\b`, 'i');
+}
+const PLAID_MIGRATE = plaidPattern(
+  String.raw`(?:bank_?)?transfer_?(?:authorization_?|intent_?|recurring_?)?create|identity_?verification_?(?:create|get|list|retry)`,
+  String.raw`(?:bank_)?transfer\/(?:authorization\/|intent\/|recurring\/)?create|identity_verification\/(?:create|get|list|retry)`,
+);
+const PLAID_LINK_TOKEN = plaidPattern(String.raw`link_?token_?create`, String.raw`link\/token\/create`);
 const PLAID_IDV_PRODUCT = /['"]identity_verification['"]|Products\.IdentityVerification\b|PRODUCTS_IDENTITY_VERIFICATION\b/;
-const PLAID_EXCHANGE = /\.item_?public_?token_?exchange\s*\(|['"`](?:https:\/\/[a-z]+\.plaid\.com)?\/item\/public_token\/exchange\b/i;
-const PLAID_PROCESSOR = /\.processor_?token_?create\s*\(|['"`](?:https:\/\/[a-z]+\.plaid\.com)?\/processor\/token\/create\b/i;
+const PLAID_EXCHANGE = plaidPattern(String.raw`item_?public_?token_?exchange`, String.raw`item\/public_token\/exchange`);
+const PLAID_PROCESSOR = plaidPattern(String.raw`processor_?token_?create`, String.raw`processor\/token\/create`);
 const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rb)$/;
-// Tests, mocks, fixtures and Python environments name Plaid calls without the app making them.
-const NOT_APP_CODE = /(?:^|\/)(?:tests?|__tests__|__mocks__|mocks?|fixtures?|specs?|env|venv|\.venv|\.tox|\.nox|site-packages)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
-const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*|#)/;
+// Tests, mocks, fixtures and installed packages name Plaid calls without the app making them.
+const NOT_APP_CODE = /(?:^|\/)(?:tests?|__tests__|__mocks__|mocks?|fixtures?|specs?|site-packages)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
+// Comment spans, leaving the code around them: `/* */` and `//` (after a line start or space, so URLs stay), and `#`
+// only in Python and Ruby, where JavaScript's `#field` can't occur.
+const BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g;
+const LINE_COMMENT = /(^|\s)\/\/.*$/gm;
+const HASH_COMMENT = /(^|\s)#.*$/gm;
 
 interface PlaidUsage { migrate: boolean; link: boolean; processorTokens: boolean; complete: boolean }
 
 // Which Plaid roles the app's source files show. Read under the same boundary as hashing: walked files only, no
-// symlinks. `complete` is false when a source file couldn't be read, so missing calls are unknown, not absent.
+// symlinks. `complete` is false when the walk hid a directory, a symlink or a source file, or a source file couldn't be
+// read, so missing calls are unknown, not absent.
 function plaidUsage(root: string, scan: Walk): PlaidUsage {
   const usage: PlaidUsage = { migrate: false, link: false, processorTokens: false, complete: !scan.truncated };
-  if (scan.excluded.some((e) => e.reason === 'unreadable' || (SOURCE.test(e.path) && !NOT_APP_CODE.test(e.path)))) usage.complete = false;
+  if (scan.hidden.some((p) => !NOT_APP_CODE.test(`${p}/`)) || scan.excluded.some((e) => e.reason === 'unreadable' || (SOURCE.test(e.path) && !NOT_APP_CODE.test(e.path)))) usage.complete = false;
   for (const rel of scan.files) {
     if (!SOURCE.test(rel) || NOT_APP_CODE.test(rel)) continue;
     const file = openRegular(join(root, rel));
     if (!file) { usage.complete = false; continue; }
     try {
       if (file.size > MAX_HASH_BYTES) { usage.complete = false; continue; }
-      const code = readFileSync(file.fd, 'utf8').split('\n').filter((line) => !COMMENT_LINE.test(line)).join('\n');
+      const text = readFileSync(file.fd, 'utf8');
+      const code = /\.(?:py|rb)$/.test(rel) ? text.replace(HASH_COMMENT, '$1') : text.replace(BLOCK_COMMENT, ' ').replace(LINE_COMMENT, '$1');
       const linkToken = PLAID_LINK_TOKEN.test(code);
       const idvLink = linkToken && PLAID_IDV_PRODUCT.test(code);
       const processor = PLAID_PROCESSOR.test(code);

@@ -80,7 +80,7 @@ const PLAID_CALLS = {
   // Transfer named where the app doesn't call it: comments, the app's own names and routes, tests and a virtualenv.
   notCalls: {
     node: {
-      'src/notes.ts': '// await plaid.transferCreate(request)\n * plaid.identityVerificationCreate(request)\nexport const TRANSFER_CREATE = "transfer/create";\nawait fetch("/api/transfer/create");\n',
+      'src/notes.ts': '// await plaid.transferCreate(request)\n/**\n * plaid.identityVerificationCreate(request)\n */\nexport const TRANSFER_CREATE = "transfer/create";\nawait fetch("/api/transfer/create");\n',
       'src/__tests__/pay.test.ts': 'const plaid = { transferCreate: vi.fn() };\nawait plaid.transferCreate(request);\n',
     },
     python: {
@@ -125,14 +125,59 @@ for (const ecosystem of ['node', 'python', 'go'] as const) {
   }
 }
 
-test('Plaid Link with a source file the scan may not open keeps Migrate, since that file could call Transfer', () => {
-  const repo = tempDir('plaid-excluded');
-  writeFiles(repo, Object.assign({}, PLAID_MANIFESTS.node, PLAID_CALLS.link.node, { 'src/private/helpers.ts': 'export const CENTS = 100;\n' }));
+test('Plaid Link with source the scan may not see keeps Migrate, since that source could call Transfer', () => {
+  const outside = tempDir('plaid-shared');
+  writeFiles(outside, { 'pay.ts': 'export const CENTS = 100;\n' });
+  const hidden: Array<[string, Record<string, string>, string[], string?]> = [
+    ['an excluded file', { 'src/private/helpers.ts': 'export const CENTS = 100;\n' }, ['src/private/**']],
+    ['an excluded directory', { 'src/private/helpers.ts': 'export const CENTS = 100;\n' }, ['src/private']],
+    ['a directory with a sensitive name', { 'src/credentials/helpers.ts': 'export const CENTS = 100;\n' }, []],
+    ['a symlinked directory', {}, [], 'shared'],
+  ];
+  const providers = (files: Record<string, string>, exclude: string[], link?: string) => {
+    const repo = tempDir('plaid-hidden');
+    writeFiles(repo, Object.assign({}, PLAID_MANIFESTS.node, PLAID_CALLS.link.node, files));
+    if (link) symlinkSync(outside, join(repo, link));
+    return discover(repo, exclude).providers;
+  };
 
-  const complete = discover(repo, []);
-  const excluded = discover(repo, ['src/private/**']);
+  const seen = providers({ 'src/private/helpers.ts': 'export const CENTS = 100;\n' }, []);
+  const unseen = Object.fromEntries(hidden.map(([name, files, exclude, link]) => [name, providers(files, exclude, link)]));
 
-  assert.deepEqual({ complete: complete.providers, excluded: excluded.providers, bankLink: excluded.bankLink }, { complete: [], excluded: ['plaid'], bankLink: LINK });
+  assert.deepEqual({ seen, unseen }, {
+    seen: [],
+    unseen: { 'an excluded file': ['plaid'], 'an excluded directory': ['plaid'], 'a directory with a sensitive name': ['plaid'], 'a symlinked directory': ['plaid'] },
+  });
+});
+
+test('Plaid calls count wherever the app makes them: under env/, after a comment, in a #field, destructured, in a template literal, and in Ruby without parentheses', () => {
+  const RUBY = { Gemfile: "source 'https://rubygems.org'\ngem 'rails'\ngem 'plaid'\n", 'app/services/link.rb': 'client.link_token_create request\nclient.item_public_token_exchange request\n' };
+  const repos: Array<[string, Record<string, string>]> = [
+    ['env directory', { 'src/env/payments.ts': 'await plaid.transferCreate(request);\n' }],
+    ['after a block comment', { 'src/pay.ts': '/* payment */ await plaid.transferCreate(request);\n' }],
+    ['#field', { 'src/account.ts': 'class Account {\n  #transfer = plaid.transferCreate(request);\n}\n' }],
+    ['destructured', { 'src/pay.ts': 'const { transferCreate } = plaid;\nawait transferCreate.call(plaid, request);\n' }],
+    ['template literal', { 'src/pay.ts': 'await axios.post(`${PLAID_BASE}/transfer/create`, body);\n' }],
+  ];
+  const facts = (files: Record<string, string>) => {
+    const repo = tempDir('plaid-calls');
+    writeFiles(repo, files);
+    const found = discover(repo, []);
+    return { steps: programSkills('integration', found.providers), bankLink: found.bankLink };
+  };
+
+  const node = Object.fromEntries(repos.map(([name, files]) => [name, facts(Object.assign({}, PLAID_MANIFESTS.node, PLAID_CALLS.link.node, files))]));
+  const ruby = {
+    link: facts(RUBY),
+    transfer: facts({ ...RUBY, 'app/services/pay.rb': 'client.transfer_create request\n' }),
+    identityVerification: facts({ ...RUBY, 'app/services/kyc.rb': 'client.identity_verification_get request\n' }),
+  };
+
+  const migrate = { steps: WITH_MIGRATE, bankLink: LINK };
+  assert.deepEqual({ node, ruby }, {
+    node: { 'env directory': migrate, 'after a block comment': migrate, '#field': migrate, destructured: migrate, 'template literal': migrate },
+    ruby: { link: { steps: WITHOUT_MIGRATE, bankLink: LINK }, transfer: migrate, identityVerification: migrate },
+  });
 });
 
 test('reports unknown instead of guessing when no manifest names a language', () => {

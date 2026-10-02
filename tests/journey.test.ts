@@ -594,7 +594,7 @@ test('a run keeps the Migrate step it started with after Migrate replaces the Pl
   assert.match(resumed.stdout, /Straddle Wizard program: straddle-plan → straddle-migrate\. Start at straddle-plan\./);
 });
 
-test('a run saved before the Wizard recorded Plaid facts gets them from the repo, the same in status as in resume', async () => {
+test('a run saved before the Wizard recorded Plaid facts keeps the Migrate step it started with and gets Plaid Link from the repo, the same in status as in resume', async () => {
   const repo = nextRepo();
   writeFiles(repo, { 'package.json': PLAID_PACKAGE, 'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait plaid.itemPublicTokenExchange({ public_token });\n' });
   const fake = fakeClients('✓ Logged in as dev@example.com');
@@ -609,8 +609,9 @@ test('a run saved before the Wizard recorded Plaid facts gets them from the repo
   const resumed = await runWizard(['resume'], { cwd: repo, env: fake.env, input: ['1', '2'] });
 
   assert.ok(status.run.paste.includes(sentence), status.run.paste);
+  assert.match(status.run.progress, /Plan · Migrate · Integrate/);
   assert.ok(resumed.stdout.replace(/\s+/g, ' ').includes(sentence), resumed.stdout);
-  assert.deepEqual({ providers: readReceipt(repo).context.providers, bankLink: readReceipt(repo).context.bankLink }, { providers: [], bankLink: { source: 'plaid', processorTokens: false } });
+  assert.deepEqual({ providers: readReceipt(repo).context.providers, bankLink: readReceipt(repo).context.bankLink }, { providers: ['plaid'], bankLink: { source: 'plaid', processorTokens: false } });
 });
 
 test('readiness says the session runs with the developer\'s own settings and promises no permission prompt', async () => {
