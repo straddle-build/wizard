@@ -757,9 +757,9 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   io.say('  I sent no Straddle request and ran no test. The checks your agent reports running are its own.');
   io.say();
   const printed = receipt.sessions.findLast((s) => s.checklist.length);
-  // Else the skill's own checklist, for the last step this run's sessions covered that the files say finished:
-  // never a step that hasn't run.
-  const ran = now.items.findLast((p) => p.finished && !p.skipped && receipt.sessions.some((s) => s.skills.includes(p.skill)))?.skill;
+  // Else the skill's own checklist, for the last step this run's sessions covered that the files say finished, or
+  // that has no file to say so (Audit, Get started): never a step that hasn't run.
+  const ran = now.items.findLast((p) => (p.finished || p.record === null) && !p.skipped && receipt.sessions.some((s) => s.skills.includes(p.skill)))?.skill;
   if (printed) {
     io.say(io.bold('Verify before merging (as your agent last printed it)'));
     for (const item of printed.checklist) io.say(`  ${item}`);

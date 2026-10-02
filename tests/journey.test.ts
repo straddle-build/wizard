@@ -990,7 +990,7 @@ test('Manual starts no agent process for any client: it prints the paste text, a
   }
 });
 
-test('a Manual report shows the "Verify before merging" checklist of the last skill this run finished, from the files, and none before one finishes', async () => {
+test('with no checklist printed, the report shows the "Verify before merging" checklist of the last skill this run finished, or ran when it has no state file, and none before', async () => {
   const fake = fakeClients('✓ Logged in as dev@example.com');
   const env = { ...CONFIGURED, ...fake.env };
   const verify = (skill: string) => new RegExp(`Verify before merging \\(from the ${skill} 0\\.1\\.0 skill; I can't see what your agent printed\\)\\n`);
@@ -1017,6 +1017,15 @@ test('a Manual report shows the "Verify before merging" checklist of the last sk
   assert.match(setup.stdout, /Reason\s+next: Plan/);
   assert.match(setup.stdout, verify('straddle-setup'));
   assert.match(setup.stdout, setupChecklist);
+
+  // Audit writes no state file to say it finished, so the session running it is enough: Continue, then "I'm back"
+  // (Manual) or Start (Cursor Auto).
+  // Catches: no checklist at all for a skill without a state file.
+  for (const [mode, why] of [['manual', "I can't see what your agent printed"], ['auto', "your agent didn't print it"]] as const) {
+    const audit = await runWizard(['audit', '--client', 'cursor', '--mode', mode], { cwd: nextRepo(), env, input: ['1', '1'] });
+    assert.equal(audit.code, 0, `${mode}: ${audit.stdout}${audit.stderr}`);
+    assert.match(audit.stdout, new RegExp(`Verify before merging \\(from the straddle-audit 0\\.1\\.0 skill; ${why}\\)\\n\\s+- \\[ \\] Each finding cites application \`file:line\``), mode);
+  }
 });
 
 test('Cursor and Manual reports tick a step whose file says done, with no handoff to compare; Claude Code still needs its handoff', async () => {
