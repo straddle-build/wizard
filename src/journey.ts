@@ -742,8 +742,9 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   row(io, 'Run record', `${WIZARD_DIR}/receipt.json and ${WIZARD_DIR}/events.jsonl`);
   io.say();
   io.say(io.bold('Steps'));
-  printSteps(io, now, observedRun(receipt));
-  io.say(`  ${observedRun(receipt) ? LEGEND : FILE_LEGEND}`);
+  const observed = observedRun(receipt);
+  printSteps(io, now, observed);
+  io.say(`  ${observed ? LEGEND : FILE_LEGEND}`);
   io.say();
   const changed = [...new Set(receipt.sessions.flatMap((s) => s.changedFiles))].sort();
   io.say(io.bold('Changed files (I compared them before and after each session)'));
@@ -756,14 +757,16 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   io.say('  I sent no Straddle request and ran no test. The checks your agent reports running are its own.');
   io.say();
   const printed = receipt.sessions.findLast((s) => s.checklist.length);
+  // Else the skill's own checklist, for the last step this run's sessions covered that the files say finished:
+  // never a step that hasn't run.
+  const ran = now.items.findLast((p) => p.finished && !p.skipped && receipt.sessions.some((s) => s.skills.includes(p.skill)))?.skill;
   if (printed) {
     io.say(io.bold('Verify before merging (as your agent last printed it)'));
     for (const item of printed.checklist) io.say(`  ${item}`);
     io.say();
-  } else if (bundle && receipt.sessions.length) {
-    const skill = receipt.sessions.at(-1)!.skills.at(-1)!;
-    io.say(io.bold(`Verify before merging (from the ${skill} ${bundle.skills[skill]?.version ?? ''} skill; ${receipt.mode === 'manual' ? "I can't see what your agent printed" : "your agent didn't print it"})`));
-    for (const item of checklistFromBundle(bundle, skill)) io.say(`  ${item}`);
+  } else if (bundle && ran) {
+    io.say(io.bold(`Verify before merging (from the ${ran} ${bundle.skills[ran]?.version ?? ''} skill; ${receipt.mode === 'manual' ? "I can't see what your agent printed" : "your agent didn't print it"})`));
+    for (const item of checklistFromBundle(bundle, ran)) io.say(`  ${item}`);
     io.say();
   }
   printInStraddle(io, receipt);
