@@ -986,6 +986,17 @@ test('Manual starts no agent process for any client: it prints the paste text, a
   }
 });
 
+test('a Manual report shows the skill\'s "Verify before merging" checklist, since the Wizard sees nothing your agent printed', async () => {
+  const repo = nextRepo();
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+
+  // The choices, then "I'm back".
+  const r = await runWizard(['setup', '--client', 'cursor', '--mode', 'manual'], { cwd: repo, env: { ...CONFIGURED, ...fake.env }, input: [...CHOICES, '1'] });
+
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /Verify before merging \(from the straddle-setup 0\.1\.0 skill; I can't see what your agent printed\)\n\s+- \[ \] No API key, token, or `\.env` content appears in this report or the conversation\.\n/);
+});
+
 test('Cursor Auto starts cursor-agent with no permission flag, writes no Claude settings, and resume reopens its own chat, never another Cursor chat in the repo', async () => {
   const repo = nextRepo();
   const fake = fakeClients('✓ Logged in as dev@example.com');

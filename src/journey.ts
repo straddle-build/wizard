@@ -554,7 +554,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const page = client === 'codex' && !manual ? await checklistPage(render) : null;
   io.say(io.bold(`Your session in ${label}: ${stepTitles(run)}`));
   if (done.length) io.say(`  ${titleList(done)} ${done.length === 1 ? 'is' : 'are'} done; I read that from ${done.length === 1 ? 'its file' : 'their files'}. I'll start at ${first.title}.`);
-  if (manual) return manualSession(io, receipt, steps, run);
+  if (manual) return manualSession(io, receipt, steps, run, ready.bundle);
   const watch = page ? `Follow the checklist at ${page.url}` : client === 'claude' ? 'Its status line shows the checklist as it goes' : "I can't watch Cursor's progress; when it stops I read the files the skills wrote";
   io.say(`  ${label} opens here and runs ${run.length === 1 ? 'the step' : 'these steps'} in one session. ${watch}.`);
   io.say('  Answer its questions there, and approve or deny each change and each Sandbox request. Starting isn\'t approval of anything.');
@@ -673,7 +673,7 @@ function handoffFor(receipt: Receipt, run: readonly SkillName[]): Handoff {
 }
 
 // Manual: the developer runs the program in their own agent and the files decide. I start no process.
-async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[]): Promise<number> {
+async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[], bundle: Bundle): Promise<number> {
   const label = CLIENT_LABEL[receipt.client!];
   const { prompt, steps: todo } = handoffFor(receipt, run);
   io.say("  Manual: I start no agent. Here's the handoff:");
@@ -689,7 +689,7 @@ async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: 
   const now = currentProgress(receipt, steps);
   const next = nextStep(now.items);
   finish(receipt, next ? 'ready' : 'completed', next ? `next: ${SKILLS[next].title}` : 'every step is done and on file');
-  return printReport(io, receipt, now, null);
+  return printReport(io, receipt, now, bundle);
 }
 
 // ---------- Report ----------
@@ -758,7 +758,7 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
     io.say();
   } else if (bundle && receipt.sessions.length) {
     const skill = receipt.sessions.at(-1)!.skills.at(-1)!;
-    io.say(io.bold(`Verify before merging (from the ${skill} ${bundle.skills[skill]?.version ?? ''} skill; your agent didn't print it)`));
+    io.say(io.bold(`Verify before merging (from the ${skill} ${bundle.skills[skill]?.version ?? ''} skill; ${receipt.mode === 'manual' ? "I can't see what your agent printed" : "your agent didn't print it"})`));
     for (const item of checklistFromBundle(bundle, skill)) io.say(`  ${item}`);
     io.say();
   }
