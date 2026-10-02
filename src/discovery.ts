@@ -124,7 +124,10 @@ export interface RepoFacts {
   language: Detected;
   framework: Detected;
   straddleSdk: StraddleSdk | null;
+  // Providers to migrate from. Plaid counts only when the code calls Plaid Transfer or Identity Verification.
   providers: string[];
+  // A bank connection already in use (Plaid Link and its processor tokens): a Plan decision, not a migration.
+  bankLink: BankLink[];
   files: number;
   excluded: Exclusion[];
   truncated: boolean;
@@ -148,6 +151,35 @@ const PROVIDERS: Array<[RegExp, string]> = [
   [/^(dwolla-v2|dwollav2|dwolla_v2|dwolla)$/, 'dwolla'],
   [/^(modern-treasury|modern_treasury|github\.com\/modern-treasury\/.*)$/, 'modern-treasury'],
 ];
+
+export type BankLink = 'plaid';
+
+// Plaid is a competitor for payments (Transfer) and KYC (Identity Verification), and a bank connection (Link,
+// processor tokens) Straddle accepts. Method names as plaid-node, plaid-python and plaid-go spell them, and the endpoints.
+const PLAID_MIGRATE = /\b(?:transfer_?(?:authorization_?)?create|identity_?verification_?create)\b|\/(?:transfer\/(?:authorization\/)?|identity_verification\/)create\b/i;
+const PLAID_LINK = /\b(?:link_?token_?create|item_?public_?token_?exchange|processor_?token_?create)\b|\/(?:link\/token\/create|item\/public_token\/exchange|processor\/token\/create)\b/i;
+const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rb|cs)$/;
+
+// Which Plaid roles the source files show. Read under the same boundary as hashing: walked files only, no symlinks.
+function plaidUsage(root: string, files: readonly string[]): { migrate: boolean; link: boolean } {
+  let migrate = false;
+  let link = false;
+  for (const rel of files) {
+    if (!SOURCE.test(rel)) continue;
+    const file = openRegular(join(root, rel));
+    if (!file) continue;
+    try {
+      if (file.size > MAX_HASH_BYTES) continue;
+      const text = readFileSync(file.fd, 'utf8');
+      migrate ||= PLAID_MIGRATE.test(text);
+      link ||= PLAID_LINK.test(text);
+    } catch { /* unreadable: no evidence either way */ } finally {
+      closeSync(file.fd);
+    }
+    if (migrate && link) break;
+  }
+  return { migrate, link };
+}
 
 interface Manifest { ecosystem: Ecosystem; language: string; evidence: string[]; deps: Map<string, string>; file: string }
 
@@ -239,6 +271,13 @@ export function discover(root: string, exclude: readonly string[]): RepoFacts {
       if (provider) providers.add(provider[1]);
     }
   }
+  // A Plaid dependency without Transfer or Identity Verification calls is a bank connection, not a provider.
+  let bankLink: BankLink[] = [];
+  if (providers.has('plaid')) {
+    const plaid = plaidUsage(root, scan.files);
+    if (!plaid.migrate) providers.delete('plaid');
+    if (plaid.link || !plaid.migrate) bankLink = ['plaid'];
+  }
 
   return {
     root,
@@ -246,6 +285,7 @@ export function discover(root: string, exclude: readonly string[]): RepoFacts {
     framework,
     straddleSdk,
     providers: [...providers].sort(),
+    bankLink,
     files: scan.files.length,
     excluded: scan.excluded,
     truncated: scan.truncated,

@@ -549,6 +549,31 @@ test('another payment provider in the repo adds Migrate to the program', async (
   assert.match(r.stdout, /Your session in Claude Code: Setup → Plan → Migrate → Integrate → Test → Go Live/);
 });
 
+test('Plaid Link alone is a bank connection for Plan, shown on the context screen and handed to the agent, while Plaid Transfer adds Migrate', async () => {
+  const linkOnly = nextRepo();
+  writeFiles(linkOnly, {
+    'package.json': JSON.stringify({ dependencies: { next: '15.0.0', plaid: '29.0.0' }, devDependencies: { typescript: '5.6.0' } }),
+    'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait plaid.processorTokenCreate({ access_token, account_id, processor });\n',
+  });
+  const claude = fakeClaude();
+
+  // Continue and the choices, then Auto and Start for Plan alone.
+  const link = await runWizard(['plan', '--client', 'claude'], { cwd: linkOnly, claude, env: CONFIGURED, input: [...CHOICES, '1', '1'] });
+
+  assert.match(link.stdout, /Provider code\s+none in your manifests\n\s+Bank connection\s+Plaid Link found: Plan will ask whether to keep Plaid tokens or move to Straddle Bridge\n/);
+  assert.match(launches(claude)[0]!.at(-1)!, /framework Next\.js \(detected\)\. Bank connection already in the repo: Plaid Link with processor tokens \(detected; a Plan decision, not a provider to migrate from\)\. Developer choices/);
+  assert.deepEqual(readReceipt(linkOnly).context.bankLink, ['plaid']);
+
+  const both = nextRepo();
+  writeFiles(both, {
+    'package.json': JSON.stringify({ dependencies: { next: '15.0.0', plaid: '29.0.0' }, devDependencies: { typescript: '5.6.0' } }),
+    'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait plaid.transferCreate({ access_token, account_id, authorization_id });\n',
+  });
+  const r = await runWizard([], { cwd: both, claude: fakeClaude(), env: CONFIGURED, input: [...CHOOSE_CONTEXT, '2'] });
+
+  assert.match(r.stdout, /Bank connection\s+Plaid Link found: Plan will ask whether to keep Plaid tokens or move to Straddle Bridge\n\s+Program\s+Setup → Plan → Migrate → Integrate → Test → Go Live \(Migrate, because you already use plaid\)/);
+});
+
 test('readiness says the session runs with the developer\'s own settings and promises no permission prompt', async () => {
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
