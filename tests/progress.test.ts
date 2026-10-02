@@ -19,7 +19,7 @@ const steps = PROGRAM.map((skill) => ({ skill, total: 5 }));
 function next(files: Record<string, string>): string | null {
   const repo = nextRepo();
   writeFiles(repo, files);
-  return nextStep(progress(repo, [], steps, []));
+  return nextStep(progress(repo, [], steps, [], true));
 }
 
 const done = {
@@ -54,6 +54,15 @@ test('resume goes back to Plan when the plan changed after approval, and redoes 
   assert.equal(next({ ...done, 'straddle-go-live-report.md': done['straddle-go-live-report.md'].replace(hash, older) }), 'straddle-go-live');
 });
 
+test('where the Wizard sees no handoff (Cursor, Manual), the file alone ticks a step, but never a report made for an older plan', () => {
+  const repo = nextRepo();
+  const older = approvalHash(draftPlan.replace('add client', 'an earlier row'));
+  writeFiles(repo, { ...done, 'straddle-integration-report.md': report('complete', older), 'straddle-test-evidence.md': evidence('complete', older), 'straddle-go-live-report.md': done['straddle-go-live-report.md'].replace(hash, older) });
+
+  // Catches: a tick from `Status:` alone, without the plan hash check.
+  assert.equal(statusLine(progress(repo, [], steps, [], false)), 'Setup ✓ · Plan ✓ · Integrate ▶ 0/5 · Test · Go Live');
+});
+
 const migrationReport = (status: string, planHash = hash) => `# Straddle migration report\n\nStatus: ${status}\nPlan: straddle-migration-plan.md\nPlan hash: ${planHash}\n\nProvider: Stripe\n`;
 const withMigrate = [steps[0]!, steps[1]!, { skill: 'straddle-migrate' as const, total: 8 }, ...steps.slice(2)];
 
@@ -61,7 +70,7 @@ test('Migrate is finished when its report says migrated for the current migratio
   const nextWithMigrate = (files: Record<string, string>, events: ObservedEvent[] = []) => {
     const repo = nextRepo();
     writeFiles(repo, files);
-    return nextStep(progress(repo, [], withMigrate, events));
+    return nextStep(progress(repo, [], withMigrate, events, true));
   };
   const migrated: ObservedEvent = { at: 't', kind: 'marker', key: 'm', marker: { kind: 'handoff', skill: 'straddle-migrate', status: 'migrated' } };
   const base = { ...done, 'straddle-migration-plan.md': approvedPlan };
@@ -82,7 +91,7 @@ test('a report\'s Plan: line names its plan however the path is written, so `./s
   const repo = nextRepo();
   writeFiles(repo, { ...done, 'straddle-migration-plan.md': migrationPlan, 'straddle-migration-report.md': migrationReport('migrated', approvalHash(migrationPlan)).replace('Plan: straddle-migration-plan.md', 'Plan: ./straddle-migration-plan.md') });
 
-  const migrate = progress(repo, [], withMigrate, []).find((p) => p.skill === 'straddle-migrate')!;
+  const migrate = progress(repo, [], withMigrate, [], true).find((p) => p.skill === 'straddle-migrate')!;
   assert.deepEqual([migrate.finished, migrate.record!.detail], [true, 'Status: migrated, for the current approved plan']);
 });
 
@@ -93,15 +102,15 @@ test('a failed Test or not-ready Go Live handoff never shows a tick, even when a
   const earlier = [handoff('straddle-setup', 'ready'), handoff('straddle-plan', 'draft'), handoff('straddle-integrate', 'complete')];
 
   for (const [test, goLive] of [['failed', 'not_ready'], ['partial', 'blocked']]) {
-    assert.equal(statusLine(progress(repo, [], steps, [...earlier, handoff('straddle-test', test!), handoff('straddle-go-live', goLive!)])), 'Setup ✓ · Plan ✓ · Integrate ✓ · Test · Go Live', `${test}, ${goLive}`);
+    assert.equal(statusLine(progress(repo, [], steps, [...earlier, handoff('straddle-test', test!), handoff('straddle-go-live', goLive!)], true)), 'Setup ✓ · Plan ✓ · Integrate ✓ · Test · Go Live', `${test}, ${goLive}`);
   }
-  assert.equal(statusLine(progress(repo, [], steps, [...earlier, handoff('straddle-test', 'passed'), handoff('straddle-go-live', 'ready')])), 'Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓');
+  assert.equal(statusLine(progress(repo, [], steps, [...earlier, handoff('straddle-test', 'passed'), handoff('straddle-go-live', 'ready')], true)), 'Setup ✓ · Plan ✓ · Integrate ✓ · Test ✓ · Go Live ✓');
 });
 
 test('a contract file the Wizard must not open counts as unfinished, and its detail says why', () => {
   const repo = nextRepo();
   writeFiles(repo, done);
-  const items = progress(repo, ['straddle-integration-report.md'], steps, []);
+  const items = progress(repo, ['straddle-integration-report.md'], steps, [], true);
   assert.equal(nextStep(items), 'straddle-integrate');
   assert.match(items[2]!.record!.detail, /not opened: it's a configured sensitive path/);
 });
@@ -113,30 +122,30 @@ test('the checklist ticks a step only when its file and the reported handoff agr
   const handoff = (skill: string, status: string): ObservedEvent => ({ at, kind: 'marker', key: `${skill}-${status}`, marker: { kind: 'handoff', skill, status } });
   const entered = (skill: string, step: string): ObservedEvent => ({ at, kind: 'step-entered', skill, step });
 
-  assert.equal(statusLine(progress(repo, [], steps, [])), 'Setup · Plan ▶ 0/5 · Integrate · Test · Go Live');
+  assert.equal(statusLine(progress(repo, [], steps, [], true)), 'Setup · Plan ▶ 0/5 · Integrate · Test · Go Live');
   // Setup's file is complete and it reported ready: ticked. Plan is approved on file but its handoff isn't reported yet.
   const events = [entered('straddle-setup', '01-begin'), handoff('straddle-setup', 'ready'), entered('straddle-plan', '01-decisions'), entered('straddle-plan', '02-sources')];
-  assert.equal(statusLine(progress(repo, [], steps, events)), 'Setup ✓ · Plan ▶ 2/5 · Integrate · Test · Go Live');
+  assert.equal(statusLine(progress(repo, [], steps, events, true)), 'Setup ✓ · Plan ▶ 2/5 · Integrate · Test · Go Live');
   // A reported handoff alone never ticks: Integrate says complete, but no report is on file.
   writeFiles(repo, { 'straddle-integration-plan.md': approvedPlan });
   const later = [...events, handoff('straddle-plan', 'draft'), entered('straddle-integrate', '01-begin'), handoff('straddle-integrate', 'complete')];
-  assert.equal(statusLine(progress(repo, [], steps, later)), 'Setup ✓ · Plan ✓ · Integrate ▶ 1/5 · Test · Go Live');
+  assert.equal(statusLine(progress(repo, [], steps, later, true)), 'Setup ✓ · Plan ✓ · Integrate ▶ 1/5 · Test · Go Live');
   // A later abort outranks an earlier handoff.
   const aborted: ObservedEvent = { at, kind: 'marker', key: 'abort', marker: { kind: 'abort', skill: 'straddle-setup', reason: 'stopped' } };
-  assert.equal(statusLine(progress(repo, [], steps, [...later, aborted])).split(' · ')[0], 'Setup ▶ 1/5');
+  assert.equal(statusLine(progress(repo, [], steps, [...later, aborted], true)).split(' · ')[0], 'Setup ▶ 1/5');
 });
 
 test('resuming from repository state files places the play marker on the first unfinished step without division by zero', () => {
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-setup.md': done['straddle-setup.md'], 'straddle-integration-plan.md': approvedPlan });
-  assert.equal(statusLine(progress(repo, [], steps, [])), 'Setup · Plan · Integrate ▶ 0/5 · Test · Go Live');
+  assert.equal(statusLine(progress(repo, [], steps, [], true)), 'Setup · Plan · Integrate ▶ 0/5 · Test · Go Live');
   const zeroSteps = steps.map((s) => ({ ...s, total: 0 }));
-  assert.equal(statusLine(progress(repo, [], zeroSteps, [])), 'Setup · Plan · Integrate ▶ 0 · Test · Go Live');
+  assert.equal(statusLine(progress(repo, [], zeroSteps, [], true)), 'Setup · Plan · Integrate ▶ 0 · Test · Go Live');
 });
 
 test('a session that leaves Setup for later puts the play marker on the step it starts at', () => {
   const repo = nextRepo();
-  assert.equal(statusLine(progress(repo, [], steps, []), 'straddle-plan'), 'Setup · Plan ▶ 0/5 · Integrate · Test · Go Live');
+  assert.equal(statusLine(progress(repo, [], steps, [], true), 'straddle-plan'), 'Setup · Plan ▶ 0/5 · Integrate · Test · Go Live');
 });
 
 test('finishing without Go Live counts only while Test is complete for the plan you finished at', () => {
@@ -145,7 +154,7 @@ test('finishing without Go Live counts only while Test is complete for the plan 
   const at = (files: Record<string, string>) => {
     const repo = nextRepo();
     writeFiles(repo, files);
-    const items = progress(repo, [], steps, [skip]);
+    const items = progress(repo, [], steps, [skip], true);
     return [nextStep(items), statusLine(items)];
   };
   // Catches: Go Live still pending, and resume reopening it, after you finished without it.

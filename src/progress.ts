@@ -51,7 +51,7 @@ function reportRecord(read: Read, file: string, complete: string, forPlan: boole
   if (statusWord(status) !== complete) return { done: false, detail: `Status: ${status}`, hash };
   if (!forPlan) return { done: true, detail: `Status: ${status}` };
   // `./straddle-migration-plan.md` names the same file.
-  const planFile = posix.normalize(header(report.text, 'Plan') ?? '.') === MIGRATION_PLAN ? MIGRATION_PLAN : INTEGRATION_PLAN;
+  const planFile = posix.normalize(header(report.text, 'Plan') ?? '') === MIGRATION_PLAN ? MIGRATION_PLAN : INTEGRATION_PLAN;
   const plan = planRecord(read, planFile);
   if (!plan.done) return { done: false, detail: `Status: ${status}, but ${planFile} is not approved as it stands`, hash };
   if (hash !== plan.hash) return { done: false, detail: `Status: ${status}, but for an earlier version of ${planFile}`, hash };
@@ -89,7 +89,7 @@ export interface StepProgress {
 }
 
 // `observed`: the client shows the Wizard the agent's handoffs (Claude Code and Codex in Auto).
-export function progress(repo: string, exclude: readonly string[], steps: ReadonlyArray<{ skill: SkillName; total: number }>, events: readonly ObservedEvent[], observed = true): StepProgress[] {
+export function progress(repo: string, exclude: readonly string[], steps: ReadonlyArray<{ skill: SkillName; total: number }>, events: readonly ObservedEvent[], observed: boolean): StepProgress[] {
   const items = steps.map(({ skill, total }) => {
     const record = stepRecord(repo, exclude, skill);
     const entered = stepEntries(events, skill).length;
