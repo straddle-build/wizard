@@ -921,6 +921,7 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
   const files = program === 'integration' ? existingContractFiles(repo) : [];
   if (loaded.kind === 'found' || files.length) {
     let label: string | null;
+    let skippable: string | null = null;
     if (loaded.kind === 'found') {
       const saved = loaded.receipt;
       saved.exclude = [...new Set([...saved.exclude, ...opts.exclude])];
@@ -928,6 +929,7 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
       printSaved(io, saved, now);
       const at = nextStep(now.items);
       label = at ? `Resume the ${saved.program} run at ${SKILLS[at].title}` : null;
+      skippable = goLiveSkippable(now.items);
     } else {
       const now = currentProgress({ ...newReceipt({ repo, program, pid: process.pid }), exclude: opts.exclude }, programSkills(program, discover(repo, opts.exclude).providers).map((skill) => ({ skill, total: 0 })));
       io.say(io.bold('This repo already has Straddle files from an earlier run'));
@@ -938,10 +940,12 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
     }
     const next = await io.choose('Start fresh or resume?', [
       ...(label ? [{ label, value: 'resume' as const }] : []),
+      ...(skippable ? [{ label: FINISH_HERE, value: 'finish' as const }] : []),
       { label: 'Start fresh (I keep your current files beside the new ones)', value: 'fresh' as const },
       { label: 'Cancel', value: 'cancel' as const },
     ], 0);
     io.say();
+    if (next === 'finish' && loaded.kind === 'found') return finishWithoutGoLive(io, loaded.receipt, skippable!);
     if (next === 'resume') return loaded.kind === 'found' ? resumeRun(io, loaded.receipt, opts, false) : newRun('integration', opts, loaded, false);
     if (next !== 'fresh') { io.say('Cancelled. Nothing changed.'); return 130; }
   }

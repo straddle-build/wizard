@@ -404,6 +404,22 @@ test('Test done, Go Live left: choosing resume keeps Go Live next, and `wizard r
   assert.match(afterGoLive.stdout, /Everything in the saved integration run is done and on file\. There's nothing to resume\.\n$/);
 });
 
+test('Test done, Go Live left: plain `wizard` offers to finish here like `wizard resume` does, and finishing never reopens Go Live', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions(STOP_AFTER_TEST);
+
+  // Start, then Resume at Go Live later. Then plain `wizard`: Finish here.
+  await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '1'] });
+  const again = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+
+  // Catches: plain `wizard` only reopening Go Live, so finishing needs `wizard resume`.
+  assert.equal(again.code, 0, again.stdout);
+  assert.match(again.stdout, /Start fresh or resume\?\n\s+1\) Resume the integration run at Go Live\n\s+2\) Finish here \(skip Go Live\)\n\s+3\) Start fresh \(I keep your current files beside the new ones\)\n\s+4\) Cancel\nChoose \[1\]: \n\nFinished, without Go Live\./);
+  assert.equal(launches(claude).length, 1);
+  assert.deepEqual([readReceipt(repo).state, readReceipt(repo).stateReason], ['completed', 'you finished after Test and skipped Go Live']);
+});
+
 test('a plan edited after finishing without Go Live voids the finish: resume goes back to Plan and offers no finish', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
