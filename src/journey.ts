@@ -362,9 +362,12 @@ function stepCounts(bundle: Bundle | null, skills: readonly SkillName[]): Steps 
 // The steps as the files and recorded events show them, and how many event lines were skipped as unreadable.
 interface Progress { items: StepProgress[]; skipped: number }
 
+// Claude Code and Codex in Auto show the Wizard the agent's handoffs; Cursor and Manual don't.
+const observedRun = (receipt: Receipt) => receipt.client !== null && receipt.mode !== 'manual' && EVENT_SURFACE[receipt.client] === 'observed';
+
 function currentProgress(receipt: Receipt, steps: Steps): Progress {
   const { events, skipped } = readObservedEvents(eventsPath(receipt.repo));
-  return { items: progress(receipt.repo, receipt.exclude, steps, events), skipped };
+  return { items: progress(receipt.repo, receipt.exclude, steps, events, observedRun(receipt)), skipped };
 }
 
 const skippedNote = (skipped: number) =>
@@ -391,6 +394,7 @@ function printSteps(io: Prompter, { items, skipped }: Progress, observed: boolea
 }
 
 const LEGEND = "✓ means the file and your agent's handoff agree. I read each file myself; a handoff is what your agent reported.";
+const FILE_LEGEND = "✓ means the file says the step is done. I read each file myself; I can't see your agent's handoffs here.";
 
 // ---------- Session ----------
 
@@ -554,7 +558,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const page = client === 'codex' && !manual ? await checklistPage(render) : null;
   io.say(io.bold(`Your session in ${label}: ${stepTitles(run)}`));
   if (done.length) io.say(`  ${titleList(done)} ${done.length === 1 ? 'is' : 'are'} done; I read that from ${done.length === 1 ? 'its file' : 'their files'}. I'll start at ${first.title}.`);
-  if (manual) return manualSession(io, receipt, steps, run);
+  if (manual) return manualSession(io, receipt, steps, run, ready.bundle);
   const watch = page ? `Follow the checklist at ${page.url}` : client === 'claude' ? 'Its status line shows the checklist as it goes' : "I can't watch Cursor's progress; when it stops I read the files the skills wrote";
   io.say(`  ${label} opens here and runs ${run.length === 1 ? 'the step' : 'these steps'} in one session. ${watch}.`);
   io.say('  Answer its questions there, and approve or deny each change and each Sandbox request. Starting isn\'t approval of anything.');
@@ -673,7 +677,7 @@ function handoffFor(receipt: Receipt, run: readonly SkillName[]): Handoff {
 }
 
 // Manual: the developer runs the program in their own agent and the files decide. I start no process.
-async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[]): Promise<number> {
+async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[], bundle: Bundle): Promise<number> {
   const label = CLIENT_LABEL[receipt.client!];
   const { prompt, steps: todo } = handoffFor(receipt, run);
   io.say("  Manual: I start no agent. Here's the handoff:");
@@ -689,7 +693,7 @@ async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: 
   const now = currentProgress(receipt, steps);
   const next = nextStep(now.items);
   finish(receipt, next ? 'ready' : 'completed', next ? `next: ${SKILLS[next].title}` : 'every step is done and on file');
-  return printReport(io, receipt, now, null);
+  return printReport(io, receipt, now, bundle);
 }
 
 // ---------- Report ----------
@@ -738,8 +742,9 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   row(io, 'Run record', `${WIZARD_DIR}/receipt.json and ${WIZARD_DIR}/events.jsonl`);
   io.say();
   io.say(io.bold('Steps'));
-  printSteps(io, now, receipt.client !== null && receipt.mode !== 'manual' && EVENT_SURFACE[receipt.client] === 'observed');
-  io.say(`  ${LEGEND}`);
+  const observed = observedRun(receipt);
+  printSteps(io, now, observed);
+  io.say(`  ${observed ? LEGEND : FILE_LEGEND}`);
   io.say();
   const changed = [...new Set(receipt.sessions.flatMap((s) => s.changedFiles))].sort();
   io.say(io.bold('Changed files (I compared them before and after each session)'));
@@ -752,14 +757,16 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   io.say('  I sent no Straddle request and ran no test. The checks your agent reports running are its own.');
   io.say();
   const printed = receipt.sessions.findLast((s) => s.checklist.length);
+  // Else the skill's own checklist, for the last step this run's sessions covered that the files say finished, or
+  // that has no file to say so (Audit, Get started): never a step that hasn't run.
+  const ran = now.items.findLast((p) => (p.finished || p.record === null) && !p.skipped && receipt.sessions.some((s) => s.skills.includes(p.skill)))?.skill;
   if (printed) {
     io.say(io.bold('Verify before merging (as your agent last printed it)'));
     for (const item of printed.checklist) io.say(`  ${item}`);
     io.say();
-  } else if (bundle && receipt.sessions.length) {
-    const skill = receipt.sessions.at(-1)!.skills.at(-1)!;
-    io.say(io.bold(`Verify before merging (from the ${skill} ${bundle.skills[skill]?.version ?? ''} skill; your agent didn't print it)`));
-    for (const item of checklistFromBundle(bundle, skill)) io.say(`  ${item}`);
+  } else if (bundle && ran) {
+    io.say(io.bold(`Verify before merging (from the ${ran} ${bundle.skills[ran]?.version ?? ''} skill; ${receipt.mode === 'manual' ? "I can't see what your agent printed" : "your agent didn't print it"})`));
+    for (const item of checklistFromBundle(bundle, ran)) io.say(`  ${item}`);
     io.say();
   }
   printInStraddle(io, receipt);
@@ -840,7 +847,7 @@ function printSaved(io: Prompter, receipt: Receipt, now: Progress): void {
   row(io, 'Framework', answerText(receipt.context.framework, []));
   row(io, 'Choices', choicesText(receipt));
   if (receipt.exclude.length) row(io, 'Never opened', receipt.exclude.join(', '));
-  printSteps(io, now, receipt.client !== null && receipt.mode !== 'manual' && EVENT_SURFACE[receipt.client] === 'observed');
+  printSteps(io, now, observedRun(receipt));
   io.say("  Sandbox write approvals from earlier sessions don't carry over. A recorded plan approval does, while the plan is unchanged.");
   io.say('  I recheck the skills, your agent and your files before we continue.');
   io.say();
@@ -921,6 +928,7 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
   const files = program === 'integration' ? existingContractFiles(repo) : [];
   if (loaded.kind === 'found' || files.length) {
     let label: string | null;
+    let skippable: string | null = null;
     if (loaded.kind === 'found') {
       const saved = loaded.receipt;
       saved.exclude = [...new Set([...saved.exclude, ...opts.exclude])];
@@ -928,6 +936,7 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
       printSaved(io, saved, now);
       const at = nextStep(now.items);
       label = at ? `Resume the ${saved.program} run at ${SKILLS[at].title}` : null;
+      skippable = goLiveSkippable(now.items);
     } else {
       const now = currentProgress({ ...newReceipt({ repo, program, pid: process.pid }), exclude: opts.exclude }, programSkills(program, discover(repo, opts.exclude).providers).map((skill) => ({ skill, total: 0 })));
       io.say(io.bold('This repo already has Straddle files from an earlier run'));
@@ -938,10 +947,12 @@ export async function start(program: ProgramName, opts: JourneyOptions): Promise
     }
     const next = await io.choose('Start fresh or resume?', [
       ...(label ? [{ label, value: 'resume' as const }] : []),
+      ...(skippable ? [{ label: FINISH_HERE, value: 'finish' as const }] : []),
       { label: 'Start fresh (I keep your current files beside the new ones)', value: 'fresh' as const },
       { label: 'Cancel', value: 'cancel' as const },
     ], 0);
     io.say();
+    if (next === 'finish' && loaded.kind === 'found') return finishWithoutGoLive(io, loaded.receipt, skippable!);
     if (next === 'resume') return loaded.kind === 'found' ? resumeRun(io, loaded.receipt, opts, false) : newRun('integration', opts, loaded, false);
     if (next !== 'fresh') { io.say('Cancelled. Nothing changed.'); return 130; }
   }

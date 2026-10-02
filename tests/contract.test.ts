@@ -90,7 +90,7 @@ test('state files written from the skills\' own templates carry the program thro
   }
 
   const steps = PROGRAM.map((skill) => ({ skill, total: 0 }));
-  const items = progress(repo, [], steps, []);
+  const items = progress(repo, [], steps, [], true);
   assert.equal(nextStep(items), null, items.map((p) => `${p.skill}: ${p.record?.detail}`).join('\n'));
 });
 

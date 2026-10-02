@@ -404,6 +404,22 @@ test('Test done, Go Live left: choosing resume keeps Go Live next, and `wizard r
   assert.match(afterGoLive.stdout, /Everything in the saved integration run is done and on file\. There's nothing to resume\.\n$/);
 });
 
+test('Test done, Go Live left: plain `wizard` offers to finish here like `wizard resume` does, and finishing never reopens Go Live', async () => {
+  const repo = nextRepo();
+  const claude = fakeClaude();
+  claude.sessions(STOP_AFTER_TEST);
+
+  // Start, then Resume at Go Live later. Then plain `wizard`: Finish here.
+  await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1', '1'] });
+  const again = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+
+  // Catches: plain `wizard` only reopening Go Live, so finishing needs `wizard resume`.
+  assert.equal(again.code, 0, again.stdout);
+  assert.match(again.stdout, /Start fresh or resume\?\n\s+1\) Resume the integration run at Go Live\n\s+2\) Finish here \(skip Go Live\)\n\s+3\) Start fresh \(I keep your current files beside the new ones\)\n\s+4\) Cancel\nChoose \[1\]: \n\nFinished, without Go Live\./);
+  assert.equal(launches(claude).length, 1);
+  assert.deepEqual([readReceipt(repo).state, readReceipt(repo).stateReason], ['completed', 'you finished after Test and skipped Go Live']);
+});
+
 test('a plan edited after finishing without Go Live voids the finish: resume goes back to Plan and offers no finish', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
@@ -421,7 +437,7 @@ test('a plan edited after finishing without Go Live voids the finish: resume goe
   assert.deepEqual(json.run.skippedSteps, []);
 });
 
-test('Test not complete: neither the exit summary nor resume offers to finish without Go Live', async () => {
+test('Test not complete: neither the exit summary, resume nor plain `wizard` offers to finish without Go Live', async () => {
   const repo = nextRepo();
   const claude = fakeClaude();
   claude.sessions({
@@ -431,11 +447,13 @@ test('Test not complete: neither the exit summary nor resume offers to finish wi
 
   const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
   const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+  const plain = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: ['3'] });
 
   // Catches: finishing offered while Test is unfinished.
   assert.match(first.stdout, /Next: fix what stopped the run \(Test stopped at failed;[^\n]*\), then run `wizard resume` and I'll reopen the session at Test\./);
   assert.match(resumed.stdout, /Next\n\s+1\) Resume at Test\n\s+2\) Cancel\n/);
-  for (const out of [first.stdout, resumed.stdout]) assert.doesNotMatch(out, /Finish here/);
+  assert.match(plain.stdout, /Start fresh or resume\?\n\s+1\) Resume the integration run at Test\n\s+2\) Start fresh[^\n]*\n\s+3\) Cancel\n/);
+  for (const out of [first.stdout, resumed.stdout, plain.stdout]) assert.doesNotMatch(out, /Finish here/);
 });
 
 test('Go Live already reported not ready for this plan: no finish is offered, so the not-ready result stays in view', async () => {
@@ -448,11 +466,13 @@ test('Go Live already reported not ready for this plan: no finish is offered, so
 
   const first = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
   const resumed = await runWizard(['resume'], { cwd: repo, claude, env: CONFIGURED, input: ['2'] });
+  const plain = await runWizard([], { cwd: repo, claude, env: CONFIGURED, input: ['3'] });
 
   // Catches: finishing offered after Go Live ran, which would turn its not-ready row into "skipped".
   assert.match(first.stdout, /Next: fix what stopped the run \(Go Live stopped at not_ready;[^\n]*\), then run `wizard resume` and I'll reopen the session at Go Live\./);
   assert.match(resumed.stdout, /Go Live\s+straddle-go-live-report\.md: Status: not ready \(no Production webhook secret\)[^\n]*\n[\s\S]*Next\n\s+1\) Resume at Go Live\n\s+2\) Cancel\n/);
-  for (const out of [first.stdout, resumed.stdout]) assert.doesNotMatch(out, /Finish here/);
+  assert.match(plain.stdout, /Start fresh or resume\?\n\s+1\) Resume the integration run at Go Live\n\s+2\) Start fresh[^\n]*\n\s+3\) Cancel\n/);
+  for (const out of [first.stdout, resumed.stdout, plain.stdout]) assert.doesNotMatch(out, /Finish here/);
 });
 
 test('with Straddle files already here, the Wizard asks to start fresh or resume: fresh sets them aside only once the run is confirmed, resume starts at the first unfinished step', async () => {
@@ -967,6 +987,61 @@ test('Manual starts no agent process for any client: it prints the paste text, a
     assert.match(resumed.stdout, paste);
     // Every call a fake recorded is an inspection: no agent ran.
     for (const call of fake.calls()) assert.match(call, /^(claude|codex|cursor-agent) (--version|status|auth status --json|login status|plugin (marketplace )?list --json|mcp list --json)$/, `${client}: ${call}`);
+  }
+});
+
+test('with no checklist printed, the report shows the "Verify before merging" checklist of the last skill this run finished, or ran when it has no state file, and none before', async () => {
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+  const env = { ...CONFIGURED, ...fake.env };
+  const verify = (skill: string) => new RegExp(`Verify before merging \\(from the ${skill} 0\\.1\\.0 skill; I can't see what your agent printed\\)\\n`);
+  const setupChecklist = /\n\s+- \[ \] No API key, token, or `\.env` content appears in this report or the conversation\.\n/;
+
+  // The setup program, with Setup's file done: the choices, then "I'm back".
+  const single = nextRepo();
+  writeFiles(single, { 'straddle-setup.md': SETUP_FILE });
+  const r = await runWizard(['setup', '--client', 'cursor', '--mode', 'manual'], { cwd: single, env, input: [...CHOICES, '1'] });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, verify('straddle-setup'));
+  assert.match(r.stdout, setupChecklist);
+
+  // The integration program: "I'm back" with nothing done, then Setup done and `wizard resume` at Plan.
+  const repo = nextRepo();
+  const none = await runWizard(['--client', 'cursor', '--mode', 'manual'], { cwd: repo, env, input: [...CHOICES, '1'] });
+  writeFiles(repo, { 'straddle-setup.md': SETUP_FILE });
+  const setup = await runWizard(['resume'], { cwd: repo, env, input: ['1', '1'] });
+
+  // Catches: Go Live's Production checklist under a run that hasn't reached Go Live.
+  assert.equal(none.code, 0, none.stdout + none.stderr);
+  assert.doesNotMatch(none.stdout, /Verify before merging/);
+  assert.equal(setup.code, 0, setup.stdout + setup.stderr);
+  assert.match(setup.stdout, /Reason\s+next: Plan/);
+  assert.match(setup.stdout, verify('straddle-setup'));
+  assert.match(setup.stdout, setupChecklist);
+
+  // Audit writes no state file to say it finished, so the session running it is enough: Continue, then "I'm back"
+  // (Manual) or Start (Cursor Auto).
+  // Catches: no checklist at all for a skill without a state file.
+  for (const [mode, why] of [['manual', "I can't see what your agent printed"], ['auto', "your agent didn't print it"]] as const) {
+    const audit = await runWizard(['audit', '--client', 'cursor', '--mode', mode], { cwd: nextRepo(), env, input: ['1', '1'] });
+    assert.equal(audit.code, 0, `${mode}: ${audit.stdout}${audit.stderr}`);
+    assert.match(audit.stdout, new RegExp(`Verify before merging \\(from the straddle-audit 0\\.1\\.0 skill; ${why}\\)\\n\\s+- \\[ \\] Each finding cites application \`file:line\``), mode);
+  }
+});
+
+test('Cursor and Manual reports tick a step whose file says done, with no handoff to compare; Claude Code still needs its handoff', async () => {
+  for (const [client, mode, tick] of [['cursor', 'auto', '✓'], ['cursor', 'manual', '✓'], ['codex', 'manual', '✓'], ['claude', 'auto', ' ']] as const) {
+    const repo = nextRepo();
+    writeFiles(repo, { 'straddle-setup.md': SETUP_FILE });
+    const fake = fakeClients('✓ Logged in as dev@example.com');
+    const claude = fakeClaude();
+    // Claude Code's session prints no handoff, so its file alone doesn't tick Setup.
+    claude.sessions({ 'straddle-setup': { text: 'Setup is done.' } });
+
+    // The choices, then Start (Auto) or "I'm back" (Manual).
+    const r = await runWizard(['setup', '--client', client, '--mode', mode], { cwd: repo, claude: client === 'claude' ? claude : undefined, env: { ...CONFIGURED, ...(client === 'claude' ? {} : fake.env) }, input: [...CHOICES, '1'] });
+
+    assert.equal(r.code, 0, `${client} ${mode}: ${r.stdout}${r.stderr}`);
+    assert.equal(/\n {2}(.) Setup +straddle-setup\.md: Status: complete · no handoff reported/.exec(r.stdout)?.[1], tick, `${client} ${mode}: ${r.stdout}`);
   }
 });
 
