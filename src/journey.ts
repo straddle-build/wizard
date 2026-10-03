@@ -39,11 +39,17 @@ const STATUSLINE_SCRIPT = join(dirname(here), `statusline${extname(here)}`);
 // The Straddle dashboard serves Sandbox and Production at one address; its Sandbox switch picks the environment.
 const DASHBOARD = 'https://dashboard.straddle.com';
 
-// The receipt a Ctrl-C at a Wizard prompt must mark as aborted. While an agent client runs, it owns Ctrl-C.
-const active: { receipt: Receipt | null; clientRunning: boolean } = { receipt: null, clientRunning: false };
+// The receipt a Ctrl-C at a Wizard prompt must mark as aborted. While an agent client runs, it owns Ctrl-C. Once a
+// session's report is out, its outcome is saved and `settled` holds its exit code: a Ctrl-C at a later optional
+// question leaves both alone.
+const active: { receipt: Receipt | null; clientRunning: boolean; settled: number | null } = { receipt: null, clientRunning: false, settled: null };
 
 export function handleInterrupt(io: Prompter): void {
   if (active.clientRunning) return;
+  if (active.settled !== null) {
+    io.say();
+    process.exit(active.settled);
+  }
   if (active.receipt) {
     finish(active.receipt, 'aborted', 'you cancelled at a Wizard prompt');
     io.say('\nStopped. Everything done so far stays in place. Run `wizard resume` to pick up where you left off.');
@@ -676,7 +682,10 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   io.say();
   if (skills.includes('straddle-audit')) showAuditFindings(io, receipt);
   const code = await printReport(io, receipt, atEnd, ready.bundle);
-  if (opts.offerLog && events.length) await offerLog(io, repo);
+  if (opts.offerLog && events.length) {
+    active.settled = code;
+    await offerLog(io, repo);
+  }
   return code;
 }
 

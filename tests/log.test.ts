@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { lstatSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -87,32 +88,56 @@ const PLANTED = {
   home: '/Users/dana',
 };
 
-test('planted secrets (keys, bearer, KEY=value, paykey, JWT, hex, signature, account number, home directory) never reach the page', async () => {
+test('planted secrets never reach the page, in commands, results, diffs, written files, questions, MCP calls, long fields and Markdown replies', async () => {
   const s = PLANTED;
   const repo = recorded([
     assistant('2026-10-03T10:00:03.000Z', { type: 'tool_use', id: 't1', name: 'Bash', input: { command: `STRADDLE_API_KEY=${s.envKey} curl -H "Authorization: Bearer ${s.bearer}" -d '{"account_number": "${s.account}"}'` } }),
     result('t1', `{"paykey": "${s.paykey}", "token": "${s.jwt}"}\nStraddle-Signature: ${s.signature}`),
+    assistant('2026-10-03T10:00:03.100Z', { type: 'tool_use', name: 'Edit', input: { file_path: '/repo/lib/straddle.ts', old_string: "const key = ''", new_string: `const key = "${s.key}"` } }),
+    assistant('2026-10-03T10:00:03.200Z', { type: 'tool_use', id: 't4', name: 'AskUserQuestion', input: { questions: [{ question: `Approve the charge with paykey ${s.jwt}?` }] } }),
+    result('t4', `User has answered your questions: "Approve?"="Yes, use ${s.key}". You can now continue.`),
+    assistant('2026-10-03T10:00:03.300Z', { type: 'tool_use', id: 't5', name: 'mcp__plugin_straddle_straddle-api__execute-request', input: { method: 'POST', path: '/v1/charges' } }),
+    result('t5', `{"api_key":"${s.envKey}","id":"01a0f80f-e858-4c1e-9d3b-2f5a6b7c8d9e"}`),
+    assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
+    result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
+    // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
+    assistant('2026-10-03T10:00:03.600Z', { type: 'tool_use', name: 'Grep', input: { pattern: `${'a'.repeat(1978)}api_key=${s.envKey}` } }),
     assistant('2026-10-03T10:00:04.000Z', { type: 'tool_use', name: 'Write', input: { file_path: `${s.home}/shop/.env.local`, content: `STRADDLE_WEBHOOK_SECRET=${s.webhook}\nHASH=${s.hex}` } }),
-    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
+    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\napi_key: \`${s.envKey}\`\n**API key:** \`${s.envKey}\`\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
   ].join('\n'));
   const html = await page(repo);
   for (const [name, secret] of Object.entries(PLANTED)) assert.ok(!html.includes(secret), `planted ${name} is on the page`);
-  assert.ok(!html.includes('021000021'), 'routing number is on the page');
+  for (const piece of ['021000021', 'FAKEK', '/home/dana']) assert.ok(!html.includes(piece), `${piece} is on the page`);
   // The surrounding text stays readable; only the values go. `Authorization: Bearer` loses both words, as in Northwind.
   const rows = sections(html)[1]![1] as string[];
-  assert.ok(rows.includes('Bash: $ STRADDLE_API_KEY=[redacted] curl -H &#34;Authorization: [redacted] [redacted]&#34; -d &#39;{&#34;account_number&#34;: &#34;[redacted]&#34;}&#39;'), rows.join('\n---\n'));
-  assert.ok(rows.includes('Write: ~/shop/.env.local'), rows.join('\n---\n'));
+  for (const expected of [
+    'Bash: $ STRADDLE_API_KEY=[redacted] curl -H &#34;Authorization: [redacted] [redacted]&#34; -d &#39;{&#34;account_number&#34;: &#34;[redacted]&#34;}&#39;',
+    'Edit: /repo/lib/straddle.ts',
+    'straddle-api execute-request: method: POST\npath: /v1/chargesresult',
+    'Bash: $ ls ~/straddle-demo/bin',
+    `Grep: pattern: ${'a'.repeat(1978)}api_key=[reda\n… 5 more characters`,
+    'Write: ~/shop/.env.local',
+  ]) assert.ok(rows.includes(expected), `${expected.slice(0, 60)} missing from\n${rows.join('\n---\n')}`);
   const text = shown(html);
-  assert.ok(text.includes('{&quot;paykey&quot;: &quot;[redacted]&quot;, &quot;token&quot;: &quot;[redacted]&quot;}Straddle-Signature: [redacted],[redacted]') || text.includes('{"paykey": "[redacted]", "token": "[redacted]"}Straddle-Signature: [redacted],[redacted]'), 'the paired result is redacted');
-  assert.ok(text.includes('STRADDLE_WEBHOOK_SECRET=[redacted][redacted]'), 'the written file is redacted');
+  for (const expected of [
+    '{&quot;paykey&quot;: &quot;[redacted]&quot;, &quot;token&quot;: &quot;[redacted]&quot;}Straddle-Signature: [redacted],[redacted]',
+    'const key = &quot;[redacted]&quot;',
+    'Approve the charge with paykey [redacted]?',
+    '=&quot;Yes, use [redacted]&quot;',
+    '01a0f80f-e858-4c1e-9d3b-2f5a6b7c8d9e',
+    '~/straddle-demo/bin/straddle~/.npm/_logs/debug-0.log',
+    'STRADDLE_WEBHOOK_SECRET=[redacted][redacted]',
+    'api_key: [redacted]',
+    'API key: [redacted]',
+  ]) assert.ok(text.includes(expected) || text.includes(expected.replaceAll('&quot;', '"')), `${expected} missing`);
   // A prose account number before a full stop, and a bare one in a table cell, go; the timestamp beside it stays.
   assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\. Use account \[redacted\]\./);
   assert.match(html, /│ \[redacted\] *│ 2026-10-03T10:00:05Z │/);
 });
 
-test('a resumed session names its transcript twice: every row shows once, a call keeps its result across the resume, and a report renders as on the terminal', async () => {
+test('a resumed session names its transcript twice: every row shows once, a call keeps its result across the resume, and a report renders as on the terminal with a table screen readers can read', async () => {
   const repo = recorded([
-    assistant('2026-10-03T10:00:07.000Z', { type: 'text', text: '## Setup report\n- **Status:** complete\n\n| Check | Result |\n| --- | --- |\n| CLI | ok |' }),
+    assistant('2026-10-03T10:00:07.000Z', { type: 'text', text: '## Setup report\n- **Status:** complete\n\n| `Check` | Result |\n| --- | --- |\n| CLI | **ok** |' }),
     assistant('2026-10-03T10:00:07.500Z', { type: 'tool_use', id: 'r1', name: 'Bash', input: { command: 'straddle --version' } }),
     // Written after the resume below (second session-start at :08).
     JSON.stringify({ type: 'user', timestamp: '2026-10-03T10:00:09.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 'r1', content: 'straddle 1.0.3' }] } }),
@@ -124,10 +149,13 @@ test('a resumed session names its transcript twice: every row shows once, a call
   assert.equal(html.split('Setup report').length, 2, html);
   assert.deepEqual(sections(html).flatMap(([, rows]) => rows as string[]).filter((r) => r.startsWith('Bash: ')), ['Bash: $ straddle --version']);
   assert.ok(shown(html).includes('$ straddle --versionstraddle 1.0.3'), 'the result written after the resume is paired');
-  const report = sections(html).flatMap(([, rows]) => rows as string[]).find((r) => r.startsWith('agent: '))!.replace(/<[^>]+>/g, '');
-  assert.equal(report, 'agent: Setup report\n• Status: complete\n\n┌───────┬────────┐\n│ Check │ Result │\n├───────┼────────┤\n│ CLI   │ ok     │\n└───────┴────────┘');
-  // The report keeps the terminal's 96 columns and scrolls sideways on a phone, so the keyboard can reach it.
+  // The prose as on the terminal; the table drawn as on the terminal for the eye, with no color code left in the
+  // header that holds inline code, and as a real table for a screen reader.
   assert.match(html, /<span class="who">agent<\/span><div class="body"><pre class="md" tabindex="0">/);
+  assert.ok(!html.includes('\x1b') && !html.includes('[1m') && !html.includes('[0m'), 'a terminal color code is on the page');
+  const art = /<pre aria-hidden="true">([\s\S]*?)<\/pre>/.exec(html)![1]!.replace(/<[^>]+>/g, '');
+  assert.equal(art, '┌───────┬────────┐\n│ Check │ Result │\n├───────┼────────┤\n│ CLI   │ ok     │\n└───────┴────────┘');
+  assert.ok(html.includes('<table class="visually-hidden"><thead><tr><th scope="col">Check</th><th scope="col">Result</th></tr></thead><tbody><tr><td>CLI</td><td>ok</td></tr></tbody></table>'), html);
 });
 
 test('Codex session: the rollout found by session id gives its tool calls and replies under the step', async () => {
@@ -179,6 +207,20 @@ test('transcript moved: the page still shows the recorded steps and says the tra
   const repo = recorded(null);
   const html = await page(repo);
   assert.match(html, /The client transcript is missing \(moved or deleted\): .*session\.jsonl\. Showing the Wizard's events only\./);
+  assert.deepEqual([...html.matchAll(/<h2>(.*?)<\/h2>/g)].map((m) => m[1]), ['Session start', 'straddle-setup · 01-begin', 'straddle-plan · 01-begin']);
+  assert.match(html, /Edited straddle-setup\.md/);
+});
+
+test('a transcript path that is a directory or a FIFO: the page still shows the recorded events, says why, and never hangs', async () => {
+  const repo = recorded(null);
+  const fifo = join(tempDir('log-fifo'), 'transcript.jsonl');
+  execFileSync('mkfifo', [fifo]);
+  const dir = tempDir('log-dir-transcript');
+  const events = readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8').split('\n').filter(Boolean).slice(1);
+  writeFiles(repo, { '.straddle-wizard/events.jsonl': [{ at: '2026-10-03T10:00:00.000Z', kind: 'session-start', session: 'abc12345-0000', transcript: dir }, { at: '2026-10-03T10:00:01.000Z', kind: 'session-start', session: 'abc12345-0001', transcript: fifo }].map((e) => JSON.stringify(e)).concat(events).join('\n') + '\n' });
+  const html = await page(repo);
+  assert.ok(html.includes(`The client transcript isn't a regular file I can read: ${dir}. Showing the Wizard's events only.`), html);
+  assert.ok(html.includes(`The client transcript isn't a regular file I can read: ${fifo}. Showing the Wizard's events only.`), html);
   assert.deepEqual([...html.matchAll(/<h2>(.*?)<\/h2>/g)].map((m) => m[1]), ['Session start', 'straddle-setup · 01-begin', 'straddle-plan · 01-begin']);
   assert.match(html, /Edited straddle-setup\.md/);
 });

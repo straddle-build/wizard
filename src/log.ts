@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findRollout } from './codex.ts';
+import { openRegular } from './discovery.ts';
 import { readObservedEvents, type ObservedEvent } from './events.ts';
 import { field, parseJson, text } from './json.ts';
 import { WIZARD_DIR } from './receipt.ts';
-import { markdown } from './tui.ts';
+import { markdown, tableCells } from './tui.ts';
 import type { Prompter } from './ui.ts';
 
 // A tool call's highlighted view, as Northwind's integration log draws it (app/integration-log/code.ts).
@@ -19,17 +20,24 @@ type Entry =
   | { at: string; kind: 'event'; text: string };
 
 interface Step { title: string; entries: Entry[] }
-interface SessionLog { steps: Step[]; missingTranscripts: string[] }
+// A transcript the session named but the page can't show, and why.
+interface Unavailable { path: string; problem: string }
+interface SessionLog { steps: Step[]; unavailable: Unavailable[] }
 
 // Northwind's integration log rules (lib/recorded-session.ts): sk_/pk_/rk_/whsec_ keys, Bearer and Basic credentials,
 // `KEY=value` and `"secret": "value"` pairs, JWTs, long base64/hex runs, and home directories as `~`. Order matters:
 // Bearer before `Authorization:`. Added here: account and routing numbers, named or standing alone as 8 to 17 digits
-// (a table cell, a sentence); digits inside a timestamp, path, version or id stay.
+// (a table cell, a sentence), where digits inside a timestamp, path, version or id stay; and Markdown around a named
+// value (`**API key:** \`value\``). A named rule matches at the separator and finds the name by looking behind it, so
+// the name is never consumed and each separator looks back over one run of name characters: matching from the start
+// of the name retried a `[\w-]*` at every word boundary and made long hyphenated text quadratic.
+const named = (name: string, value: string) =>
+  new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=][*\s]*\\*["'\x60]?)${value}`, 'gi');
 const SECRETS: [RegExp, string][] = [
   [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_-]{6,}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
-  [/\b([\w-]*(?:api[_-]?key|secret|token|password|paykey|signature|authorization)[\w-]*)(\\*["']?\s*[:=]\s*\\*["']?)(?!\[redacted\])[^\s"'`,;\\}]{6,}/gi, '$1$2[redacted]'],
-  [/\b([\w-]*(?:account|routing)[_ -]?(?:number|num|no)?[\w-]*)(\\*["']?\s*[:=]\s*\\*["']?)\d{4,17}\b/gi, '$1$2[redacted]'],
+  [named('(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)', String.raw`(?!\[redacted\])[^\s"'\x60,;\\}*]{6,}`), '$1[redacted]'],
+  [named('(?:account|routing)[_ -]?(?:number|num|no)?', String.raw`\d{4,17}\b`), '$1[redacted]'],
   [/(?<![\w.:/-])\d{8,17}(?![\w:/-]|[.,]\d)/g, '[redacted]'],
   [/\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g, '[redacted]'],
   [/(?<![\w+=])(?=[\w+=]*\d)(?=[\w+=]*[A-Za-z])[A-Za-z0-9+_=]{32,}/g, '[redacted]'],
@@ -39,6 +47,10 @@ const SECRETS: [RegExp, string][] = [
 function redact(raw: string): string {
   return SECRETS.reduce((s, [pattern, replacement]) => s.replace(pattern, replacement), raw);
 }
+
+// Long outputs and inputs stop at 2000 characters, always after redaction, so a clip never splits a secret past its rule.
+const CLIP = 2000;
+const clip = (s: string) => (s.length > CLIP ? `${s.slice(0, CLIP)}\n… ${s.length - CLIP} more characters` : s);
 
 const eventText = (e: ObservedEvent): string | null => {
   switch (e.kind) {
@@ -65,7 +77,6 @@ const LANG: Record<string, string> = { ts: 'ts', tsx: 'tsx', js: 'js', jsx: 'jsx
 // Northwind's block(): Bash shows `$ command` over its output in a terminal frame; Edit's old and new lines become a
 // diff in the file's language; Write shows the file; any other call shows its result, as JSON when it reads as JSON.
 // A Codex shell call reads as Bash. A call with no recorded result and nothing of its own to show gets no block.
-// Redaction runs before the 2000-character clip, so a clip never splits a secret past its rule.
 function toolBlock(name: string, input: unknown, result: string): CodeBlock | null {
   const s = (k: string) => text(field(input, k)) ?? '';
   const words = field(input, 'command');
@@ -79,8 +90,7 @@ function toolBlock(name: string, input: unknown, result: string): CodeBlock | nu
     : result ? { code: result, language: /^\s*[[{]/.test(result) ? 'json' : 'txt', props: { frame: 'none' } }
     : null;
   if (!block) return null;
-  const code = redact(block.code);
-  return { ...block, code: code.length > 2000 ? `${code.slice(0, 2000)}\n… ${code.length - 2000} more characters` : code, props: { ...block.props, ...(block.props.title === undefined ? {} : { title: redact(block.props.title) }) } };
+  return { ...block, code: clip(redact(block.code)), props: { ...block.props, ...(block.props.title === undefined ? {} : { title: redact(block.props.title) }) } };
 }
 
 // The text of a Claude Code tool_result or a Codex call output, which may wrap it as `{"output": …}`.
@@ -92,8 +102,8 @@ function resultText(value: unknown): string {
 
 // Claude Code transcripts and Codex rollouts: assistant text and tool calls, timestamped, each call with the result
 // recorded for it (paired by id, so a resumed session appending to the same file keeps its pairs).
-function transcriptEntries(path: string): Entry[] {
-  const rows = readFileSync(path, 'utf8').split('\n').map(parseJson);
+function transcriptEntries(content: string): Entry[] {
+  const rows = content.split('\n').map(parseJson);
   const results = new Map<string, string>();
   for (const row of rows) {
     const payload = field(row, 'payload');
@@ -133,21 +143,38 @@ function transcriptEntries(path: string): Entry[] {
   });
 }
 
+// The transcript path comes from events.jsonl in the repository, so it is read the way discovery reads repository
+// files: a regular file only, never through a symlink, without blocking on a FIFO, and only up to a size bound. A
+// directory, device or FIFO there leaves the page showing the recorded events.
+const TRANSCRIPT_LIMIT = 256 * 2 ** 20;
+function readTranscript(path: string): { text: string } | Unavailable {
+  const file = openRegular(path);
+  if (!file) return { path, problem: existsSync(path) ? "isn't a regular file I can read" : 'is missing (moved or deleted)' };
+  try {
+    if (file.size > TRANSCRIPT_LIMIT) return { path, problem: `is over ${TRANSCRIPT_LIMIT / 2 ** 20} MB` };
+    const buf = Buffer.allocUnsafe(file.size);
+    let n = 0;
+    for (let r = 1; n < file.size && r > 0; n += r) r = readSync(file.fd, buf, n, file.size - n, n);
+    return { text: buf.toString('utf8', 0, n) };
+  } finally {
+    closeSync(file.fd);
+  }
+}
+
 // Null when the Wizard recorded no session here.
 function sessionLog(repo: string): SessionLog | null {
   const { events } = readObservedEvents(join(repo, WIZARD_DIR, 'events.jsonl'));
   if (!events.length) return null;
   // Claude Code's hook names its transcript; a Codex session is found by id among its rollouts. One not found is
   // listed by what it would have been.
-  const transcripts = [...new Set(events.flatMap((e) => (e.kind !== 'session-start' ? [] : e.transcript ? [e.transcript] : e.session ? [findRollout(process.env, repo, 0, e.session) ?? `the Codex rollout for session ${e.session}`] : [])))];
-  const missingTranscripts = transcripts.filter((t) => !existsSync(t));
+  const transcripts = [...new Set(events.flatMap((e) => (e.kind !== 'session-start' ? [] : e.transcript ? [e.transcript] : e.session ? [findRollout(process.env, repo, 0, e.session) ?? `the Codex rollout for session ${e.session}`] : [])))].map(readTranscript);
   const entries: Entry[] = [
     ...events.flatMap((e): Entry[] => {
       if (e.kind === 'step-entered') return [{ at: e.at, kind: 'step', title: `${e.skill} · ${e.step}`, file: `/skills/${e.skill}/steps/${e.step}.md` }];
       const line = eventText(e);
       return line ? [{ at: e.at, kind: 'event', text: line }] : [];
     }),
-    ...transcripts.filter((t) => existsSync(t)).flatMap(transcriptEntries),
+    ...transcripts.flatMap((t) => ('text' in t ? transcriptEntries(t.text) : [])),
   ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   const steps: Step[] = [{ title: 'Session start', entries: [] }];
   for (const e of entries) {
@@ -157,17 +184,17 @@ function sessionLog(repo: string): SessionLog | null {
     const opener = last?.kind === 'tool' && last.input.includes(e.file) ? steps.at(-1)!.entries.pop()! : null;
     steps.push({ title: e.title, entries: opener ? [opener] : [] });
   }
-  return { steps: steps.filter((s, i) => i > 0 || s.entries.length), missingTranscripts };
+  return { steps: steps.filter((s, i) => i > 0 || s.entries.length), unavailable: transcripts.flatMap((t) => ('problem' in t ? [t] : [])) };
 }
 
 const escape = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 // Redaction first, then HTML escaping, for every recorded string the page shows.
 const clean = (s: string) => escape(redact(s));
 
-// An agent reply after redaction, split at its fenced code. Prose goes through the Wizard's own terminal Markdown
-// renderer (box-drawn tables, headings, lists, bold, code), so it reads like the report screens; each fence is
-// highlighted like tool output, in the language its opening line names.
-type ReplyPart = { prose: string } | { block: CodeBlock };
+// An agent reply after redaction, split at its fenced code and its pipe tables. Prose goes through the Wizard's own
+// terminal Markdown renderer (headings, lists, bold, code), so it reads like the report screens; each fence is
+// highlighted like tool output, in the language its opening line names; each table is drawn as the terminal draws it.
+type ReplyPart = { prose: string } | { table: string[] } | { block: CodeBlock };
 function replyParts(raw: string): ReplyPart[] {
   const parts: ReplyPart[] = [];
   const lines = redact(raw).split('\n');
@@ -178,17 +205,46 @@ function replyParts(raw: string): ReplyPart[] {
   };
   for (let i = 0; i < lines.length; i++) {
     const fence = /^\s*```\s*([\w+#.-]*)/.exec(lines[i]!);
-    if (!fence) { prose.push(lines[i]!); continue; }
-    flush();
-    const code: string[] = [];
-    for (i++; i < lines.length && !lines[i]!.trimStart().startsWith('```'); i++) code.push(lines[i]!);
-    parts.push({ block: { code: code.join('\n'), language: fence[1] || 'txt', props: { frame: 'none' } } });
+    if (/^\s*\|/.test(lines[i]!)) {
+      flush();
+      const table: string[] = [];
+      for (; i < lines.length && /^\s*\|/.test(lines[i]!); i++) table.push(lines[i]!);
+      parts.push({ table });
+      i--;
+    } else if (fence) {
+      flush();
+      const code: string[] = [];
+      for (i++; i < lines.length && !lines[i]!.trimStart().startsWith('```'); i++) code.push(lines[i]!);
+      parts.push({ block: { code: code.join('\n'), language: fence[1] || 'txt', props: { frame: 'none' } } });
+    } else {
+      prose.push(lines[i]!);
+    }
   }
   flush();
   return parts;
 }
 
+// The terminal renderer's Markdown, escaped, with its color codes as nested spans: each code opens a span and each
+// reset closes the innermost, so a bold header holding inline code closes cleanly.
 const MARKDOWN_COLUMNS = 96;
+function terminalHtml(md: string): string {
+  let open = 0;
+  const html = escape(markdown({ width: MARKDOWN_COLUMNS, color: true }, md)).replace(/\x1b\[([\d;]*)m/g, (_, sgr: string) => {
+    if (sgr !== '0' && sgr !== '') { open++; return `<span class="t${sgr.replace(';', '-')}">`; }
+    if (!open) return '';
+    open--;
+    return '</span>';
+  });
+  return html + '</span>'.repeat(open);
+}
+
+// A reply's table: the terminal's box drawing for the eye, hidden from screen readers, beside the same cells as a real
+// table for them. Inline backticks and bold markers come off the cells there.
+function tableHtml(lines: readonly string[]): string {
+  const [head = [], ...body] = lines.flatMap((l) => [tableCells(l) ?? []]).filter((cells) => cells.length);
+  const cell = (tag: 'th' | 'td', c: string) => `<${tag}${tag === 'th' ? ' scope="col"' : ''}>${escape(c.replace(/`([^`]+)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1'))}</${tag}>`;
+  return `<div class="md" tabindex="0"><pre aria-hidden="true">${terminalHtml(lines.join('\n'))}</pre><table class="visually-hidden"><thead><tr>${head.map((c) => cell('th', c)).join('')}</tr></thead><tbody>${body.map((r) => `<tr>${r.map((c) => cell('td', c)).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
 
 const row = (at: string, who: string, body: string, kind = '') => `<div class="row${kind}"><span class="at">${clean(at)}</span><span class="who">${who}</span>${body}</div>`;
 
@@ -221,21 +277,22 @@ async function renderLog(log: SessionLog, repo: string): Promise<string> {
   ];
   const code = await highlight(blocks);
   const highlighted = new Map(blocks.map((b, i) => [b, code.html[i]!]));
-  const missing = log.missingTranscripts.map((t) => `<p class="warn">The client transcript is missing (moved or deleted): ${clean(t)}. Showing the Wizard's events only.</p>`);
+  const missing = log.unavailable.map((t) => `<p class="warn">The client transcript ${t.problem}: ${clean(t.path)}. Showing the Wizard's events only.</p>`);
   const steps = log.steps.map((s) => {
     const rows = s.entries.map((e) => {
       // Like Northwind's rows, a call reads as one line (the command, the file, or the call's fields) and opens to its
-      // highlighted output. Frame `none` keeps the fields above, since the block holds only the result.
+      // highlighted output. Frame `none` keeps the fields above, since the block holds only the result. An MCP tool
+      // reads as Northwind names it: mcp__plugin_straddle_straddle-api__execute-request is straddle-api execute-request.
       if (e.kind === 'tool') {
         const summary = !e.block ? '' : e.block.props.frame === 'terminal' ? e.block.code.split('\n')[0]! : e.block.props.title || 'result';
-        const fields = e.block && e.block.props.frame !== 'none' ? '' : `<pre class="fields">${clean(e.input)}</pre>`;
-        return row(e.at, clean(e.name), `<div class="body">${fields}${e.block ? `<details><summary>${escape(summary)}</summary>${highlighted.get(e.block)}</details>` : ''}</div>`, ' tool');
+        const fields = e.block && e.block.props.frame !== 'none' ? '' : `<pre class="fields">${escape(clip(redact(e.input)))}</pre>`;
+        const name = e.name.replace(/^mcp__plugin_[^_]+_/, '').replace(/^mcp__/, '').replace('__', ' ');
+        return row(e.at, clean(name), `<div class="body">${fields}${e.block ? `<details><summary>${escape(summary)}</summary>${highlighted.get(e.block)}</details>` : ''}</div>`, ' tool');
       }
-      // A reply's prose keeps the terminal's 96 columns, so it scrolls sideways on a narrow screen: it takes keyboard
-      // focus for that. The renderer's color codes become classes.
+      // A reply's prose and tables keep the terminal's 96 columns, so they scroll sideways on a narrow screen and take
+      // keyboard focus for that.
       if (e.kind === 'text') {
-        const parts = replies.get(e)!.map((p) => ('block' in p ? highlighted.get(p.block)!
-          : `<pre class="md" tabindex="0">${escape(markdown({ width: MARKDOWN_COLUMNS, color: true }, p.prose)).replace(/\x1b\[([\d;]+)m([^\x1b]*)\x1b\[0m/g, (_, sgr: string, body: string) => `<span class="t${sgr.replace(';', '-')}">${body}</span>`)}</pre>`));
+        const parts = replies.get(e)!.map((p) => ('block' in p ? highlighted.get(p.block)! : 'table' in p ? tableHtml(p.table) : `<pre class="md" tabindex="0">${terminalHtml(p.prose)}</pre>`));
         return row(e.at, 'agent', `<div class="body">${parts.join('')}</div>`);
       }
       return row(e.at, 'wizard', `<div class="body">${clean(e.kind === 'event' ? e.text : e.title)}</div>`, ' wizard');
@@ -251,9 +308,9 @@ body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--
 h1{font-size:1.5rem;margin:0 0 .5rem;color:var(--fg);overflow-wrap:anywhere}
 h2{color:var(--heading);font-size:1.1rem;margin:2rem 0 .5rem;overflow-wrap:anywhere}
 p{max-width:75ch;margin:0 0 .75rem;overflow-wrap:anywhere}
-.row{display:grid;grid-template-columns:24ch 12ch minmax(0,1fr);gap:0 1rem;padding:.5rem 0;border-top:1px solid var(--line)}
+.row{display:grid;grid-template-columns:24ch 16ch minmax(0,1fr);gap:0 1rem;padding:.5rem 0;border-top:1px solid var(--line)}
 .at{color:var(--muted);font-variant-numeric:tabular-nums}
-.who{color:var(--fg)}
+.who{color:var(--fg);min-width:0;overflow-wrap:anywhere}
 .tool .who{color:var(--accent)}
 .wizard .body{color:var(--muted)}
 .body{margin:0;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
@@ -262,6 +319,8 @@ p{max-width:75ch;margin:0 0 .75rem;overflow-wrap:anywhere}
 summary{cursor:pointer;white-space:pre-wrap;overflow-wrap:anywhere}
 summary:focus-visible,.md:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .md{white-space:pre;overflow-x:auto;overflow-wrap:normal;padding-bottom:.25rem}
+.md pre{margin:0;font:inherit}
+.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
 .t1{font-weight:bold}.t2{color:var(--muted)}.t36{color:var(--accent)}.t1-36{color:var(--heading);font-weight:bold}.t32{color:#bae67e}.t33{color:var(--heading)}.t31{color:#f28779}
 .warn{color:#f28779}
 @media (max-width:640px){body{padding:1rem}h1{font-size:1.2rem}.row{display:flex;flex-wrap:wrap;gap:0 1rem}.row .body{flex:0 0 100%;margin-top:.25rem}}
@@ -292,14 +351,19 @@ export async function writeLog(repo: string): Promise<string | null> {
   return path;
 }
 
+// The page's path is data on every platform: `open` and xdg-open take it as an argument, and on Windows PowerShell's
+// Invoke-Item reads it from the environment as a literal path, so no cmd or PowerShell parsing sees `&`, `%` or quotes.
 export function openFile(path: string): void {
-  const [command, ...args] = process.platform === 'darwin' ? ['open'] : process.platform === 'win32' ? ['cmd', '/c', 'start', ''] : ['xdg-open'];
-  spawn(command!, [...args, path], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
+  const [command, args, env] = process.platform === 'win32'
+    ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Invoke-Item -LiteralPath $env:STRADDLE_WIZARD_LOG'], { ...process.env, STRADDLE_WIZARD_LOG: path }]
+    : [process.platform === 'darwin' ? 'open' : 'xdg-open', [path], process.env];
+  spawn(command, args, { stdio: 'ignore', detached: true, env, windowsHide: true }).on('error', () => {}).unref();
 }
 
-// End of a session in a terminal: offers the log when the session recorded anything.
+// End of a session in a terminal: offers the log when the session recorded anything. Only the event count decides;
+// the transcripts are read once the developer says yes.
 export async function offerLog(io: Prompter, repo: string, open: (path: string) => void = openFile): Promise<void> {
-  if (!sessionLog(repo)) return;
+  if (!readObservedEvents(join(repo, WIZARD_DIR, 'events.jsonl')).events.length) return;
   const answer = await io.ask('Open the session log? [Y/n] ');
   if (answer === null || !['', 'y', 'yes'].includes(answer.toLowerCase())) return;
   const path = (await writeLog(repo))!;
