@@ -37,17 +37,20 @@ export interface SkillRoute {
   // `Status:` word that means finished. A plan has no status word: it's finished when approved at its current hash.
   // Skills without a file finish on their handoff.
   record?: { file: (typeof CONTRACT_FILES)[number]; finished?: string };
+  // The report the skill writes for the developer, shown at the end of a session in a terminal. Independent of
+  // `record`: Audit writes one but finishes on its handoff, and a plan is shown on its own screen.
+  report?: string;
 }
 
 const ROUTES = {
-  'straddle-setup': { title: 'Setup', advanceOn: ['ready', 'ready_with_warnings'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: { file: 'straddle-setup.md', finished: 'complete' } },
+  'straddle-setup': { title: 'Setup', advanceOn: ['ready', 'ready_with_warnings'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: { file: 'straddle-setup.md', finished: 'complete' }, report: 'straddle-setup.md' },
   'straddle-plan': { title: 'Plan', advanceOn: ['draft'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: { file: INTEGRATION_PLAN } },
-  'straddle-integrate': { title: 'Integrate', advanceOn: ['complete'], requiresAnyOf: [INTEGRATION_PLAN], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: true, record: { file: 'straddle-integration-report.md', finished: 'complete' } },
-  'straddle-test': { title: 'Test', advanceOn: ['passed'], requiresAnyOf: [INTEGRATION_PLAN, MIGRATION_PLAN], editGate: [INTEGRATION_PLAN, MIGRATION_PLAN], sendsStraddleRequests: true, record: { file: 'straddle-test-evidence.md', finished: 'complete' } },
+  'straddle-integrate': { title: 'Integrate', advanceOn: ['complete'], requiresAnyOf: [INTEGRATION_PLAN], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: true, record: { file: 'straddle-integration-report.md', finished: 'complete' }, report: 'straddle-integration-report.md' },
+  'straddle-test': { title: 'Test', advanceOn: ['passed'], requiresAnyOf: [INTEGRATION_PLAN, MIGRATION_PLAN], editGate: [INTEGRATION_PLAN, MIGRATION_PLAN], sendsStraddleRequests: true, record: { file: 'straddle-test-evidence.md', finished: 'complete' }, report: 'straddle-test-evidence.md' },
   'straddle-get-started': { title: 'Get Started', advanceOn: ['routed', 'needs_input'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false },
-  'straddle-migrate': { title: 'Migrate', advanceOn: ['migrated'], requiresAnyOf: [], editGate: [MIGRATION_PLAN], sendsStraddleRequests: false, record: { file: MIGRATION_REPORT, finished: 'migrated' } },
-  'straddle-go-live': { title: 'Go Live', advanceOn: ['ready'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: { file: 'straddle-go-live-report.md', finished: 'ready' } },
-  'straddle-audit': { title: 'Audit', advanceOn: ['findings', 'clean'], requiresAnyOf: [], editGate: ['straddle-audit-report.md'], sendsStraddleRequests: false },
+  'straddle-migrate': { title: 'Migrate', advanceOn: ['migrated'], requiresAnyOf: [], editGate: [MIGRATION_PLAN], sendsStraddleRequests: false, record: { file: MIGRATION_REPORT, finished: 'migrated' }, report: MIGRATION_REPORT },
+  'straddle-go-live': { title: 'Go Live', advanceOn: ['ready'], requiresAnyOf: [], editGate: [INTEGRATION_PLAN], sendsStraddleRequests: false, record: { file: 'straddle-go-live-report.md', finished: 'ready' }, report: 'straddle-go-live-report.md' },
+  'straddle-audit': { title: 'Audit', advanceOn: ['findings', 'clean'], requiresAnyOf: [], editGate: ['straddle-audit-report.md'], sendsStraddleRequests: false, report: 'straddle-audit-report.md' },
 } as const satisfies Record<string, SkillRoute>;
 
 export type SkillName = keyof typeof ROUTES;

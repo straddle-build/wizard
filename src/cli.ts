@@ -193,8 +193,11 @@ async function skillList(): Promise<number> {
 }
 
 async function journey(run: (opts: JourneyOptions) => Promise<number>): Promise<number> {
+  // Options first, so a bad --client or --mode fails before the splash.
+  const opts = { repo, env, io: io(), bundlePath, client: clientOption(), mode: modeOption(), exclude };
   process.on('SIGINT', () => handleInterrupt(io()));
-  return run({ repo, env, io: io(), bundlePath, client: clientOption(), mode: modeOption(), exclude });
+  await io().splash();
+  return run(opts);
 }
 
 async function main(): Promise<number> {

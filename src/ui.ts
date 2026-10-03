@@ -1,22 +1,28 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import { styleText } from 'node:util';
+import { splash, type Look } from './tui.ts';
 
 export interface Option<T> { label: string; value: T; hint?: string }
+
+// CI is set to any value but empty, false or 0. Read when called, since tests change the environment.
+const inCI = (): boolean => !['', 'false', '0'].includes(process.env.CI ?? '');
 
 // Numbered menus over plain lines. Cooked terminal mode keeps line editing and Ctrl-C with the terminal, and
 // the same code reads scripted answers from a pipe.
 export class Prompter {
   #input: NodeJS.ReadableStream;
-  #output: NodeJS.WritableStream;
+  #output: NodeJS.WritableStream & { isTTY?: boolean; columns?: number };
   #color: boolean;
   #lines: string[] = [];
   #waiting: ((line: string | null) => void) | null = null;
   #buffer = '';
   #ended = false;
 
-  constructor(input: NodeJS.ReadableStream, output: NodeJS.WritableStream & { isTTY?: boolean }) {
+  constructor(input: NodeJS.ReadableStream, output: NodeJS.WritableStream & { isTTY?: boolean; columns?: number }) {
     this.#input = input;
     this.#output = output;
-    this.#color = Boolean(output.isTTY) && !process.env.NO_COLOR;
+    // No color in a pipe, with NO_COLOR, on a dumb terminal (as the Straddle CLI), or in CI.
+    this.#color = Boolean(output.isTTY) && !process.env.NO_COLOR && process.env.TERM !== 'dumb' && !inCI();
     input.setEncoding('utf8');
     input.on('data', (chunk: string) => {
       this.#buffer += chunk;
@@ -60,6 +66,24 @@ export class Prompter {
 
   dim(value: string): string {
     return this.#color ? styleText('dim', value) : value;
+  }
+
+  // The boxed screens, sized to the terminal and capped at 100 columns (the CLI's default card width), or null for
+  // plain lines in a pipe. A terminal that reports no width (a pty without a window size says 0) gets 80.
+  get look(): Look | null {
+    const columns = this.#output.columns ?? 0;
+    return this.#output.isTTY ? { width: Math.min(columns > 0 ? columns : 80, 100), color: this.#color } : null;
+  }
+
+  // The start splash, drawn a line at a time over ~300 ms in a color terminal. A pipe, CI and a dumb terminal get none.
+  async splash(): Promise<void> {
+    const look = this.look;
+    if (!look || inCI() || process.env.TERM === 'dumb') return;
+    for (const line of splash(look)) {
+      this.say(line);
+      if (look.color) await sleep(25);
+    }
+    this.say();
   }
 
   say(line = ''): void {

@@ -3,10 +3,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { CLIENT_LABEL, launchCommand } from '../src/clients.ts';
+import { start, type JourneyOptions } from '../src/journey.ts';
 import { approvalHash } from '../src/progress.ts';
+import { Prompter } from '../src/ui.ts';
 import { CURSOR_CHAT, ROOT, SKILLS_SOURCE, fakeClaude, fakeClients, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
 
 const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENVIRONMENT: 'sandbox' };
@@ -1055,6 +1058,47 @@ test('Manual starts no agent process for any client: it prints the paste text, a
   }
 });
 
+// A pipe gets the end-of-session report it got before the Wizard drew terminal screens, line for line: plain rows, and
+// no report file (a terminal gets straddle-setup.md rendered after the evidence).
+test('a piped Setup run that finishes prints the plain end-of-session report, without the report file', async () => {
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-setup.md': SETUP_FILE });
+  const r = await runWizard(['setup', '--client', 'cursor', '--mode', 'manual'], { cwd: repo, env: { ...CONFIGURED, ...fake.env }, input: [...CHOICES, '1'] });
+  const report = r.stdout.slice(r.stdout.indexOf('Straddle Wizard report:')).replaceAll(realpathSync(repo), '<repo>')
+    .replace(/local bundle .*/, 'local bundle <skills>').replace(/(  - \[ \] .*\n)+/, "  <the skill's checklist>\n");
+  assert.equal(report, [
+    'Straddle Wizard report: setup program, completed',
+    '  Reason            every step is done and on file',
+    '  Repository        <repo>',
+    '  Agent             Cursor, plugin manual',
+    '  Skill bundle      local bundle <skills>',
+    '  Run record        .straddle-wizard/receipt.json and .straddle-wizard/events.jsonl',
+    '',
+    'Steps',
+    '  ✓ Setup  straddle-setup.md: Status: complete · no handoff reported · progress not observable',
+    "  ✓ means the file says the step is done. I read each file myself; I can't see your agent's handoffs here.",
+    '',
+    'Changed files (I compared them before and after each session)',
+    '  none',
+    '  Not a complete list: I compared no files for a Manual session',
+    '',
+    'Server-side resources',
+    "  I created or enabled none. What your agent reports creating is in its handoffs and evidence files; I didn't verify it.",
+    'Checks',
+    '  I sent no Straddle request and ran no test. The checks your agent reports running are its own.',
+    '',
+    "Verify before merging (from the straddle-setup 0.1.0 skill; I can't see what your agent printed)",
+    "  <the skill's checklist>",
+    '',
+    'Evidence',
+    '  straddle-setup.md',
+    '',
+    'Next: review the changed files and the checklist before you merge.',
+    '',
+  ].join('\n'));
+});
+
 test('with no checklist printed, the report shows the "Verify before merging" checklist of the last skill this run finished, or ran when it has no state file, and none before', async () => {
   const fake = fakeClients('✓ Logged in as dev@example.com');
   const env = { ...CONFIGURED, ...fake.env };
@@ -1248,4 +1292,72 @@ test('receipt removal is configuration loss the next run reports as a fresh star
 
   assert.equal(r.code, 1);
   assert.match(r.stdout, /There's no saved Wizard run in this repo\. Start one with `wizard`\./);
+});
+
+// The journey in this process on a fake 100-column terminal, through the Prompter it takes as an option, with NO_COLOR
+// so the boxes carry no escape codes.
+async function inTerminal(run: (opts: JourneyOptions) => Promise<number>, opts: Omit<JourneyOptions, 'io'>, input: string[]): Promise<string> {
+  const saved = process.env.NO_COLOR;
+  process.env.NO_COLOR = '1';
+  try {
+    let text = '';
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 100, write: (chunk: string) => { text += chunk; return true; } });
+    const answers = new PassThrough();
+    answers.end(input.join('\n') + '\n');
+    await run({ ...opts, io: new Prompter(answers, output) });
+    return text;
+  } finally {
+    if (saved === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = saved;
+  }
+}
+
+test('in a terminal the end-of-session report renders the Audit report boxed; a pipe still prints none of it', async () => {
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+  const env = { ...CONFIGURED, ...fake.env, STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases' };
+  const auditReport = '# Straddle audit report\n\nStatus: findings\n\n## Findings\n\n| Finding | File | Confidence |\n| --- | --- | --- |\n| Webhook signature not verified | src/webhooks.ts:12 | high |\n';
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-audit-report.md': auditReport });
+  // Continue, then "I'm back".
+  const screen = await inTerminal((opts) => start('audit', opts), { repo, env, bundlePath: SKILLS_SOURCE, client: 'cursor', mode: 'manual', exclude: [] }, ['1', '1']);
+  const piped = nextRepo();
+  writeFiles(piped, { 'straddle-audit-report.md': auditReport });
+  const pipe = await runWizard(['audit', '--client', 'cursor', '--mode', 'manual'], { cwd: piped, env, input: ['1', '1'] });
+
+  assert.ok(screen.includes([
+    'Audit report (straddle-audit-report.md)',
+    '  Straddle audit report',
+    '',
+    '  Status: findings',
+    '',
+    '  Findings',
+    '',
+    '  ┌────────────────────────────────┬────────────────────┬────────────┐',
+    '  │ Finding                        │ File               │ Confidence │',
+    '  ├────────────────────────────────┼────────────────────┼────────────┤',
+    '  │ Webhook signature not verified │ src/webhooks.ts:12 │ high       │',
+    '  └────────────────────────────────┴────────────────────┴────────────┘',
+  ].join('\n')), screen);
+  assert.equal(pipe.code, 0, pipe.stdout + pipe.stderr);
+  assert.ok(!pipe.stdout.includes('Audit report ('), pipe.stdout);
+});
+
+test('Go Live not ready: a terminal shows its report once, without repeating the gaps; a pipe lists the gaps as before', async () => {
+  const goLive = `# Straddle Go Live review\n\nStatus: not ready (no Production webhook secret)\nPlan: straddle-integration-plan.md\nPlan hash: ${PLAN_HASH}\n\n## Blocking gaps\n\n| Gap | Fix |\n| --- | --- |\n| No Production webhook secret | Set STRADDLE_WEBHOOK_SECRET in Production |\n`;
+  const sessions = { ...DEFAULT_SESSIONS, 'straddle-go-live': { ...DEFAULT_SESSIONS['straddle-go-live'], writes: [{ path: 'straddle-go-live-report.md', content: goLive }], text: handoff('straddle-go-live', 'not_ready') } };
+  const claude = fakeClaude();
+  claude.sessions(sessions);
+  const repo = nextRepo();
+  const env = { ...CONFIGURED, PATH: [claude.bin, dirname(process.execPath), '/usr/bin', '/bin'].join(':'), HOME: repo, FAKE_CLAUDE_STATE: claude.state, STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases' };
+  const screen = await inTerminal((opts) => start('integration', opts), { repo, env, bundlePath: SKILLS_SOURCE, client: undefined, mode: undefined, exclude: [] }, [...CHOOSE_CONTEXT, '1']);
+  const piped = nextRepo();
+  const pipeClaude = fakeClaude();
+  pipeClaude.sessions(sessions);
+  const pipe = await runWizard([], { cwd: piped, claude: pipeClaude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+
+  assert.ok(screen.includes('Go Live report (straddle-go-live-report.md)'), screen);
+  assert.equal(screen.split('No Production webhook secret').length - 1, 1, screen);
+  assert.ok(!screen.includes('Go Live gaps'), screen);
+  assert.match(pipe.stdout, /Go Live gaps \(straddle-go-live-report\.md\)\n  \| Gap \| Fix \|\n  \| --- \| --- \|\n  \| No Production webhook secret \| Set STRADDLE_WEBHOOK_SECRET in Production \|\n/);
+  assert.ok(!pipe.stdout.includes('Go Live report ('), pipe.stdout);
 });
