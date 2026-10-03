@@ -30,44 +30,49 @@ interface SessionLog { steps: Step[]; unavailable: Unavailable[] }
 // (a table cell, a sentence), where digits inside a timestamp, path, version or id stay; and the Markdown and quoting
 // agents put around a named value.
 //
-// A secret is a whole word: quotes, backticks, emphasis marks and punctuation inside or attached to it don't end it,
-// only whitespace does (JSON, where quotes do end values, is the exception the quoted rules below keep).
-//
-// The separator takes the label's closing delimiter on either side of the colon (`**Token**:`, `__API key:__`,
-// `` `api_key`: ``, `"api_key":`; after the colon only when a space follows) and the value's opening quote or
-// backtick, with backslashes only as the escape of that quote (`\"`). The value is then read by how it opens, with no
-// length bound, and an unclosed one runs to the end of its line rather than being reread as prose:
-// - a double-quoted value to its unescaped closing quote, reading `\"` and `\\` as escapes; one opened with an escaped
-//   quote (JSON inside a string, `\"password\":\"…\"`) to its `\"`, reading `\\\"` and `\\\\` as its escapes;
-// - a single-quoted or backticked value to its closing mark;
-// - an emphasized value (`**…**`, `_…_`) to the matching closer before a space or punctuation;
-// - any other value to whitespace, keeping runs of `,` `;` `}` `\`, quotes and backticks when more value follows them.
-// The last rule then takes any word still attached to a redacted value (`"[redacted]".tail`, `[redacted]'tail`): the
-// closer it follows stays, and a JSON neighbour stays because its quote stops the word. It runs after every value is
-// redacted, so a label it absorbs (`"[redacted]",token:"[redacted]"`) costs that label, never a value.
-// Every branch stops only where its own terminator is, and no two parts of a rule can take the same backslash, so no
-// attempt fails after a long scan and the work is linear. Values under 6 characters stay, as in Northwind.
+// A secret-named value is read in one of two contexts, decided by its label:
+// - A quoted label (`"password":`, `'secret':`, `\"token\":` in JSON inside a string) is JSON or a dict: the value is
+//   its quoted string, read to its unescaped closing quote (`\"` and `\\` are escapes; inside `\"…\"`, `\\\"`), or to
+//   the end of the line when unclosed, or an unquoted scalar to `,` `}` `]` or whitespace. The quotes stay, so the
+//   next field (`,"id":…`) is untouched.
+// - Any other label (`KEY=`, `key: `, `**Token:**`, `__API key__:`) takes the whole shell word: parts written
+//   together without whitespace are one value (`"a".b'c d'`, `_x_.y`), so it runs to unquoted whitespace and is
+//   replaced, delimiters and all. A quote, backtick or emphasis that opens the value is read to its closer or, unclosed,
+//   to the end of the line; one inside the word opens a part only when its closer is on the line (so `it's` stays one
+//   word) and it isn't followed by a space or `,;}` (so the closing quote of an enclosing string ends the word);
+//   `,` `;` `}` `\` join the word only when more of it follows.
+// Values with fewer than 6 characters besides whitespace, quotes and emphasis marks stay, as in Northwind, and so does a
+// value that is only an earlier `[redacted]`.
 //
 // A named rule matches at the separator and finds the name by looking behind it, so the name is never consumed and
 // each separator looks back over one run of name characters: matching from the start of the name retried a `[\w-]*`
-// at every word boundary and made long hyphenated text quadratic.
+// at every word boundary and made long hyphenated text quadratic. No two parts of a rule take the same character, and
+// every part stops at its own terminator, so the work is linear.
 const named = (name: string, value: string) =>
   new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*(?:\\*["']|\x60{1,2})?)${value}`, 'gi');
-const SECRET_VALUE = String.raw`(?!\[redacted\])(?:(?<=\\")(?:[^"\\\n]|\\\\(?:\\["\\]|[^"\\\n])|\\(?!")[^\n]?){6,}(?=\\?"|\n|$)|(?<=[^\\]")(?:[^"\\\n]|\\[^\n]?){6,}(?="|\n|$)|(?<=')(?:[^'\\\n]|\\[^\n]?){6,}(?='|\n|$)|(?<=\x60)[^\x60\n]{6,}(?=\x60|\n|$)|([*_]{1,2})[^\n]+?(?:\2(?=[\s.,;:!?)\]]|$)|(?=\n|$))|(?:[^\s"'\x60\\,;}]|[\\,;}"'\x60]+(?=[^\s"'\x60\\,;}])){6,})`;
-const SECRETS: [RegExp, string][] = [
+const SECRET_NAME = '(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)';
+const QUOTED_LABEL = new RegExp(String.raw`(?=\\?["'])(?<=${SECRET_NAME}[\w-]*)(\\?["']\s*:\s*(?:\\?["'])?)(?:(?<=\\")(?:[^"\\\n]|\\\\(?:\\["\\]|[^"\\\n])|\\(?!")[^\n]?)*|(?<=[^\\]")(?:[^"\\\n]|\\[^\n]?)*|(?<=')(?:[^'\\\n]|\\[^\n]?)*|(?<![\\"'])[^\s,}\]"'\\]*)`, 'gi');
+const WORD_PART = String.raw`"(?=[^\s"'\x60\\,;}])(?:[^"\\\n]|\\[^\n]?)*"|'(?=[^\s"'\x60\\,;}])(?:[^'\\\n]|\\[^\n]?)*'|\x60(?=[^\s"'\x60\\,;}])[^\x60\n]*\x60|[^\s"'\x60\\,;}]|[\\,;}"'\x60]+(?=[^\s"'\x60\\,;}])`;
+const WORD_OPENER = String.raw`"(?:[^"\\\n]|\\[^\n]?)*(?:"|(?=\n|$))|'(?:[^'\\\n]|\\[^\n]?)*(?:'|(?=\n|$))|\x60\x60(?:[^\x60\n]|\x60(?!\x60))*(?:\x60\x60|(?=\n|$))|\x60[^\x60\n]*(?:\x60|(?=\n|$))|([*_]{1,2})[^\n]+?(?:\2(?=[\s.,;:!?)\]]|$)|(?=\n|$))`;
+const WORD_LABEL = new RegExp(String.raw`(?=[*_\x60\s:=])(?<=${SECRET_NAME}[\w-]*)((?:\*{1,2}|\x60)?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*)(?:${WORD_OPENER}|${WORD_PART})(?:${WORD_PART})*`, 'gi');
+const redactValue = (match: string, separator: string) => {
+  const value = match.slice(separator.length);
+  return value.replace(/[\s"'`*_]/g, '').length < 6 || /^["'`*_]*\[redacted\]["'`*_]*$/.test(value) ? match : `${separator}[redacted]`;
+};
+const SECRETS: [RegExp, string | typeof redactValue][] = [
   [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_-]{6,}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
-  [named('(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)', SECRET_VALUE), '$1[redacted]'],
+  [QUOTED_LABEL, redactValue],
+  [WORD_LABEL, redactValue],
   [named('(?:account|routing)[_ -]?(?:number|num|no)?', String.raw`\d{4,17}\b`), '$1[redacted]'],
   [/(?<![\w.:/-])\d{8,17}(?![\w:/-]|[.,]\d)/g, '[redacted]'],
   [/\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g, '[redacted]'],
   [/(?<![\w+=])(?=[\w+=]*\d)(?=[\w+=]*[A-Za-z])[A-Za-z0-9+_=]{32,}/g, '[redacted]'],
   [/\/(?:Users|home)\/[\w.-]+(?=\/|\b)/g, '~'],
-  [/\[redacted\](["'`*_]{0,2})[^\s"'`]*[A-Za-z0-9][^\s"'`]*/g, '[redacted]$1'],
 ];
 
 function redact(raw: string): string {
-  return SECRETS.reduce((s, [pattern, replacement]) => s.replace(pattern, replacement), raw);
+  return SECRETS.reduce((s, [pattern, replacement]) => (typeof replacement === 'string' ? s.replace(pattern, replacement) : s.replace(pattern, replacement)), raw);
 }
 
 // Long outputs and inputs stop at 2000 characters, always after redaction, so a clip never splits a secret past its rule.

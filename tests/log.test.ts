@@ -108,7 +108,7 @@ const DELIMITED: [string, string][] = [
   ['M7 password: **zq7a zq7b**', 'M7 password: [redacted]'],
   ['M8 password: _zq8a zq8b_', 'M8 password: [redacted]'],
   ['M9 password: `zq9a zq9b`', 'M9 password: [redacted]'],
-  ['M10 password: ``zq0a zq0b``', 'M10 password: `[redacted]`'],
+  ['M10 password: ``zq0a zq0b``', 'M10 password: [redacted]'],
   ['M11 "password": "zqAa, zqAb; zqAc"', 'M11 &#34;password&#34;: &#34;[redacted]&#34;'],
   ["M12 'secret': 'zqBa zqBb'", 'M12 &#39;secret&#39;: &#39;[redacted]&#39;'],
   ['M13 PASSWORD=zqCa,zqCb;zqCc}zqCd\\zqCe', 'M13 PASSWORD=[redacted]'],
@@ -116,22 +116,32 @@ const DELIMITED: [string, string][] = [
   ['M15 **API key:** `zqEa zqEb`', 'M15 API key: [redacted]'],
   ['M16 **Password:** _zqFa,zqFb_, then more', 'M16 Password: [redacted], then more'],
   ['M17 token: `zqf1234`.zqTAIL then prose', 'M17 token: [redacted] then prose'],
-  ['M18 password: "zqg1234"zqTAIL then prose', 'M18 password: &#34;[redacted]&#34; then prose'],
+  ['M18 password: "zqg1234"zqTAIL then prose', 'M18 password: [redacted] then prose'],
+  ['M19 token: **zqh1**.zqi"zqj zqk" then prose', 'M19 token: [redacted] then prose'],
 ];
 
-// A secret is a whole word in a command: quotes, backticks, emphasis marks and punctuation inside it or attached to a
-// quoted part don't end it, and the next word after the space stays. Each command and its row on the page.
+// After an unquoted label (`KEY=`, `key: `) the value is the whole shell word: quoted, backticked and emphasized parts
+// written together are one value, wherever their spaces are, and the next word after unquoted whitespace stays. After
+// a quoted label (JSON) the value is the quoted string and the next field stays. A literal `[redacted]` in recorded
+// source is left as written. Each command and its row on the page.
 const WORDS: [string, string][] = [
   ['DB_PASSWORD=_zqa1_.zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
   ['DB_PASSWORD=*zqb1*,zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
-  ['DB_PASSWORD="zqc1234".zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=&#34;[redacted]&#34; npm run migrate'],
-  ["DB_PASSWORD='zqd1234',zqTAIL npm run migrate", 'Bash: $ DB_PASSWORD=&#39;[redacted]&#39; npm run migrate'],
-  ['DB_PASSWORD=`zqe1234`zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=`[redacted]` npm run migrate'],
+  ['DB_PASSWORD="zqc1234".zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
+  ["DB_PASSWORD='zqd1234',zqTAIL npm run migrate", 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
+  ['DB_PASSWORD=`zqe1234`zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
+  ['DB_PASSWORD="zqa1".zqb"zqc zqd1" npm run migrate', 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
+  ["DB_PASSWORD='zqa2'zqb'zqc zqd2' npm run migrate", 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
+  ['DB_PASSWORD=`zqa3`zqb`zqc zqd3` npm run migrate', 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
+  ['PASSWORD=zqab"zqc zqd5"zqe npm run migrate', 'Bash: $ PASSWORD=[redacted] npm run migrate'],
   ["PASSWORD=zqabcd'zqTAIL1 npm run migrate", 'Bash: $ PASSWORD=[redacted] npm run migrate'],
-  ['PASSWORD=zqabcdef"zqTAIL2" npm run migrate', 'Bash: $ PASSWORD=[redacted]&#34; npm run migrate'],
-  ['TOKEN=zqabcdef`zqTAIL3` npm run migrate', 'Bash: $ TOKEN=[redacted]` npm run migrate'],
+  ['PASSWORD=zqabcdef"zqTAIL2" npm run migrate', 'Bash: $ PASSWORD=[redacted] npm run migrate'],
+  ['TOKEN=zqabcdef`zqTAIL3` npm run migrate', 'Bash: $ TOKEN=[redacted] npm run migrate'],
   ["PASSWORD=it'szqTAIL4secret npm run migrate", 'Bash: $ PASSWORD=[redacted] npm run migrate'],
-  ['curl -d password=zqh12345,token="zqTOKENVALUE" next', 'Bash: $ curl -d password=[redacted]&#34; next'],
+  ['curl -d password=zqh12345,token="zqTOKENVALUE" next', 'Bash: $ curl -d password=[redacted] next'],
+  ['curl -H "X-Api-Key: zqhdr12345" -H "X-Other: keepme09"', 'Bash: $ curl -H &#34;X-Api-Key: [redacted]&#34; -H &#34;X-Other: keepme09&#34;'],
+  ['curl -d \'{"password":"zqesc\\"zqx","id":"keepme06"}\'', 'Bash: $ curl -d &#39;{&#34;password&#34;:&#34;[redacted]&#34;,&#34;id&#34;:&#34;keepme06&#34;}&#39;'],
+  ["grep -n \"paykey: '[redacted]'\" src/redact.ts", 'Bash: $ grep -n &#34;paykey: &#39;[redacted]&#39;&#34; src/redact.ts'],
 ];
 
 // Delimited values below, at and above 512 characters (where the previous rule stopped reading) and past the
@@ -139,10 +149,10 @@ const WORDS: [string, string][] = [
 // the end of its line. Each value ends in `zqEND`, so a surviving tail shows.
 const zqValue = (length: number) => `${'zq '.repeat(length).slice(0, length - 5)}zqEND`;
 const LONG: [string, string][] = [511, 512, 513, 2100].flatMap((n): [string, string][] => [
-  [`L${n}q password: "${zqValue(n)}" kept`, `L${n}q password: &#34;[redacted]&#34; kept`],
+  [`L${n}q password: "${zqValue(n)}" kept`, `L${n}q password: [redacted] kept`],
   [`L${n}b secret: \`${zqValue(n)}\` kept`, `L${n}b secret: [redacted] kept`],
   [`L${n}e token: **${zqValue(n)}** kept`, `L${n}e token: [redacted] kept`],
-  [`L${n}u password: "${zqValue(n)}`, `L${n}u password: &#34;[redacted]`],
+  [`L${n}u password: "${zqValue(n)}`, `L${n}u password: [redacted]`],
   [`L${n}s token: **${zqValue(n)}`, `L${n}s token: [redacted]`],
 ]);
 
