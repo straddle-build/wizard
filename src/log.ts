@@ -69,11 +69,11 @@ const LANG: Record<string, string> = { ts: 'ts', tsx: 'tsx', js: 'js', jsx: 'jsx
 function toolBlock(name: string, input: unknown, result: string): CodeBlock | null {
   const s = (k: string) => text(field(input, k)) ?? '';
   const words = field(input, 'command');
-  const command = Array.isArray(words) ? words.join(' ') : s('command') || s('cmd');
+  const command = Array.isArray(words) ? words.join(' ') : s('command');
   const target = s('file_path');
   const lang = LANG[target.split('.').pop() ?? ''] ?? 'txt';
   const block: CodeBlock | null =
-    name === 'Bash' || (/^(shell|exec_command|local_shell)/.test(name) && command) ? { code: `$ ${command}\n${result}`, language: 'shellsession', props: { frame: 'terminal' } }
+    name === 'Bash' || (name === 'shell' && command) ? { code: `$ ${command}\n${result}`, language: 'shellsession', props: { frame: 'terminal' } }
     : name === 'Edit' ? { code: `${s('old_string').replace(/^/gm, '- ')}\n${s('new_string').replace(/^/gm, '+ ')}`, language: 'diff', meta: `lang="${lang}"`, props: { frame: 'code', title: target } }
     : name === 'Write' ? { code: s('content'), language: lang, props: { frame: 'code', title: target } }
     : result ? { code: result, language: /^\s*[[{]/.test(result) ? 'json' : 'txt', props: { frame: 'none' } }
@@ -112,7 +112,7 @@ function transcriptEntries(path: string): Entry[] {
       const type = text(field(payload, 'type')) ?? '';
       if (type.endsWith('_call')) {
         const args = text(field(payload, 'arguments'));
-        const input = args === undefined ? field(payload, 'input') ?? field(payload, 'action') : parseJson(args) ?? args;
+        const input = args === undefined ? field(payload, 'input') : parseJson(args) ?? args;
         const name = text(field(payload, 'name')) ?? type;
         return [{ at, kind: 'tool', name, input: toolInput(input), block: toolBlock(name, input, results.get(text(field(payload, 'call_id')) ?? '') ?? '') }];
       }

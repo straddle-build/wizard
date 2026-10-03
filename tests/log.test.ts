@@ -141,6 +141,8 @@ test('Codex session: the rollout found by session id gives its tool calls and re
   const rollout = [
     { timestamp: '2026-10-03T10:00:03.000Z', type: 'response_item', payload: { type: 'function_call', name: 'shell', arguments: '{"command":["npm","test"]}', call_id: 'c1' } },
     { timestamp: '2026-10-03T10:00:03.500Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: JSON.stringify({ output: '3 passing', metadata: { exit_code: 0 } }) } },
+    { timestamp: '2026-10-03T10:00:03.600Z', type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', input: { command: 'git status' }, call_id: 'c2' } },
+    { timestamp: '2026-10-03T10:00:03.800Z', type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'c2', output: 'clean' } },
     { timestamp: '2026-10-03T10:00:04.000Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Tests pass.' }] } },
   ];
   writeFiles(repo, { '.straddle-wizard/events.jsonl': events.map((e) => JSON.stringify(e)).join('\n') + '\n' });
@@ -150,9 +152,11 @@ test('Codex session: the rollout found by session id gives its tool calls and re
   const html = readFileSync(join(repo, '.straddle-wizard', 'session-log.html'), 'utf8');
   assert.deepEqual(sections(html), [
     ['Session start', [`wizard: Session started (${id})`]],
-    ['straddle-test · 01-begin', ['shell: $ npm test', 'agent: Tests pass.']],
+    ['straddle-test · 01-begin', ['shell: $ npm test', 'exec: command: git statusresult', 'agent: Tests pass.']],
   ]);
   assert.ok(shown(html).includes('$ npm test3 passing'), 'the call output is paired with its call');
+  assert.ok(shown(html).includes('clean'), 'the custom tool output is paired with its call');
+  assert.ok(!html.includes('$ git status'), 'custom tool is rendered generically rather than as a shell command');
 });
 
 test('the page replaces a symlink or a world-readable file at its path, never writing through it or keeping its mode', async () => {
