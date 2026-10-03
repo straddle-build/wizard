@@ -193,9 +193,14 @@ const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rb)$/;
 // Tests, mocks, fixtures and installed packages name Plaid calls without the app making them.
 const NOT_APP_CODE = /(?:^|\/)(?:tests?|__tests__|__mocks__|mocks?|fixtures?|specs?|site-packages)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
 // Comment spans, for the Link matchers only: Python docstrings, Ruby =begin blocks and `#` comments in .py/.rb files, and
-// `/* */` and `//` comments elsewhere. Strings that look like comments are stripped too; that only loses Link evidence.
-const HASH_COMMENTS = /"""[\s\S]*?"""|'''[\s\S]*?'''|^=begin[\s\S]*?^=end|#.*$/gm;
-const SLASH_COMMENTS = /\/\*[\s\S]*?\*\/|\/\/.*$/gm;
+// `/* */` and `//` comments elsewhere. Blocks go first, so a line-comment marker inside a string (a URL's `//`, a "#")
+// can't swallow a block's opener and leave its body. An unclosed block runs to the end of the file, which keeps the
+// scan linear. Each span becomes a space, so the text around it can't join into a call. Strings that look like comments
+// are stripped too; every step only removes text, which only loses Link evidence.
+const HASH_BLOCKS = /"""[\s\S]*?(?:"""|$(?![\s\S]))|'''[\s\S]*?(?:'''|$(?![\s\S]))|^=begin[\s\S]*?(?:^=end|$(?![\s\S]))/gm;
+const HASH_LINES = /#.*$/gm;
+const SLASH_BLOCKS = /\/\*[\s\S]*?(?:\*\/|$(?![\s\S]))/g;
+const SLASH_LINES = /\/\/.*$/gm;
 interface PlaidUsage { migrate: boolean; link: boolean; processorTokens: boolean; complete: boolean }
 
 // Which Plaid roles the app's source files show. Read under the same boundary as hashing: walked files only, no
@@ -212,7 +217,7 @@ function plaidUsage(root: string, scan: Walk): PlaidUsage {
     try {
       if (file.size > MAX_HASH_BYTES) { usage.complete = false; continue; }
       const code = readFileSync(file.fd, 'utf8');
-      const live = /\.(?:py|rb)$/.test(rel) ? code.replace(HASH_COMMENTS, '') : code.replace(SLASH_COMMENTS, '');
+      const live = /\.(?:py|rb)$/.test(rel) ? code.replace(HASH_BLOCKS, ' ').replace(HASH_LINES, ' ') : code.replace(SLASH_BLOCKS, ' ').replace(SLASH_LINES, ' ');
       const idvLink = PLAID_LINK_TOKEN.test(code) && PLAID_IDV_PRODUCT.test(code);
       const processor = PLAID_PROCESSOR.test(live);
       usage.migrate ||= idvLink || PLAID_MIGRATE.test(code);

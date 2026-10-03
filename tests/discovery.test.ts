@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -99,19 +100,22 @@ const PLAID_CALLS = {
     go: { 'notes.go': '// resp, _, err := client.PlaidApi.TransferCreate(ctx).Execute()\n' },
   },
   // A Link call that's commented out is no bank connection, so it can't remove Migrate: line comments, unstarred and
-  // starred blocks, trailing comments and Python docstrings.
+  // starred blocks, trailing comments, Python docstrings, and blocks that open after a URL's `//` or a "#" string.
   commentedLink: {
     node: {
       'src/old-link.ts': '// await plaid.linkTokenCreate(request)\n/*\n * await plaid.itemPublicTokenExchange({ public_token })\n */\n',
       'src/old-block.ts': '/*\nawait plaid.linkTokenCreate(request)\n*/\nexport const unused = 1; // await plaid.itemPublicTokenExchange({ public_token })\n',
+      'src/old-url.ts': "const base = 'https://sandbox.plaid.com'; /* example\nawait plaid.linkTokenCreate(request)\n*/\nconst docs = 'https://plaid.com/docs'; /**\n * await plaid.itemPublicTokenExchange({ public_token })\n */\n",
     },
     python: {
       'app/old_link.py': '# client.link_token_create(request)\n    # client.item_public_token_exchange(exchange_request)\n',
       'app/old_doc.py': '"""\nclient.link_token_create(request)\n"""\nunused = 1  # client.item_public_token_exchange(exchange_request)\n',
+      'app/old_hash.py': 'x = "#"; """\nclient.link_token_create(request)\n"""\n',
     },
     go: {
       'old_link.go': '// resp, _, err := client.PlaidApi.LinkTokenCreate(ctx).Execute()\n',
       'old_block.go': '/*\nresp, _, err := client.PlaidApi.LinkTokenCreate(ctx).Execute()\n*/\nvar unused = 1 // client.PlaidApi.ItemPublicTokenExchange(ctx).Execute()\n',
+      'old_url.go': 'var base = "https://sandbox.plaid.com" /* example\nresp, _, err := client.PlaidApi.LinkTokenCreate(ctx).Execute()\n*/\n',
     },
   },
   commentedProcessor: {
@@ -153,6 +157,29 @@ for (const ecosystem of ['node', 'python', 'go'] as const) {
     });
   }
 }
+
+test('a comment between the parts of a Plaid call never joins them into Link evidence', () => {
+  const repo = tempDir('plaid-rejoin');
+  writeFiles(repo, Object.assign({}, PLAID_MANIFESTS.node, { 'src/pay.ts': 'await plaid.processor/**/TokenCreate(request);\n' }));
+
+  const facts = discover(repo, []);
+
+  assert.deepEqual({ steps: programSkills('integration', facts.providers), bankLink: facts.bankLink }, { steps: WITH_MIGRATE, bankLink: null });
+});
+
+// Each unclosed opener used to rescan the rest of the file, about 9 s for this one; a linear scan takes milliseconds.
+// Discovery is synchronous, so it runs in a child process the test kills after 5 s, which leaves no answer to compare.
+test('a source file full of unclosed comment openers still gets a Link-only answer', () => {
+  const repo = tempDir('plaid-unclosed');
+  writeFiles(repo, Object.assign({}, PLAID_MANIFESTS.node, PLAID_CALLS.link.node, { 'src/generated.ts': 'const glob = "/*";\n'.repeat(60_000) }));
+  const script = `import { discover } from ${JSON.stringify(new URL('../src/discovery.ts', import.meta.url).href)};
+const facts = discover(process.env.REPO, []);
+console.log(JSON.stringify({ providers: facts.providers, bankLink: facts.bankLink }));`;
+
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 5_000, env: { ...process.env, REPO: repo } });
+
+  assert.deepEqual(run.stdout ? JSON.parse(run.stdout) : { killed: run.signal }, { providers: [], bankLink: LINK });
+});
 
 test('Plaid Link keeps Migrate when the scan may not see some source, and only then', () => {
   const outside = tempDir('plaid-shared');
