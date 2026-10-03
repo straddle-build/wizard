@@ -150,28 +150,34 @@ export function card(look: Look, title: string, rows: readonly (string | readonl
 // A boxed table no wider than look.width: bold header, each cell wrapped in its column, a rule between rows when any
 // wraps. When the natural layout is too wide, a column gives up a cell at a time: first the one with the most room
 // above its longest word, so text breaks between words; then one with room above its longest cell word, so only a
-// header word splits, not an ID or file:line; then the widest, down to 4 cells, as the CLI's layoutColumns does. When
-// even that is too wide, each row becomes its own card of column: value lines.
+// header word splits, not an ID or file:line; then the widest. No column goes below its widest single glyph or 4 cells
+// (its natural width when narrower), as the CLI's layoutColumns floors at 4. When even that is too wide, each row
+// becomes its own card of column: value lines.
 export function table(look: Look, headers: readonly string[], rows: readonly (readonly string[])[]): string {
   const longestWord = (texts: readonly string[]) => Math.max(1, ...texts.flatMap((s) => words(s, look).map((w) => w.w)));
-  const column = (i: number) => rows.map((r) => r[i] ?? '');
-  const colW = headers.map((h, i) => Math.max(1, ...[h, ...column(i)].map((s) => cells(wrap(s, Infinity, look)[0]!))));
-  const floors = [headers.map((h, i) => longestWord([h, ...column(i)])), headers.map((_, i) => longestWord(column(i)))];
+  const widestGlyph = (texts: readonly string[]) => Math.max(1, ...texts.flatMap((s) => [...GRAPHEMES.segment(stripVTControlCharacters(s))].map((g) => graphemeCells(g.segment))));
+  const column = (i: number) => [headers[i]!, ...rows.map((r) => r[i] ?? '')];
+  const colW = headers.map((_, i) => Math.max(1, ...column(i).map((s) => cells(wrap(s, Infinity, look)[0]!))));
+  const hard = colW.map((w, i) => Math.max(widestGlyph(column(i)), Math.min(4, w)));
+  const floors = [
+    colW.map((_, i) => Math.max(hard[i]!, longestWord(column(i)))),
+    colW.map((_, i) => Math.max(hard[i]!, longestWord(column(i).slice(1)))),
+    hard,
+  ];
   let total = colW.reduce((a, b) => a + b, 0) + 3 * colW.length + 1;
   shrink: while (total > look.width) {
-    for (const floor of floors) {
+    for (const [tier, floor] of floors.entries()) {
+      // The last tier shrinks the widest column that's still above its floor; the others the one with the most room.
       const room = colW.map((w, i) => w - floor[i]!);
-      const i = room.indexOf(Math.max(...room));
-      if (room[i]! > 0) {
+      const i = tier < floors.length - 1 ? room.indexOf(Math.max(...room))
+        : colW.reduce((best, w, k) => room[k]! > 0 && (best < 0 || w > colW[best]!) ? k : best, -1);
+      if (i >= 0 && room[i]! > 0) {
         colW[i]!--;
         total--;
         continue shrink;
       }
     }
-    const widest = colW.indexOf(Math.max(...colW));
-    if (colW[widest]! <= 4) break;
-    colW[widest]!--;
-    total--;
+    break;
   }
   if (total > look.width) {
     if (!rows.length) return card(look, '', [headers.join(' · ')]);

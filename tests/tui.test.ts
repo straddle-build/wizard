@@ -228,3 +228,18 @@ test('emoji, emoji sequences and CJK take two cells, so a table row with each ke
     '└───────┴────────────────────────┘',
   ].join('\n'));
 });
+
+// A column never shrinks below its widest glyph or four cells, so a two-glyph CJK header stays whole and the box
+// stays within the width: the long ID wraps instead.
+test('a column keeps its widest glyph and four cells while another gives way', () => {
+  const drawn = table({ width: 40, color: false }, ['状態', 'ID'], [['x', 'a'.repeat(40)]]);
+  assert.equal(drawn, [
+    '┌──────┬───────────────────────────────┐',
+    '│ 状態 │ ID                            │',
+    '├──────┼───────────────────────────────┤',
+    '│ x    │ aaaaaaaaaaaaaaaaaaaaaaaaaaaaa │',
+    '│      │ aaaaaaaaaaa                   │',
+    '└──────┴───────────────────────────────┘',
+  ].join('\n'));
+  for (const line of drawn.split('\n')) assert.ok(cells(line) <= 40, line);
+});
