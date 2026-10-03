@@ -9,7 +9,7 @@ import type { Prompter } from './ui.ts';
 
 // One line of the session, from events.jsonl or the client transcript, in time order.
 type Entry =
-  | { at: string; kind: 'step'; title: string }
+  | { at: string; kind: 'step'; title: string; file: string }
   | { at: string; kind: 'tool'; name: string; input: string }
   | { at: string; kind: 'text'; text: string }
   | { at: string; kind: 'event'; text: string };
@@ -77,7 +77,7 @@ function sessionLog(repo: string): SessionLog | null {
   const missingTranscripts = transcripts.filter((t) => !existsSync(t));
   const entries: Entry[] = [
     ...events.flatMap((e): Entry[] => {
-      if (e.kind === 'step-entered') return [{ at: e.at, kind: 'step', title: `${e.skill} · ${e.step}` }];
+      if (e.kind === 'step-entered') return [{ at: e.at, kind: 'step', title: `${e.skill} · ${e.step}`, file: `/skills/${e.skill}/steps/${e.step}.md` }];
       const line = eventText(e);
       return line ? [{ at: e.at, kind: 'event', text: line }] : [];
     }),
@@ -85,8 +85,11 @@ function sessionLog(repo: string): SessionLog | null {
   ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   const steps: Step[] = [{ title: 'Session start', entries: [] }];
   for (const e of entries) {
-    if (e.kind === 'step') steps.push({ title: e.title, entries: [] });
-    else steps.at(-1)!.entries.push(e);
+    if (e.kind !== 'step') { steps.at(-1)!.entries.push(e); continue; }
+    // The step is entered once its file has been read, so the tool call that read it opens the step.
+    const last = steps.at(-1)!.entries.at(-1);
+    const opener = last?.kind === 'tool' && last.input.includes(e.file) ? steps.at(-1)!.entries.pop()! : null;
+    steps.push({ title: e.title, entries: opener ? [opener] : [] });
   }
   return { steps: steps.filter((s, i) => i > 0 || s.entries.length), missingTranscripts };
 }
@@ -144,7 +147,7 @@ function renderLog(log: SessionLog, repo: string): string {
     return `<section><h2>${clean(s.title)}</h2><table>${rows.join('')}</table></section>`;
   });
   return `<!doctype html><meta charset="utf-8"><title>Straddle Wizard session log</title>
-<style>body{font:14px ui-monospace,monospace;background:#1f2430;color:#cbccc6;margin:2em}h2{color:#ffcc66}table{border-collapse:collapse;width:100%}td,th{border-top:1px solid #33415e;padding:4px 8px;vertical-align:top;text-align:left}th{color:#ffd580}.at{color:#707a8c;white-space:nowrap}.tool{color:#5ccfe6}pre,code,.md{white-space:pre-wrap;margin:0}table.md{width:auto;margin:4px 0}table.md td,table.md th{border:1px solid #33415e}pre.code{background:#232834;padding:8px}.c{color:#5c6773;font-style:italic}.s{color:#bae67e}.k{color:#ffa759}.n{color:#ffcc66}.warn{color:#f28779}</style>
+<style>body{font:14px ui-monospace,monospace;background:#1f2430;color:#cbccc6;margin:2em}h2{color:#ffcc66}table{border-collapse:collapse;width:100%}section>table{table-layout:fixed}section>table td:nth-child(2){width:7em}td,th{border-top:1px solid #33415e;padding:4px 8px;vertical-align:top;text-align:left}th{color:#ffd580}.at{color:#707a8c;white-space:nowrap;width:15em}.tool{color:#5ccfe6}pre,code,.md{white-space:pre-wrap;margin:0;overflow-wrap:anywhere}table.md{width:auto;margin:4px 0}table.md td,table.md th{border:1px solid #33415e}pre.code{background:#232834;padding:8px}.c{color:#5c6773;font-style:italic}.s{color:#bae67e}.k{color:#ffa759}.n{color:#ffcc66}.warn{color:#f28779}</style>
 <h1>Straddle Wizard session log</h1><p>${clean(repo)}. Built on this machine from ${WIZARD_DIR}/events.jsonl and your agent's transcript; nothing was uploaded.</p>
 ${missing.join('\n')}
 ${steps.join('\n')}

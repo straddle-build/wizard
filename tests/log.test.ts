@@ -52,8 +52,8 @@ test('normal session: each step in order, with its tool calls as rows under the 
   const html = await page(repo);
   const sections = [...html.matchAll(/<h2>(.*?)<\/h2><table>(.*?)<\/table>/g)].map((m) => [m[1], [...m[2]!.matchAll(/<td(?: class="tool")?>(.*?)<\/td><td>(.*?)<\/td><\/tr>/g)].map((r) => `${r[1]}: ${r[2]}`)]);
   assert.deepEqual(sections, [
-    ['Session start', ['wizard: Session started (abc12345-0000)', 'Read: <code>{&#34;file_path&#34;:&#34;/b/skills/straddle-setup/steps/01-begin.md&#34;}</code>']],
-    ['straddle-setup · 01-begin', ['Write: <code>{&#34;file_path&#34;:&#34;straddle-setup.md&#34;}</code>', 'wizard: Edited straddle-setup.md']],
+    ['Session start', ['wizard: Session started (abc12345-0000)']],
+    ['straddle-setup · 01-begin', ['Read: <code>{&#34;file_path&#34;:&#34;/b/skills/straddle-setup/steps/01-begin.md&#34;}</code>', 'Write: <code>{&#34;file_path&#34;:&#34;straddle-setup.md&#34;}</code>', 'wizard: Edited straddle-setup.md']],
     ['straddle-plan · 01-begin', ['agent: <div class="md">Plan drafted.</div>']],
   ]);
 });
