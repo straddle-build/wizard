@@ -243,3 +243,12 @@ test('a column keeps its widest glyph and four cells while another gives way', (
   ].join('\n'));
   for (const line of drawn.split('\n')) assert.ok(cells(line) <= 40, line);
 });
+
+// A long report: widths are gathered in loops, not spread into Math.max, which throws past V8's argument limit.
+test('a one-column table of 20,000 rows of 100-character IDs renders within the width', () => {
+  const rows = Array.from({ length: 20_000 }, (_, i) => [`id-${String(i).padStart(6, '0')}-${'x'.repeat(89)}`]);
+  const lines = table(plain, ['ID'], rows).split('\n');
+  // Top rule, header, header rule, two lines per ID with a rule between rows, bottom rule.
+  assert.equal(lines.length, 3 + 20_000 * 2 + 19_999 + 1);
+  for (const line of lines) assert.ok(cells(line) <= 60, line);
+});

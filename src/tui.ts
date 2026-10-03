@@ -26,18 +26,32 @@ const EMOJI = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F|\p{Regiona
 const EAST_ASIAN_WIDE = /^[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\ua960-\ua97f\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6\u{16fe0}-\u{18cff}\u{1b000}-\u{1b2ff}\u{20000}-\u{3fffd}]/u;
 const graphemeCells = (g: string): number => /^[\p{Mn}\p{Me}\p{Cf}]+$/u.test(g) ? 0 : EMOJI.test(g) || EAST_ASIAN_WIDE.test(g) ? 2 : 1;
 
+// Printable ASCII is one cell a character, with no clusters to find: the common case, measured without segmenting.
+const ASCII = /^[ -~]*$/;
+
 // The visible width of s in terminal cells, ignoring SGR codes.
 export function cells(s: string): number {
+  const plain = stripVTControlCharacters(s);
+  if (ASCII.test(plain)) return plain.length;
   let n = 0;
-  for (const { segment } of GRAPHEMES.segment(stripVTControlCharacters(s))) n += graphemeCells(segment);
+  for (const { segment } of GRAPHEMES.segment(plain)) n += graphemeCells(segment);
   return n;
 }
 
 const pad = (s: string, w: number): string => s + ' '.repeat(Math.max(0, w - cells(s)));
 
+// The largest of values and `least`. A loop, because spreading a long report's per-row widths into Math.max passes
+// more arguments than V8 allows.
+function maxOf(values: Iterable<number>, least: number): number {
+  let max = least;
+  for (const v of values) if (v > max) max = v;
+  return max;
+}
+
 // Splits plain s after at most w cells, between grapheme clusters. A first cluster wider than w goes alone, so it
 // always makes progress.
 function cut(s: string, w: number): [string, string] {
+  if (ASCII.test(s)) return [s.slice(0, Math.max(1, w)), s.slice(Math.max(1, w))];
   let used = 0;
   let i = 0;
   for (const { segment } of GRAPHEMES.segment(s)) {
@@ -107,7 +121,7 @@ export function wrap(text: string, w: number, look: Look): string[] {
     if (ww > w) {
       const pieces = breakWord(stripVTControlCharacters(s), w);
       if (used) lines.push(line);
-      lines.push(...pieces.slice(0, -1));
+      for (const piece of pieces.slice(0, -1)) lines.push(piece);
       [line, used, s, ww] = ['', 0, pieces.at(-1)!, cells(pieces.at(-1)!)];
     }
     if (used && used + 1 + ww > w) {
@@ -128,7 +142,7 @@ export function card(look: Look, title: string, rows: readonly (string | readonl
   const outer = Math.max(12, look.width);
   const body = outer - 4;
   const plain = { ...look, color: false };
-  const labelW = Math.min(28, Math.floor(body * 0.4), Math.max(0, ...rows.map((r) => typeof r === 'string' ? 0 : cells(r[0]))));
+  const labelW = Math.min(28, Math.floor(body * 0.4), maxOf(rows.map((r) => typeof r === 'string' ? 0 : cells(r[0])), 0));
   const valueW = body - labelW - 2;
   const t = cut(title, outer - 6)[0];
   const lines = [t ? `┌─ ${paint(look, 'bold', t)} ${'─'.repeat(outer - 5 - cells(t))}┐` : `┌${'─'.repeat(outer - 2)}┐`];
@@ -154,10 +168,13 @@ export function card(look: Look, title: string, rows: readonly (string | readonl
 // (its natural width when narrower), as the CLI's layoutColumns floors at 4. When even that is too wide, each row
 // becomes its own card of column: value lines.
 export function table(look: Look, headers: readonly string[], rows: readonly (readonly string[])[]): string {
-  const longestWord = (texts: readonly string[]) => Math.max(1, ...texts.flatMap((s) => words(s, look).map((w) => w.w)));
-  const widestGlyph = (texts: readonly string[]) => Math.max(1, ...texts.flatMap((s) => [...GRAPHEMES.segment(stripVTControlCharacters(s))].map((g) => graphemeCells(g.segment))));
+  const longestWord = (texts: readonly string[]) => maxOf(texts.flatMap((s) => words(s, look).map((w) => w.w)), 1);
+  const widestGlyph = (texts: readonly string[]) => maxOf(texts.map((s) => {
+    const plain = stripVTControlCharacters(s);
+    return ASCII.test(plain) ? 1 : maxOf([...GRAPHEMES.segment(plain)].map((g) => graphemeCells(g.segment)), 0);
+  }), 1);
   const column = (i: number) => [headers[i]!, ...rows.map((r) => r[i] ?? '')];
-  const colW = headers.map((_, i) => Math.max(1, ...column(i).map((s) => cells(wrap(s, Infinity, look)[0]!))));
+  const colW = headers.map((_, i) => maxOf(column(i).map((s) => cells(wrap(s, Infinity, look)[0]!)), 1));
   const hard = colW.map((w, i) => Math.max(widestGlyph(column(i)), Math.min(4, w)));
   const floors = [
     colW.map((_, i) => Math.max(hard[i]!, longestWord(column(i)))),
@@ -240,7 +257,7 @@ export function markdown(look: Look, text: string): string {
     } else if (!line.trim()) {
       blank();
     } else {
-      out.push(...wrap(line.trim(), look.width, look));
+      for (const l of wrap(line.trim(), look.width, look)) out.push(l);
     }
   }
   while (out.at(-1) === '') out.pop();
