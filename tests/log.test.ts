@@ -115,6 +115,23 @@ const DELIMITED: [string, string][] = [
   ['M14 token = zqDa*zqDb.', 'M14 token = [redacted]'],
   ['M15 **API key:** `zqEa zqEb`', 'M15 API key: [redacted]'],
   ['M16 **Password:** _zqFa,zqFb_, then more', 'M16 Password: [redacted], then more'],
+  ['M17 token: `zqf1234`.zqTAIL then prose', 'M17 token: [redacted] then prose'],
+  ['M18 password: "zqg1234"zqTAIL then prose', 'M18 password: &#34;[redacted]&#34; then prose'],
+];
+
+// A secret is a whole word in a command: quotes, backticks, emphasis marks and punctuation inside it or attached to a
+// quoted part don't end it, and the next word after the space stays. Each command and its row on the page.
+const WORDS: [string, string][] = [
+  ['DB_PASSWORD=_zqa1_.zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
+  ['DB_PASSWORD=*zqb1*,zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=[redacted] npm run migrate'],
+  ['DB_PASSWORD="zqc1234".zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=&#34;[redacted]&#34; npm run migrate'],
+  ["DB_PASSWORD='zqd1234',zqTAIL npm run migrate", 'Bash: $ DB_PASSWORD=&#39;[redacted]&#39; npm run migrate'],
+  ['DB_PASSWORD=`zqe1234`zqTAIL npm run migrate', 'Bash: $ DB_PASSWORD=`[redacted]` npm run migrate'],
+  ["PASSWORD=zqabcd'zqTAIL1 npm run migrate", 'Bash: $ PASSWORD=[redacted] npm run migrate'],
+  ['PASSWORD=zqabcdef"zqTAIL2" npm run migrate', 'Bash: $ PASSWORD=[redacted]&#34; npm run migrate'],
+  ['TOKEN=zqabcdef`zqTAIL3` npm run migrate', 'Bash: $ TOKEN=[redacted]` npm run migrate'],
+  ["PASSWORD=it'szqTAIL4secret npm run migrate", 'Bash: $ PASSWORD=[redacted] npm run migrate'],
+  ['curl -d password=zqh12345,token="zqTOKENVALUE" next', 'Bash: $ curl -d password=[redacted]&#34; next'],
 ];
 
 // Delimited values below, at and above 512 characters (where the previous rule stopped reading) and past the
@@ -145,6 +162,11 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     assistant('2026-10-03T10:00:03.310Z', { type: 'tool_use', id: 't7', name: 'Grep', input: { pattern: 'charges' } }),
     result('t7', `{"password":"zqesc1\\"zqesc2","id":"keepme01"}\n{"password":"${zqValue(2100)}","id":"keepme02"}`),
     assistant('2026-10-03T10:00:03.320Z', { type: 'tool_use', name: 'Bash', input: { command: String.raw`curl -d "{\"password\":\"zqopen\\\"zqmore\",\"id\":\"keepme03\"}"` } }),
+    ...WORDS.map(([command], i) => assistant(`2026-10-03T10:00:03.33${i}Z`, { type: 'tool_use', name: 'Bash', input: { command } })),
+    // A secret-named value after a long run of backslashes, and a run with no value after it (no secret, so it stays):
+    // each is read once, not once per backslash, which took seconds at this length.
+    assistant('2026-10-03T10:00:03.340Z', { type: 'tool_use', id: 't8', name: 'Bash', input: { command: 'cat creds' } }),
+    result('t8', `password=${'\\'.repeat(100_000)}zqEND keep100\npassword=${'\\'.repeat(100_000)} keep101`),
     assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
     result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
     // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
@@ -152,7 +174,9 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     assistant('2026-10-03T10:00:04.000Z', { type: 'tool_use', name: 'Write', input: { file_path: `${s.home}/shop/.env.local`, content: `STRADDLE_WEBHOOK_SECRET=${s.webhook}\nHASH=${s.hex}` } }),
     assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\napi_key: \`${s.envKey}\`\n**API key:** \`${s.envKey}\`\nsecret: \`${s.starTick}\`\n**Secret:** ${s.starBold}\n*API key:* ${s.starItalic}\n${[...DELIMITED, ...LONG].map(([line]) => line).join('\n')}\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
   ].join('\n'));
+  const started = performance.now();
   const html = await page(repo);
+  assert.ok(performance.now() - started < 5000, `wizard log took ${Math.round(performance.now() - started)} ms`);
   for (const [name, secret] of Object.entries(PLANTED)) assert.ok(!html.includes(secret), `planted ${name} is on the page`);
   // No part of an asterisk-bearing value survives either: Markdown delimiting never truncates a secret.
   for (const piece of ['021000021', 'FAKEK', '/home/dana', '*er2secret', '*pass*value', '*tail99', '*key*value', '*secret*value', 'zq']) assert.ok(!html.includes(piece), `${piece} is on the page`);
@@ -186,6 +210,8 @@ test('planted secrets never reach the page, in commands, results, diffs, written
   for (const [, expected] of [...DELIMITED, ...LONG]) assert.ok(text.includes(`${expected}\n`) || text.includes(`${expected}┌`), `${expected} missing`);
   for (const kept of ['&quot;id&quot;:&quot;keepme01&quot;', '&quot;id&quot;:&quot;keepme02&quot;']) assert.ok(text.includes(kept) || text.includes(kept.replaceAll('&quot;', '"')), `${kept} missing`);
   assert.ok(rows.some((r) => r.startsWith('Bash: $ curl -d ') && r.includes('keepme03') && r.includes('[redacted]')), rows.join('\n---\n'));
+  for (const [, expected] of WORDS) assert.ok(rows.includes(expected), `${expected} missing from\n${rows.join('\n---\n')}`);
+  assert.ok(text.includes('$ cat credspassword=[redacted] keep100'), 'the value after the backslashes is redacted and the next word kept');
   // A prose account number before a full stop, and a bare one in a table cell, go; the timestamp beside it stays.
   assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\. Use account \[redacted\]\./);
   assert.match(html, /│ \[redacted\] *│ 2026-10-03T10:00:05Z │/);

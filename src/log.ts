@@ -30,24 +30,30 @@ interface SessionLog { steps: Step[]; unavailable: Unavailable[] }
 // (a table cell, a sentence), where digits inside a timestamp, path, version or id stay; and the Markdown and quoting
 // agents put around a named value.
 //
+// A secret is a whole word: quotes, backticks, emphasis marks and punctuation inside or attached to it don't end it,
+// only whitespace does (JSON, where quotes do end values, is the exception the quoted rules below keep).
+//
 // The separator takes the label's closing delimiter on either side of the colon (`**Token**:`, `__API key:__`,
 // `` `api_key`: ``, `"api_key":`; after the colon only when a space follows) and the value's opening quote or
-// backtick. The value is then read by how it opens, with no length bound, and an unclosed one runs to the end of its
-// line rather than being reread as prose:
+// backtick, with backslashes only as the escape of that quote (`\"`). The value is then read by how it opens, with no
+// length bound, and an unclosed one runs to the end of its line rather than being reread as prose:
 // - a double-quoted value to its unescaped closing quote, reading `\"` and `\\` as escapes; one opened with an escaped
 //   quote (JSON inside a string, `\"password\":\"…\"`) to its `\"`, reading `\\\"` and `\\\\` as its escapes;
 // - a single-quoted or backticked value to its closing mark;
 // - an emphasized value (`**…**`, `_…_`) to the matching closer before a space or punctuation;
-// - any other value to whitespace or a quote, keeping runs of `,` `;` `}` `\` when more value follows them.
-// Every branch stops only where its own terminator is, so no attempt fails after a long scan and the work is linear.
-// Values under 6 characters stay, as in Northwind.
+// - any other value to whitespace, keeping runs of `,` `;` `}` `\`, quotes and backticks when more value follows them.
+// The last rule then takes any word still attached to a redacted value (`"[redacted]".tail`, `[redacted]'tail`): the
+// closer it follows stays, and a JSON neighbour stays because its quote stops the word. It runs after every value is
+// redacted, so a label it absorbs (`"[redacted]",token:"[redacted]"`) costs that label, never a value.
+// Every branch stops only where its own terminator is, and no two parts of a rule can take the same backslash, so no
+// attempt fails after a long scan and the work is linear. Values under 6 characters stay, as in Northwind.
 //
 // A named rule matches at the separator and finds the name by looking behind it, so the name is never consumed and
 // each separator looks back over one run of name characters: matching from the start of the name retried a `[\w-]*`
 // at every word boundary and made long hyphenated text quadratic.
 const named = (name: string, value: string) =>
-  new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*\\*(?:\x60{1,2}|["'])?)${value}`, 'gi');
-const SECRET_VALUE = String.raw`(?!\[redacted\])(?:(?<=\\")(?:[^"\\\n]|\\\\(?:\\["\\]|[^"\\\n])|\\(?!")[^\n]?){6,}(?=\\?"|\n|$)|(?<=[^\\]")(?:[^"\\\n]|\\[^\n]?){6,}(?="|\n|$)|(?<=')(?:[^'\\\n]|\\[^\n]?){6,}(?='|\n|$)|(?<=\x60)[^\x60\n]{6,}(?=\x60|\n|$)|([*_]{1,2})[^\n]+?(?:\2(?=[\s.,;:!?)\]]|$)|(?=\n|$))|(?:[^\s"'\x60\\,;}]|[\\,;}]+(?=[^\s"'\x60\\,;}])){6,})`;
+  new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*(?:\\*["']|\x60{1,2})?)${value}`, 'gi');
+const SECRET_VALUE = String.raw`(?!\[redacted\])(?:(?<=\\")(?:[^"\\\n]|\\\\(?:\\["\\]|[^"\\\n])|\\(?!")[^\n]?){6,}(?=\\?"|\n|$)|(?<=[^\\]")(?:[^"\\\n]|\\[^\n]?){6,}(?="|\n|$)|(?<=')(?:[^'\\\n]|\\[^\n]?){6,}(?='|\n|$)|(?<=\x60)[^\x60\n]{6,}(?=\x60|\n|$)|([*_]{1,2})[^\n]+?(?:\2(?=[\s.,;:!?)\]]|$)|(?=\n|$))|(?:[^\s"'\x60\\,;}]|[\\,;}"'\x60]+(?=[^\s"'\x60\\,;}])){6,})`;
 const SECRETS: [RegExp, string][] = [
   [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_-]{6,}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
@@ -57,6 +63,7 @@ const SECRETS: [RegExp, string][] = [
   [/\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g, '[redacted]'],
   [/(?<![\w+=])(?=[\w+=]*\d)(?=[\w+=]*[A-Za-z])[A-Za-z0-9+_=]{32,}/g, '[redacted]'],
   [/\/(?:Users|home)\/[\w.-]+(?=\/|\b)/g, '~'],
+  [/\[redacted\](["'`*_]{0,2})[^\s"'`]*[A-Za-z0-9][^\s"'`]*/g, '[redacted]$1'],
 ];
 
 function redact(raw: string): string {
