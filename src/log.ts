@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findRollout } from './codex.ts';
 import { readObservedEvents, type ObservedEvent } from './events.ts';
 import { field, parseJson, text } from './json.ts';
 import { WIZARD_DIR } from './receipt.ts';
+import { markdown } from './tui.ts';
 import type { Prompter } from './ui.ts';
 
 // One line of the session, from events.jsonl or the client transcript, in time order.
@@ -17,13 +18,17 @@ type Entry =
 interface Step { title: string; entries: Entry[] }
 interface SessionLog { steps: Step[]; missingTranscripts: string[] }
 
-// Secrets go before anything is rendered: API keys, bearer tokens, paykey and other credential values, and digit
-// runs long enough to be account or routing numbers.
+// Northwind's integration log rules (lib/recorded-session.ts): sk_/pk_/rk_/whsec_ keys, Bearer and Basic credentials,
+// `KEY=value` and `"secret": "value"` pairs, JWTs, long base64/hex runs, and home directories as `~`. Order matters:
+// Bearer before `Authorization:`. Added here: account and routing numbers.
 const SECRETS: [RegExp, string][] = [
-  [/\bsk_[A-Za-z0-9_]{8,}/g, 'sk_[redacted]'],
-  [/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[redacted]'],
-  [/((?:paykey|api[_-]?key|secret|token|password)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)[^\s"'\\,}]{6,}/gi, '$1[redacted]'],
-  [/\b\d{6,17}\b/g, '[redacted number]'],
+  [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_-]{6,}/g, '[redacted]'],
+  [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
+  [/\b([\w-]*(?:api[_-]?key|secret|token|password|paykey|signature|authorization)[\w-]*)(\\*["']?\s*[:=]\s*\\*["']?)(?!\[redacted\])[^\s"'`,;\\}]{6,}/gi, '$1$2[redacted]'],
+  [/\b([\w-]*(?:account|routing)[_ -]?(?:number|num|no)?[\w-]*)(\\*["']?\s*[:=]\s*\\*["']?)\d{4,17}\b/gi, '$1$2[redacted]'],
+  [/\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g, '[redacted]'],
+  [/(?<![\w+=])(?=[\w+=]*\d)(?=[\w+=]*[A-Za-z])[A-Za-z0-9+_=]{32,}/g, '[redacted]'],
+  [/\/(?:Users|home)\/[\w.-]+(?=\/|\b)/g, '~'],
 ];
 
 function redact(raw: string): string {
@@ -42,6 +47,13 @@ const eventText = (e: ObservedEvent): string | null => {
   }
 };
 
+// A tool call's input as the agent wrote it: one `name: value` line per field, multi-line values (commands, patches,
+// file contents) with their own line breaks, and a list of words as one command line.
+function toolInput(input: unknown): string {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return typeof input === 'string' ? input : JSON.stringify(input ?? {});
+  return Object.entries(input).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : Array.isArray(v) && v.every((w) => typeof w === 'string') ? v.join(' ') : JSON.stringify(v)}`).join('\n');
+}
+
 // Claude Code transcripts and Codex rollouts: assistant text and tool calls, timestamped.
 function transcriptEntries(path: string): Entry[] {
   return readFileSync(path, 'utf8').split('\n').flatMap((line): Entry[] => {
@@ -51,7 +63,10 @@ function transcriptEntries(path: string): Entry[] {
     if (field(entry, 'type') === 'response_item') {
       const payload = field(entry, 'payload');
       const type = text(field(payload, 'type')) ?? '';
-      if (type.endsWith('_call')) return [{ at, kind: 'tool', name: text(field(payload, 'name')) ?? type, input: text(field(payload, 'arguments')) ?? text(field(payload, 'input')) ?? JSON.stringify(field(payload, 'action') ?? {}) }];
+      if (type.endsWith('_call')) {
+        const args = text(field(payload, 'arguments'));
+        return [{ at, kind: 'tool', name: text(field(payload, 'name')) ?? type, input: toolInput(args === undefined ? field(payload, 'input') ?? field(payload, 'action') : parseJson(args) ?? args) }];
+      }
       const content = field(payload, 'content');
       if (type !== 'message' || field(payload, 'role') !== 'assistant' || !Array.isArray(content)) return [];
       return content.flatMap((c): Entry[] => (field(c, 'type') === 'output_text' ? [{ at, kind: 'text', text: text(field(c, 'text')) ?? '' }] : []));
@@ -61,7 +76,7 @@ function transcriptEntries(path: string): Entry[] {
     return content.flatMap((block): Entry[] => {
       const type = field(block, 'type');
       if (type === 'text') return [{ at, kind: 'text', text: text(field(block, 'text')) ?? '' }];
-      if (type === 'tool_use') return [{ at, kind: 'tool', name: text(field(block, 'name')) ?? 'tool', input: JSON.stringify(field(block, 'input') ?? {}) }];
+      if (type === 'tool_use') return [{ at, kind: 'tool', name: text(field(block, 'name')) ?? 'tool', input: toolInput(field(block, 'input')) }];
       return [];
     });
   });
@@ -98,72 +113,62 @@ const escape = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)}
 // Redaction first, then HTML escaping, for every recorded string the page shows.
 const clean = (s: string) => escape(redact(s));
 
-// Ayu Mirage token colors for fenced code: comments, strings, keywords, numbers.
-const TOKENS = /(\/\/.*|#.*)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|\b(const|let|var|function|return|import|from|export|async|await|if|else|for|while|new|class|def|try|catch|throw|true|false|null)\b|\b(\d+(?:\.\d+)?)\b/g;
-const highlight = (code: string) => {
-  let html = '';
-  let last = 0;
-  for (const m of code.matchAll(TOKENS)) {
-    const kind = m[1] ? 'c' : m[2] ? 's' : m[3] ? 'k' : 'n';
-    html += `${escape(code.slice(last, m.index))}<span class="${kind}">${escape(m[0])}</span>`;
-    last = m.index + m[0].length;
-  }
-  return html + escape(code.slice(last));
-};
+// Agent text through the Wizard's own terminal Markdown renderer (box-drawn tables, headings, lists, bold, code), so
+// the page reads like the report screens; its color codes become classes.
+const MARKDOWN_COLUMNS = 96;
+const agentText = (raw: string) =>
+  escape(markdown({ width: MARKDOWN_COLUMNS, color: true }, redact(raw))).replace(/\x1b\[([\d;]+)m([^\x1b]*)\x1b\[0m/g, (_, code: string, body: string) => `<span class="t${code.replace(';', '-')}">${body}</span>`);
 
-// Inline Markdown on one escaped line: `code` and **bold**.
-const inline = (s: string) => escape(s).replace(/`([^`]+)`/g, '<code class="i">$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-
-// Agent text after redaction: Markdown tables as tables, fenced code highlighted, the rest as written.
-function markdown(raw: string): string {
-  const lines = redact(raw).split('\n');
-  const out: string[] = [];
-  for (let i = 0; i < lines.length;) {
-    if (lines[i]!.startsWith('```')) {
-      const end = lines.findIndex((l, j) => j > i && l.startsWith('```'));
-      const stop = end < 0 ? lines.length : end;
-      out.push(`<pre class="code">${highlight(lines.slice(i + 1, stop).join('\n'))}</pre>`);
-      i = stop + 1;
-    } else if (lines[i]!.trim().startsWith('|')) {
-      const rows: string[][] = [];
-      for (; i < lines.length && lines[i]!.trim().startsWith('|'); i++) {
-        const cells = lines[i]!.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
-        if (!cells.every((c) => /^:?-+:?$/.test(c))) rows.push(cells);
-      }
-      out.push(`<table class="md">${rows.map((r, n) => `<tr>${r.map((c) => (n ? `<td>${inline(c)}</td>` : `<th>${inline(c)}</th>`)).join('')}</tr>`).join('')}</table>`);
-    } else {
-      const [, hashes, item, rest] = /^(?:(#{1,6})\s+|\s*([-*]|\d+\.)\s+)?(.*)$/.exec(lines[i]!)!;
-      out.push(hashes ? `<div class="md h">${inline(rest!)}</div>` : item ? `<div class="md li">${item === '-' || item === '*' ? '•' : escape(item)} ${inline(rest!)}</div>` : `<div class="md">${inline(lines[i]!)}</div>`);
-      i++;
-    }
-  }
-  return out.join('');
-}
+const row = (at: string, who: string, body: string, kind = '') => `<div class="row${kind}"><span class="at">${clean(at)}</span><span class="who">${who}</span>${body}</div>`;
 
 function renderLog(log: SessionLog, repo: string): string {
   const missing = log.missingTranscripts.map((t) => `<p class="warn">The client transcript is missing (moved or deleted): ${clean(t)}. Showing the Wizard's events only.</p>`);
   const steps = log.steps.map((s) => {
     const rows = s.entries.map((e) => {
-      if (e.kind === 'tool') return `<tr><td class="at">${clean(e.at)}</td><td class="tool">${clean(e.name)}</td><td><code>${clean(e.input)}</code></td></tr>`;
-      if (e.kind === 'text') return `<tr><td class="at">${clean(e.at)}</td><td>agent</td><td>${markdown(e.text)}</td></tr>`;
-      return `<tr><td class="at">${clean(e.at)}</td><td>wizard</td><td>${clean(e.kind === 'event' ? e.text : e.title)}</td></tr>`;
+      if (e.kind === 'tool') return row(e.at, clean(e.name), `<pre class="body">${clean(e.input)}</pre>`, ' tool');
+      if (e.kind === 'text') return row(e.at, 'agent', `<pre class="body md">${agentText(e.text)}</pre>`);
+      return row(e.at, 'wizard', `<div class="body">${clean(e.kind === 'event' ? e.text : e.title)}</div>`, ' wizard');
     });
-    return `<section><h2>${clean(s.title)}</h2><table>${rows.join('')}</table></section>`;
+    return `<section><h2>${clean(s.title)}</h2>${rows.join('')}</section>`;
   });
-  return `<!doctype html><meta charset="utf-8"><title>Straddle Wizard session log</title>
-<style>body{font:14px ui-monospace,monospace;background:#1f2430;color:#cbccc6;margin:2em}h2{color:#ffcc66}table{border-collapse:collapse;width:100%}section>table{table-layout:fixed}section>table td:nth-child(2){width:7em}td,th{border-top:1px solid #33415e;padding:4px 8px;vertical-align:top;text-align:left}th{color:#ffd580}.at{color:#707a8c;white-space:nowrap;width:15em}.tool{color:#5ccfe6}pre,code,.md{white-space:pre-wrap;margin:0;overflow-wrap:anywhere}.md.h{color:#ffcc66;font-weight:bold;margin-top:6px}.md.li{padding-left:1.2em;text-indent:-1.2em}code.i{color:#95e6cb;background:#232834;padding:0 3px}strong{color:#f29e74}table.md{width:auto;margin:4px 0}table.md td,table.md th{border:1px solid #33415e}pre.code{background:#232834;padding:8px}.c{color:#5c6773;font-style:italic}.s{color:#bae67e}.k{color:#ffa759}.n{color:#ffcc66}.warn{color:#f28779}</style>
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Straddle Wizard session log</title>
+<style>
+:root{color-scheme:dark;--bg:#1f2430;--panel:#232834;--fg:#cbccc6;--muted:#8a94a6;--line:#33415e;--accent:#5ccfe6;--heading:#ffcc66}
+*{box-sizing:border-box}
+body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);margin:0 auto;padding:2rem 1.5rem;max-width:84rem}
+::selection{background:#34455a}
+h1{font-size:1.5rem;margin:0 0 .5rem;color:var(--fg);overflow-wrap:anywhere}
+h2{color:var(--heading);font-size:1.1rem;margin:2rem 0 .5rem;overflow-wrap:anywhere}
+p{max-width:75ch;margin:0 0 .75rem;overflow-wrap:anywhere}
+.row{display:grid;grid-template-columns:24ch 12ch minmax(0,1fr);gap:0 1rem;padding:.5rem 0;border-top:1px solid var(--line)}
+.at{color:var(--muted);font-variant-numeric:tabular-nums}
+.who{color:var(--fg)}
+.tool .who{color:var(--accent)}
+.wizard .body{color:var(--muted)}
+.body{margin:0;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+.md{white-space:pre;overflow-x:auto;overflow-wrap:normal;padding-bottom:.25rem}
+.t1{font-weight:bold}.t2{color:var(--muted)}.t36{color:var(--accent)}.t1-36{color:var(--heading);font-weight:bold}.t32{color:#bae67e}.t33{color:var(--heading)}.t31{color:#f28779}
+.warn{color:#f28779}
+@media (max-width:640px){body{padding:1rem}h1{font-size:1.2rem}.row{display:flex;flex-wrap:wrap;gap:0 1rem}.row .body{flex:0 0 100%;margin-top:.25rem}}
+</style>
 <h1>Straddle Wizard session log</h1><p>${clean(repo)}. Built on this machine from ${WIZARD_DIR}/events.jsonl and your agent's transcript; nothing was uploaded.</p>
 ${missing.join('\n')}
 ${steps.join('\n')}
+</html>
 `;
 }
 
-// Writes the viewer next to the run record and returns its path, or null when no session was recorded.
+// Writes the viewer next to the run record and returns its path, or null when no session was recorded. The page holds
+// the session's commands and replies, so it goes to a fresh owner-only file renamed into place: a symlink or a looser
+// file already at the path is replaced, never followed or reused.
 export function writeLog(repo: string): string | null {
   const log = sessionLog(repo);
   if (!log) return null;
   const path = join(repo, WIZARD_DIR, 'session-log.html');
-  writeFileSync(path, renderLog(log, repo), { mode: 0o600 });
+  const tmp = `${path}.${process.pid}.tmp`;
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, renderLog(log, repo), { mode: 0o600, flag: 'wx' });
+  renameSync(tmp, path);
   return path;
 }
 
