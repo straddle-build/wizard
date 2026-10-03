@@ -227,6 +227,8 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     assistant('2026-10-03T10:00:04.600Z', { type: 'text', text: FENCES }),
     assistant('2026-10-03T10:00:04.700Z', { type: 'tool_use', name: 'Write', input: { file_path: 'docs/setup.md', content: FENCES } }),
     assistant('2026-10-03T10:00:04.800Z', { type: 'tool_use', name: 'Write', input: { file_path: 'docs/fences.md', content: FENCE_CROSS } }),
+    ...['echo account_secret=4729 routing_token=47291 ACCOUNT_TOKEN=472913 account_number=4729 next', 'ACCOUNT_TOKEN=1234567-zqtailSECRET npm run migrate', 'echo account_secret=472 routing_token=391 next']
+      .map((command, i) => assistant(`2026-10-03T10:00:04.9${i}0Z`, { type: 'tool_use', name: 'Bash', input: { command } })),
     assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
     result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
     // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
@@ -272,6 +274,13 @@ test('planted secrets never reach the page, in commands, results, diffs, written
   for (const l of [0, 1, 2]) for (const n of [0, 1]) for (const kept of [`[redacted] keepFIN${l}${n}`, `keepFENCE${l}${n} code`, `keepBARE${l}${n} code`]) assert.ok(text.includes(kept), `${kept} missing`);
   assert.ok(rows.some((r) => r.startsWith('Bash: $ curl -d ') && r.includes('keepme03') && r.includes('[redacted]')), rows.join('\n---\n'));
   for (const [, expected] of WORDS) assert.ok(rows.includes(expected), `${expected} missing from\n${rows.join('\n---\n')}`);
+  // Account and routing numbers keep their 4-digit minimum under a label that also holds a secret word, and such a
+  // label still masks a whole mixed value; 3 digits stay under any label, as before.
+  for (const expected of [
+    'Bash: $ echo account_secret=[redacted] routing_token=[redacted] ACCOUNT_TOKEN=[redacted] account_number=[redacted] next',
+    'Bash: $ ACCOUNT_TOKEN=[redacted] npm run migrate',
+    'Bash: $ echo account_secret=472 routing_token=391 next',
+  ]) assert.ok(rows.includes(expected), `${expected} missing from\n${rows.join('\n---\n')}`);
   for (const i of CROSS.keys()) {
     const line = text.slice(text.indexOf(`X${i} `), text.indexOf(`keepX${i}`) + `keepX${i}`.length);
     assert.ok(line.endsWith(`keepX${i}`) && line.includes('[redacted]'), `${CROSS[i]} shows as ${JSON.stringify(line)}`);
