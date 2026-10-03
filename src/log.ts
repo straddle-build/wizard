@@ -111,6 +111,9 @@ const highlight = (code: string) => {
   return html + escape(code.slice(last));
 };
 
+// Inline Markdown on one escaped line: `code` and **bold**.
+const inline = (s: string) => escape(s).replace(/`([^`]+)`/g, '<code class="i">$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
 // Agent text after redaction: Markdown tables as tables, fenced code highlighted, the rest as written.
 function markdown(raw: string): string {
   const lines = redact(raw).split('\n');
@@ -127,9 +130,10 @@ function markdown(raw: string): string {
         const cells = lines[i]!.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
         if (!cells.every((c) => /^:?-+:?$/.test(c))) rows.push(cells);
       }
-      out.push(`<table class="md">${rows.map((r, n) => `<tr>${r.map((c) => (n ? `<td>${escape(c)}</td>` : `<th>${escape(c)}</th>`)).join('')}</tr>`).join('')}</table>`);
+      out.push(`<table class="md">${rows.map((r, n) => `<tr>${r.map((c) => (n ? `<td>${inline(c)}</td>` : `<th>${inline(c)}</th>`)).join('')}</tr>`).join('')}</table>`);
     } else {
-      out.push(`<div class="md">${escape(lines[i]!)}</div>`);
+      const [, hashes, item, rest] = /^(?:(#{1,6})\s+|\s*([-*]|\d+\.)\s+)?(.*)$/.exec(lines[i]!)!;
+      out.push(hashes ? `<div class="md h">${inline(rest!)}</div>` : item ? `<div class="md li">${item === '-' || item === '*' ? '•' : escape(item)} ${inline(rest!)}</div>` : `<div class="md">${inline(lines[i]!)}</div>`);
       i++;
     }
   }
@@ -147,7 +151,7 @@ function renderLog(log: SessionLog, repo: string): string {
     return `<section><h2>${clean(s.title)}</h2><table>${rows.join('')}</table></section>`;
   });
   return `<!doctype html><meta charset="utf-8"><title>Straddle Wizard session log</title>
-<style>body{font:14px ui-monospace,monospace;background:#1f2430;color:#cbccc6;margin:2em}h2{color:#ffcc66}table{border-collapse:collapse;width:100%}section>table{table-layout:fixed}section>table td:nth-child(2){width:7em}td,th{border-top:1px solid #33415e;padding:4px 8px;vertical-align:top;text-align:left}th{color:#ffd580}.at{color:#707a8c;white-space:nowrap;width:15em}.tool{color:#5ccfe6}pre,code,.md{white-space:pre-wrap;margin:0;overflow-wrap:anywhere}table.md{width:auto;margin:4px 0}table.md td,table.md th{border:1px solid #33415e}pre.code{background:#232834;padding:8px}.c{color:#5c6773;font-style:italic}.s{color:#bae67e}.k{color:#ffa759}.n{color:#ffcc66}.warn{color:#f28779}</style>
+<style>body{font:14px ui-monospace,monospace;background:#1f2430;color:#cbccc6;margin:2em}h2{color:#ffcc66}table{border-collapse:collapse;width:100%}section>table{table-layout:fixed}section>table td:nth-child(2){width:7em}td,th{border-top:1px solid #33415e;padding:4px 8px;vertical-align:top;text-align:left}th{color:#ffd580}.at{color:#707a8c;white-space:nowrap;width:15em}.tool{color:#5ccfe6}pre,code,.md{white-space:pre-wrap;margin:0;overflow-wrap:anywhere}.md.h{color:#ffcc66;font-weight:bold;margin-top:6px}.md.li{padding-left:1.2em;text-indent:-1.2em}code.i{color:#95e6cb;background:#232834;padding:0 3px}strong{color:#f29e74}table.md{width:auto;margin:4px 0}table.md td,table.md th{border:1px solid #33415e}pre.code{background:#232834;padding:8px}.c{color:#5c6773;font-style:italic}.s{color:#bae67e}.k{color:#ffa759}.n{color:#ffcc66}.warn{color:#f28779}</style>
 <h1>Straddle Wizard session log</h1><p>${clean(repo)}. Built on this machine from ${WIZARD_DIR}/events.jsonl and your agent's transcript; nothing was uploaded.</p>
 ${missing.join('\n')}
 ${steps.join('\n')}

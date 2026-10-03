@@ -70,6 +70,16 @@ test('secrets in the transcript (sk_ key, bearer token, paykey, account number) 
   assert.ok(html.includes('<div class="md">STRADDLE_API_KEY=[redacted]</div>'), html);
 });
 
+test('a resumed session names its transcript twice and every row still shows once; report headings, bullets, bold and code render', async () => {
+  const repo = recorded(assistant('2026-10-03T10:00:07.000Z', { type: 'text', text: '## Setup report\n- **Status:** complete\n- Key in `.env`' }));
+  const events = readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8');
+  const first = JSON.parse(events.split('\n')[0]!);
+  writeFiles(repo, { '.straddle-wizard/events.jsonl': `${events}${JSON.stringify({ ...first, at: '2026-10-03T10:00:08.000Z' })}\n` });
+  const html = await page(repo);
+  assert.equal(html.split('Setup report').length, 2, html);
+  assert.ok(html.includes('<div class="md h">Setup report</div><div class="md li">• <strong>Status:</strong> complete</div><div class="md li">• Key in <code class="i">.env</code></div>'), html);
+});
+
 test('Codex session: the rollout found by session id gives tool calls, Markdown tables as tables and highlighted code', async () => {
   const repo = realpathSync(tempDir('log-codex'));
   const codexHome = tempDir('log-codex-home');
