@@ -41,32 +41,34 @@ test('no session recorded: wizard log says so and exits 1 instead of opening an 
 });
 
 // Each step's heading and its rows as `who: text`, read the way a reader scans the page: a tool call's one-line summary
-// (or its fields), without the highlighted output it opens to.
-const sections = (html: string) => [...html.matchAll(/<section><h2>(.*?)<\/h2>([\s\S]*?)<\/section>/g)].map((m) => [m[1], [...m[2]!.matchAll(/<span class="who">(.*?)<\/span>([\s\S]*?)<\/div>(?=<div class="row|$)/g)].map((r) => `${r[1]}: ${r[2]!.replace(/<div class="expressive-code"[\s\S]*?<\/details>/g, '').replace(/<[^>]+>/g, '')}`)]);
+// (or its fields) and a reply's prose, without the highlighted blocks.
+const sections = (html: string) => [...html.matchAll(/<section><h2>(.*?)<\/h2>([\s\S]*?)<\/section>/g)].map((m) => [m[1], [...m[2]!.matchAll(/<span class="who">(.*?)<\/span>([\s\S]*?)<\/div>(?=<div class="row|$)/g)].map((r) => `${r[1]}: ${r[2]!.replace(/<div class="expressive-code">[\s\S]*?<\/figure><\/div>/g, '').replace(/<[^>]+>/g, '')}`)]);
 // What the page shows once every row is open: its text without markup, highlighted spans joined back up.
 const shown = (html: string) => html.replace(/<style>[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/g, '').replace(/ data-code="[^"]*"/g, '').replace(/<[^>]+>/g, '');
 const result = (id: string, content: unknown) => JSON.stringify({ type: 'user', timestamp: '2026-10-03T10:00:03.500Z', message: { content: [{ type: 'tool_result', tool_use_id: id, content }] } });
 
-test('normal session: each step in order, each tool call under the step it ran in, opening to its highlighted result', async () => {
+test('normal session: each step in order, each tool call under the step it ran in, opening to its highlighted result; a reply\'s fenced code highlighted too', async () => {
   const repo = recorded([
     assistant('2026-10-03T10:00:01.000Z', { type: 'tool_use', name: 'Read', input: { file_path: '/b/skills/straddle-setup/steps/01-begin.md' } }),
     assistant('2026-10-03T10:00:03.000Z', { type: 'tool_use', name: 'Write', input: { file_path: 'straddle-setup.md', content: '# Setup\nStatus: complete\n' } }),
     assistant('2026-10-03T10:00:03.200Z', { type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm test' } }),
     result('b1', [{ type: 'text', text: '12 passing' }]),
-    assistant('2026-10-03T10:00:07.000Z', { type: 'text', text: 'Plan drafted.' }),
+    assistant('2026-10-03T10:00:07.000Z', { type: 'text', text: 'Plan drafted.\n```ts\nconst total = 1000; // cents\n```\nNext: Integrate.' }),
   ].join('\n'));
   const html = await page(repo);
   assert.deepEqual(sections(html), [
     ['Session start', ['wizard: Session started (abc12345-0000)']],
     ['straddle-setup · 01-begin', ['Read: file_path: /b/skills/straddle-setup/steps/01-begin.md', 'Write: straddle-setup.md', 'Bash: $ npm test', 'wizard: Edited straddle-setup.md']],
-    ['straddle-plan · 01-begin', ['agent: Plan drafted.']],
+    ['straddle-plan · 01-begin', ['agent: Plan drafted.Next: Integrate.']],
   ]);
-  // Read has no recorded result here, so it opens to nothing rather than an invented one.
-  assert.equal(html.match(/<div class="expressive-code"/g)?.length, 2);
+  // Write, Bash and the reply's fence; Read has no recorded result here, so it opens to nothing rather than an invented one.
+  assert.equal(html.match(/<div class="expressive-code"/g)?.length, 3);
   assert.ok(shown(html).includes('$ npm test12 passing'), 'the Bash result is paired with its call');
   assert.ok(shown(html).includes('# SetupStatus: complete'), 'the written file is shown');
-  // Highlighted, not plain: the Write block's Markdown takes several Ayu Mirage token colors.
-  assert.ok(new Set(html.match(/--0:#[0-9A-F]{6,8}/gi)).size >= 3, 'code is highlighted in several colors');
+  assert.ok(shown(html).includes('const total = 1000; // cents'), 'the fenced code is shown');
+  // Highlighted, not plain or dimmed: the fence reads as TypeScript, in several Ayu Mirage token colors.
+  const fence = /<pre data-language="ts"[\s\S]*?<\/pre>/.exec(html)?.[0] ?? '';
+  assert.ok(new Set(fence.match(/--0:#[0-9A-F]{6,8}/gi)).size >= 3, fence);
 });
 
 // Northwind's planted secrets (tests/recorded-session.test.ts), in every place a transcript carries text, plus an
@@ -124,6 +126,8 @@ test('a resumed session names its transcript twice: every row shows once, a call
   assert.ok(shown(html).includes('$ straddle --versionstraddle 1.0.3'), 'the result written after the resume is paired');
   const report = sections(html).flatMap(([, rows]) => rows as string[]).find((r) => r.startsWith('agent: '))!.replace(/<[^>]+>/g, '');
   assert.equal(report, 'agent: Setup report\n• Status: complete\n\n┌───────┬────────┐\n│ Check │ Result │\n├───────┼────────┤\n│ CLI   │ ok     │\n└───────┴────────┘');
+  // The report keeps the terminal's 96 columns and scrolls sideways on a phone, so the keyboard can reach it.
+  assert.match(html, /<span class="who">agent<\/span><div class="body"><pre class="md" tabindex="0">/);
 });
 
 test('Codex session: the rollout found by session id gives its tool calls and replies under the step', async () => {

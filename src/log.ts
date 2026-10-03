@@ -164,11 +164,31 @@ const escape = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)}
 // Redaction first, then HTML escaping, for every recorded string the page shows.
 const clean = (s: string) => escape(redact(s));
 
-// Agent text through the Wizard's own terminal Markdown renderer (box-drawn tables, headings, lists, bold, code), so
-// the page reads like the report screens; its color codes become classes.
+// An agent reply after redaction, split at its fenced code. Prose goes through the Wizard's own terminal Markdown
+// renderer (box-drawn tables, headings, lists, bold, code), so it reads like the report screens; each fence is
+// highlighted like tool output, in the language its opening line names.
+type ReplyPart = { prose: string } | { block: CodeBlock };
+function replyParts(raw: string): ReplyPart[] {
+  const parts: ReplyPart[] = [];
+  const lines = redact(raw).split('\n');
+  let prose: string[] = [];
+  const flush = () => {
+    if (prose.join('').trim()) parts.push({ prose: prose.join('\n') });
+    prose = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const fence = /^\s*```\s*([\w+#.-]*)/.exec(lines[i]!);
+    if (!fence) { prose.push(lines[i]!); continue; }
+    flush();
+    const code: string[] = [];
+    for (i++; i < lines.length && !lines[i]!.trimStart().startsWith('```'); i++) code.push(lines[i]!);
+    parts.push({ block: { code: code.join('\n'), language: fence[1] || 'txt', props: { frame: 'none' } } });
+  }
+  flush();
+  return parts;
+}
+
 const MARKDOWN_COLUMNS = 96;
-const agentText = (raw: string) =>
-  escape(markdown({ width: MARKDOWN_COLUMNS, color: true }, redact(raw))).replace(/\x1b\[([\d;]+)m([^\x1b]*)\x1b\[0m/g, (_, code: string, body: string) => `<span class="t${code.replace(';', '-')}">${body}</span>`);
 
 const row = (at: string, who: string, body: string, kind = '') => `<div class="row${kind}"><span class="at">${clean(at)}</span><span class="who">${who}</span>${body}</div>`;
 
@@ -183,6 +203,9 @@ async function highlight(blocks: readonly CodeBlock[]): Promise<{ html: string[]
     frames: { extractFileNameFromCode: false },
     defaultProps: { wrap: true },
     styleOverrides: { codeFontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', uiFontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', codeFontSize: '0.8rem', uiFontSize: '0.8rem' },
+    // A fence can name any language; one Shiki doesn't know renders as plain text, and that fallback is no news for
+    // `wizard log`'s output. Real failures still reject the render.
+    logger: { warn: () => {}, error: () => {} },
   });
   const done = await Promise.all(blocks.map((b) => ec.render(b)));
   const styles = new Set([await ec.getBaseStyles(), await ec.getThemeStyles(), ...done.flatMap((d) => [...d.styles])]);
@@ -190,9 +213,14 @@ async function highlight(blocks: readonly CodeBlock[]): Promise<{ html: string[]
 }
 
 async function renderLog(log: SessionLog, repo: string): Promise<string> {
-  const tools = log.steps.flatMap((s) => s.entries).flatMap((e) => (e.kind === 'tool' && e.block ? [{ e, block: e.block }] : []));
-  const code = await highlight(tools.map((t) => t.block));
-  const blockOf = new Map<Entry, string>(tools.map((t, i) => [t.e, code.html[i]!]));
+  const entries = log.steps.flatMap((s) => s.entries);
+  const replies = new Map(entries.flatMap((e) => (e.kind === 'text' ? [[e, replyParts(e.text)] as const] : [])));
+  const blocks = [
+    ...entries.flatMap((e) => (e.kind === 'tool' && e.block ? [e.block] : [])),
+    ...[...replies.values()].flat().flatMap((p) => ('block' in p ? [p.block] : [])),
+  ];
+  const code = await highlight(blocks);
+  const highlighted = new Map(blocks.map((b, i) => [b, code.html[i]!]));
   const missing = log.missingTranscripts.map((t) => `<p class="warn">The client transcript is missing (moved or deleted): ${clean(t)}. Showing the Wizard's events only.</p>`);
   const steps = log.steps.map((s) => {
     const rows = s.entries.map((e) => {
@@ -201,9 +229,15 @@ async function renderLog(log: SessionLog, repo: string): Promise<string> {
       if (e.kind === 'tool') {
         const summary = !e.block ? '' : e.block.props.frame === 'terminal' ? e.block.code.split('\n')[0]! : e.block.props.title || 'result';
         const fields = e.block && e.block.props.frame !== 'none' ? '' : `<pre class="fields">${clean(e.input)}</pre>`;
-        return row(e.at, clean(e.name), `<div class="body">${fields}${e.block ? `<details><summary>${escape(summary)}</summary>${blockOf.get(e)}</details>` : ''}</div>`, ' tool');
+        return row(e.at, clean(e.name), `<div class="body">${fields}${e.block ? `<details><summary>${escape(summary)}</summary>${highlighted.get(e.block)}</details>` : ''}</div>`, ' tool');
       }
-      if (e.kind === 'text') return row(e.at, 'agent', `<pre class="body md">${agentText(e.text)}</pre>`);
+      // A reply's prose keeps the terminal's 96 columns, so it scrolls sideways on a narrow screen: it takes keyboard
+      // focus for that. The renderer's color codes become classes.
+      if (e.kind === 'text') {
+        const parts = replies.get(e)!.map((p) => ('block' in p ? highlighted.get(p.block)!
+          : `<pre class="md" tabindex="0">${escape(markdown({ width: MARKDOWN_COLUMNS, color: true }, p.prose)).replace(/\x1b\[([\d;]+)m([^\x1b]*)\x1b\[0m/g, (_, sgr: string, body: string) => `<span class="t${sgr.replace(';', '-')}">${body}</span>`)}</pre>`));
+        return row(e.at, 'agent', `<div class="body">${parts.join('')}</div>`);
+      }
       return row(e.at, 'wizard', `<div class="body">${clean(e.kind === 'event' ? e.text : e.title)}</div>`, ' wizard');
     });
     return `<section><h2>${clean(s.title)}</h2>${rows.join('')}</section>`;
@@ -226,7 +260,7 @@ p{max-width:75ch;margin:0 0 .75rem;overflow-wrap:anywhere}
 .fields{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
 .body .expressive-code{margin-top:.5rem;white-space:normal}
 summary{cursor:pointer;white-space:pre-wrap;overflow-wrap:anywhere}
-summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+summary:focus-visible,.md:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .md{white-space:pre;overflow-x:auto;overflow-wrap:normal;padding-bottom:.25rem}
 .t1{font-weight:bold}.t2{color:var(--muted)}.t36{color:var(--accent)}.t1-36{color:var(--heading);font-weight:bold}.t32{color:#bae67e}.t33{color:var(--heading)}.t31{color:#f28779}
 .warn{color:#f28779}
