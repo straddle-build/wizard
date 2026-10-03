@@ -17,31 +17,34 @@ export function sanitize(text: string): string {
   return stripVTControlCharacters(text.replace(/\r\n?/g, '\n').replace(/\t/g, '    ')).replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, '');
 }
 
-// East Asian wide and emoji-presentation characters take two cells; combining marks, joiners and variation selectors
-// none. The same split go-runewidth makes for the CLI, for the characters reports carry.
-const WIDE = /[\u1100-\u115f\u231a\u231b\u23e9-\u23ec\u23f0\u23f3\u25fd\u25fe\u2614\u2615\u2648-\u2653\u267f\u2693\u26a1\u26aa\u26ab\u26bd\u26be\u26c4\u26c5\u26ce\u26d4\u26ea\u26f2\u26f3\u26f5\u26fa\u26fd\u2705\u270a\u270b\u2728\u274c\u274e\u2753-\u2755\u2757\u2795-\u2797\u27b0\u27bf\u2b1b\u2b1c\u2b50\u2b55\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{1f300}-\u{1f64f}\u{1f680}-\u{1f6ff}\u{1f900}-\u{1f9ff}\u{20000}-\u{3fffd}]/u;
-const ZERO = /[\p{Mn}\p{Me}\u200b-\u200f\u2060\ufe00-\ufe0f]/u;
-const charCells = (ch: string): number => ZERO.test(ch) ? 0 : WIDE.test(ch) ? 2 : 1;
+// Width is measured per grapheme cluster, so a ZWJ family, a skin-toned emoji or a flag is one glyph. A cluster takes
+// two cells when it's an emoji shown as emoji (Unicode's Emoji_Presentation, an Extended_Pictographic character
+// followed by U+FE0F, or a regional-indicator flag) or an East Asian Wide/Fullwidth character (the CJK, Hangul, kana
+// and fullwidth blocks, which JavaScript has no property for); none when it's only marks or format characters.
+const GRAPHEMES = new Intl.Segmenter('en', { granularity: 'grapheme' });
+const EMOJI = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F|\p{Regional_Indicator}/u;
+const EAST_ASIAN_WIDE = /^[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\ua960-\ua97f\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6\u{16fe0}-\u{18cff}\u{1b000}-\u{1b2ff}\u{20000}-\u{3fffd}]/u;
+const graphemeCells = (g: string): number => /^[\p{Mn}\p{Me}\p{Cf}]+$/u.test(g) ? 0 : EMOJI.test(g) || EAST_ASIAN_WIDE.test(g) ? 2 : 1;
 
 // The visible width of s in terminal cells, ignoring SGR codes.
 export function cells(s: string): number {
   let n = 0;
-  for (const ch of stripVTControlCharacters(s)) n += charCells(ch);
+  for (const { segment } of GRAPHEMES.segment(stripVTControlCharacters(s))) n += graphemeCells(segment);
   return n;
 }
 
 const pad = (s: string, w: number): string => s + ' '.repeat(Math.max(0, w - cells(s)));
 
-// Splits plain s after at most w cells, by code point. A first character wider than w goes alone, so it always
-// makes progress.
+// Splits plain s after at most w cells, between grapheme clusters. A first cluster wider than w goes alone, so it
+// always makes progress.
 function cut(s: string, w: number): [string, string] {
   let used = 0;
   let i = 0;
-  for (const ch of s) {
-    const c = charCells(ch);
+  for (const { segment } of GRAPHEMES.segment(s)) {
+    const c = graphemeCells(segment);
     if (i && used + c > w) break;
     used += c;
-    i += ch.length;
+    i += segment.length;
   }
   return [s.slice(0, i), s.slice(i)];
 }
@@ -146,21 +149,28 @@ export function card(look: Look, title: string, rows: readonly (string | readonl
 
 // A boxed table no wider than look.width: bold header, each cell wrapped in its column, a rule between rows when any
 // wraps. When the natural layout is too wide, a column gives up a cell at a time: first the one with the most room
-// above its longest word, so text breaks between words; then the widest, down to 4 cells, as the CLI's layoutColumns
-// does. When even that is too wide, each row becomes its own card of column: value lines.
+// above its longest word, so text breaks between words; then one with room above its longest cell word, so only a
+// header word splits, not an ID or file:line; then the widest, down to 4 cells, as the CLI's layoutColumns does. When
+// even that is too wide, each row becomes its own card of column: value lines.
 export function table(look: Look, headers: readonly string[], rows: readonly (readonly string[])[]): string {
-  const column = (i: number) => [headers[i]!, ...rows.map((r) => r[i] ?? '')];
-  const colW = headers.map((_, i) => Math.max(1, ...column(i).map((s) => cells(wrap(s, Infinity, look)[0]!))));
-  const longest = headers.map((_, i) => Math.max(1, ...column(i).flatMap((s) => words(s, look).map((w) => w.w))));
+  const longestWord = (texts: readonly string[]) => Math.max(1, ...texts.flatMap((s) => words(s, look).map((w) => w.w)));
+  const column = (i: number) => rows.map((r) => r[i] ?? '');
+  const colW = headers.map((h, i) => Math.max(1, ...[h, ...column(i)].map((s) => cells(wrap(s, Infinity, look)[0]!))));
+  const floors = [headers.map((h, i) => longestWord([h, ...column(i)])), headers.map((_, i) => longestWord(column(i)))];
   let total = colW.reduce((a, b) => a + b, 0) + 3 * colW.length + 1;
-  while (total > look.width) {
-    const room = colW.map((w, i) => w - longest[i]!);
-    let i = room.indexOf(Math.max(...room));
-    if (room[i]! <= 0) {
-      i = colW.indexOf(Math.max(...colW));
-      if (colW[i]! <= 4) break;
+  shrink: while (total > look.width) {
+    for (const floor of floors) {
+      const room = colW.map((w, i) => w - floor[i]!);
+      const i = room.indexOf(Math.max(...room));
+      if (room[i]! > 0) {
+        colW[i]!--;
+        total--;
+        continue shrink;
+      }
     }
-    colW[i]!--;
+    const widest = colW.indexOf(Math.max(...colW));
+    if (colW[widest]! <= 4) break;
+    colW[widest]!--;
     total--;
   }
   if (total > look.width) {

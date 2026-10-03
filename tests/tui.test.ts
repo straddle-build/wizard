@@ -187,6 +187,10 @@ test('in CI or on a dumb terminal a TTY gets no splash and no color', async () =
       io.say(io.bold('Steps'));
     }), 'Steps\n', JSON.stringify(env));
   }
+  // CI=false and CI=0 aren't CI: the splash shows, in color.
+  for (const ci of ['false', '0']) {
+    assert.equal(await inTerminal({ isTTY: true, columns: 60 }, { CI: ci }, (io) => io.splash()), '\x1b[33m✦\x1b[0m \x1b[1;36mStraddle Wizard\x1b[0m\n\n', ci);
+  }
 });
 
 test('a terminal that reports 0 columns is drawn at 80', async () => {
@@ -204,4 +208,23 @@ test('the splash in color styles the wordmark as heading and subtitle as dim wit
   assert.match(lines[2]!, /\x1b\[1;36m/);
   assert.ok(lines[10]!.includes('\x1b[2mStraddle, set up by your coding agent\x1b[0m'));
   assert.ok(!lines[10]!.includes('\x1b[1;36m\x1b[2m'));
+});
+
+test('emoji, emoji sequences and CJK take two cells, so a table row with each keeps its borders aligned', () => {
+  const [family, heart, thumbs] = ['\u{1F468}\u200D\u{1F469}\u200D\u{1F467}', '\u2764\uFE0F', '\u{1F44D}\u{1F3FD}'];
+  for (const glyph of ['🟢', '🪄', '✅', heart, thumbs, family, '中', '\u26A0\uFE0F']) assert.equal(cells(glyph), 2, glyph);
+  for (const glyph of ['✦', '✓', '▶', '☐', '\u2764', '\u26A0', 'e\u0301']) assert.equal(cells(glyph), 1, glyph);
+  assert.equal(table(plain, ['Glyph', 'Name'], [['🟢', 'green circle'], ['🪄', 'magic wand'], ['✅', 'check mark'], [heart, 'red heart'], [thumbs, 'thumbs up, medium skin'], [family, 'family'], ['中', 'middle']]), [
+    '┌───────┬────────────────────────┐',
+    '│ Glyph │ Name                   │',
+    '├───────┼────────────────────────┤',
+    '│ 🟢    │ green circle           │',
+    '│ 🪄    │ magic wand             │',
+    '│ ✅    │ check mark             │',
+    `│ ${heart}    │ red heart              │`,
+    `│ ${thumbs}    │ thumbs up, medium skin │`,
+    `│ ${family}    │ family                 │`,
+    '│ 中    │ middle                 │',
+    '└───────┴────────────────────────┘',
+  ].join('\n'));
 });

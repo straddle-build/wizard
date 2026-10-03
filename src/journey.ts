@@ -100,7 +100,9 @@ function printWelcome(io: Prompter, facts: RepoFacts, context: Receipt['context'
   const look = io.look;
   if (look) {
     io.say(intro);
-    io.say(card(look, `Straddle Wizard ${WIZARD_VERSION}`, [...rows, ...errors.length ? ['', ...errors] : [], '', privacy.join(' ')]));
+    // Values come from the repo (its path, manifests, detection errors), so they're sanitized like a report.
+    const values = rows.map(([label, value]) => [label, sanitize(value)] as const);
+    io.say(card(look, `Straddle Wizard ${WIZARD_VERSION}`, [...values, ...errors.length ? ['', ...errors.map(sanitize)] : [], '', privacy.join(' ')]));
     io.say();
     return;
   }

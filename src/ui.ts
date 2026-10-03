@@ -4,6 +4,9 @@ import { splash, type Look } from './tui.ts';
 
 export interface Option<T> { label: string; value: T; hint?: string }
 
+// CI is set to any value but empty, false or 0. Read when called, since tests change the environment.
+const inCI = (): boolean => !['', 'false', '0'].includes(process.env.CI ?? '');
+
 // Numbered menus over plain lines. Cooked terminal mode keeps line editing and Ctrl-C with the terminal, and
 // the same code reads scripted answers from a pipe.
 export class Prompter {
@@ -19,7 +22,7 @@ export class Prompter {
     this.#input = input;
     this.#output = output;
     // No color in a pipe, with NO_COLOR, on a dumb terminal (as the Straddle CLI), or in CI.
-    this.#color = Boolean(output.isTTY) && !process.env.NO_COLOR && process.env.TERM !== 'dumb' && !process.env.CI;
+    this.#color = Boolean(output.isTTY) && !process.env.NO_COLOR && process.env.TERM !== 'dumb' && !inCI();
     input.setEncoding('utf8');
     input.on('data', (chunk: string) => {
       this.#buffer += chunk;
@@ -75,7 +78,7 @@ export class Prompter {
   // The start splash, drawn a line at a time over ~300 ms in a color terminal. A pipe, CI and a dumb terminal get none.
   async splash(): Promise<void> {
     const look = this.look;
-    if (!look || process.env.CI || process.env.TERM === 'dumb') return;
+    if (!look || inCI() || process.env.TERM === 'dumb') return;
     for (const line of splash(look)) {
       this.say(line);
       if (look.color) await sleep(25);
