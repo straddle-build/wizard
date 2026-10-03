@@ -549,6 +549,71 @@ test('another payment provider in the repo adds Migrate to the program', async (
   assert.match(r.stdout, /Your session in Claude Code: Setup → Plan → Migrate → Integrate → Test → Go Live/);
 });
 
+test('Plaid Link alone is a bank connection for Plan, shown on the context screen and handed to the agent, while Plaid Transfer adds Migrate', async () => {
+  const linkOnly = nextRepo();
+  writeFiles(linkOnly, {
+    'package.json': JSON.stringify({ dependencies: { next: '15.0.0', plaid: '29.0.0' }, devDependencies: { typescript: '5.6.0' } }),
+    'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait plaid.processorTokenCreate({ access_token, account_id, processor });\n',
+  });
+  const claude = fakeClaude();
+
+  // Continue and the choices, then Auto and Start for Plan alone.
+  const link = await runWizard(['plan', '--client', 'claude'], { cwd: linkOnly, claude, env: CONFIGURED, input: [...CHOICES, '1', '1'] });
+
+  assert.match(link.stdout, /Provider code\s+none to migrate from\n\s+Bank connection\s+Plaid Link found: Plan will ask whether to keep Plaid tokens or move to Straddle Bridge\n/);
+  assert.match(launches(claude)[0]!.at(-1)!, /framework Next\.js \(detected\)\. Bank connection already in the repo: Plaid Link with processor tokens \(detected; a Plan decision, not part of a migration\)\. Developer choices/);
+  assert.deepEqual(readReceipt(linkOnly).context.bankLink, { source: 'plaid', processorTokens: true });
+
+  const both = nextRepo();
+  writeFiles(both, {
+    'package.json': JSON.stringify({ dependencies: { next: '15.0.0', plaid: '29.0.0' }, devDependencies: { typescript: '5.6.0' } }),
+    'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait plaid.transferCreate({ access_token, account_id, authorization_id });\n',
+  });
+  const r = await runWizard([], { cwd: both, claude: fakeClaude(), env: CONFIGURED, input: [...CHOOSE_CONTEXT, '2'] });
+
+  assert.match(r.stdout, /Bank connection\s+Plaid Link found: Plan will ask whether to keep Plaid tokens or move to Straddle Bridge\n\s+Program\s+Setup → Plan → Migrate → Integrate → Test → Go Live \(Migrate, because you already use plaid\)/);
+});
+
+const PLAID_PACKAGE = JSON.stringify({ dependencies: { next: '15.0.0', plaid: '29.0.0' }, devDependencies: { typescript: '5.6.0' } });
+
+test('a run keeps the Migrate step it started with after Migrate replaces the Plaid Transfer calls, in status and resume', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'package.json': PLAID_PACKAGE, 'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait plaid.transferCreate({ access_token, account_id, authorization_id });\n' });
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+  // No STRADDLE_API_KEY, so the session runs the steps that send no Straddle request. The choices, then stop at the handoff.
+  await runWizard(['--client', 'codex', '--mode', 'manual'], { cwd: repo, env: fake.env, input: [...CHOICES, '2'] });
+  // What Migrate does: the Transfer call becomes a Straddle charge, and Link stays.
+  writeFiles(repo, { 'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait straddle.charges.create(charge);\n' });
+
+  const status = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, env: fake.env })).stdout);
+  // Resume at Plan, then stop at the handoff.
+  const resumed = await runWizard(['resume'], { cwd: repo, env: fake.env, input: ['1', '2'] });
+
+  assert.match(status.run.progress, /Plan · Migrate · Integrate/);
+  assert.match(status.run.paste, /Straddle Wizard program: straddle-plan → straddle-migrate\. Start at straddle-plan\./);
+  assert.match(resumed.stdout, /Straddle Wizard program: straddle-plan → straddle-migrate\. Start at straddle-plan\./);
+});
+
+test('a run saved before the Wizard recorded Plaid facts keeps the Migrate step it started with and gets Plaid Link from the repo, the same in status as in resume', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'package.json': PLAID_PACKAGE, 'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait plaid.itemPublicTokenExchange({ public_token });\n' });
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+  await runWizard(['--client', 'codex', '--mode', 'manual'], { cwd: repo, env: fake.env, input: [...CHOICES, '2'] });
+  const saved = readReceipt(repo) as unknown as { context: Record<string, unknown> };
+  delete saved.context.providers;
+  delete saved.context.bankLink;
+  writeFileSync(join(repo, '.straddle-wizard', 'receipt.json'), JSON.stringify(saved));
+  const sentence = 'Bank connection already in the repo: Plaid Link (detected; a Plan decision, not part of a migration).';
+
+  const status = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, env: fake.env })).stdout);
+  const resumed = await runWizard(['resume'], { cwd: repo, env: fake.env, input: ['1', '2'] });
+
+  assert.ok(status.run.paste.includes(sentence), status.run.paste);
+  assert.match(status.run.progress, /Plan · Migrate · Integrate/);
+  assert.ok(resumed.stdout.replace(/\s+/g, ' ').includes(sentence), resumed.stdout);
+  assert.deepEqual({ providers: readReceipt(repo).context.providers, bankLink: readReceipt(repo).context.bankLink }, { providers: ['plaid'], bankLink: { source: 'plaid', processorTokens: false } });
+});
+
 test('readiness says the session runs with the developer\'s own settings and promises no permission prompt', async () => {
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-integration-plan.md': PLAN });

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { field, parseJson } from './json.ts';
 
@@ -46,12 +46,13 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${body}$`);
 }
 
-interface Walk { files: string[]; excluded: Exclusion[]; truncated: boolean }
+// `hidden`: excluded directories, and symlinks that may lead to one or to source, whose contents the walk never saw.
+interface Walk { files: string[]; excluded: Exclusion[]; hidden: string[]; truncated: boolean }
 
 function walk(repo: string, exclude: readonly string[]): Walk {
   const root = realpathSync(repo);
   const configured = exclude.map(globToRegExp);
-  const result: Walk = { files: [], excluded: [], truncated: false };
+  const result: Walk = { files: [], excluded: [], hidden: [], truncated: false };
   const visit = (dir: string, depth: number) => {
     let names: string[];
     // A directory that cannot be listed, or an entry that disappears while it is walked, is skipped and named.
@@ -68,10 +69,25 @@ function walk(repo: string, exclude: readonly string[]): Walk {
         try { target = realpathSync(abs); } catch { target = null; }
         const inside = target !== null && (target === root || target.startsWith(root + sep));
         result.excluded.push({ path: rel, reason: inside ? 'symlink not followed' : 'symlink escapes the repository' });
+        // Whether the unfollowed link could hide app source, from its target's metadata only (stat opens no file): a
+        // directory or a source file could, a document can't, and a target that can't be inspected could. A dependency
+        // tree's name never counts, as for a real directory.
+        if (!Object.hasOwn(SKIPPED_DIRS, name)) {
+          let hides = true;
+          try {
+            const linked = statSync(abs);
+            hides = linked.isDirectory() || (linked.isFile() && (SOURCE.test(name) || SOURCE.test(target ?? '')));
+          } catch { /* dangling or unreadable: hides = true */ }
+          if (hides) result.hidden.push(rel);
+        }
         continue;
       }
       const reason = sensitiveReason(name) ?? (configured.some((re) => re.test(rel)) ? 'configured sensitive path' : null);
-      if (reason) { result.excluded.push({ path: rel, reason }); continue; }
+      if (reason) {
+        result.excluded.push({ path: rel, reason });
+        if (info.isDirectory()) result.hidden.push(rel);
+        continue;
+      }
       if (info.isDirectory()) {
         if (depth >= MAX_DEPTH) { result.truncated = true; continue; }
         visit(abs, depth + 1);
@@ -124,7 +140,11 @@ export interface RepoFacts {
   language: Detected;
   framework: Detected;
   straddleSdk: StraddleSdk | null;
+  // Providers to migrate from. A declared Plaid leaves only when the whole scan shows Link calls and no Transfer or
+  // Identity Verification call.
   providers: string[];
+  // A bank connection the code already uses (Plaid Link): a Plan decision, not a migration. Null when none was found.
+  bankLink: BankLink | null;
   files: number;
   excluded: Exclusion[];
   truncated: boolean;
@@ -148,6 +168,67 @@ const PROVIDERS: Array<[RegExp, string]> = [
   [/^(dwolla-v2|dwollav2|dwolla_v2|dwolla)$/, 'dwolla'],
   [/^(modern-treasury|modern_treasury|github\.com\/modern-treasury\/.*)$/, 'modern-treasury'],
 ];
+export const PROVIDER_NAMES: readonly string[] = PROVIDERS.map(([, name]) => name);
+
+// `processorTokens`: the code calls processorTokenCreate, so it hands Plaid processor tokens to a partner.
+export interface BankLink { source: 'plaid'; processorTokens: boolean }
+
+// Plaid is a competitor for payments (Transfer, Transfer UI, recurring and legacy Bank Transfers) and KYC (Identity
+// Verification, also started from a Link token whose products include identity_verification), and a bank connection
+// (Link, processor tokens) Straddle accepts. A method matches called on a receiver as plaid-node, plaid-python,
+// plaid-go and plaid-ruby spell it (Ruby needs no parentheses) or destructured, and an endpoint as a quoted path,
+// a full Plaid URL or a template literal's path after `${base}`.
+function plaidPattern(methods: string, paths: string): RegExp {
+  return new RegExp(String.raw`\.(?:${methods})(?:\s*\(|[ \t]+[\w@:])|[{,]\s*(?:${methods})\s*[,}]|['"\x60}](?:https:\/\/[a-z]+\.plaid\.com)?\/(?:${paths})\b`, 'i');
+}
+const PLAID_MIGRATE = plaidPattern(
+  String.raw`(?:bank_?)?transfer_?(?:authorization_?|intent_?|recurring_?)?create|identity_?verification_?(?:create|get|list|retry)`,
+  String.raw`(?:bank_)?transfer\/(?:authorization\/|intent\/|recurring\/)?create|identity_verification\/(?:create|get|list|retry)`,
+);
+const PLAID_LINK_TOKEN = plaidPattern(String.raw`link_?token_?create`, String.raw`link\/token\/create`);
+const PLAID_IDV_PRODUCT = /['"]identity_verification['"]|Products\.IdentityVerification\b|PRODUCTS_IDENTITY_VERIFICATION\b/;
+const PLAID_EXCHANGE = plaidPattern(String.raw`item_?public_?token_?exchange`, String.raw`item\/public_token\/exchange`);
+const PLAID_PROCESSOR = plaidPattern(String.raw`processor_?token_?create`, String.raw`processor\/token\/create`);
+const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rb)$/;
+// Tests, mocks, fixtures and installed packages name Plaid calls without the app making them.
+const NOT_APP_CODE = /(?:^|\/)(?:tests?|__tests__|__mocks__|mocks?|fixtures?|specs?|site-packages)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
+// Comment spans, for the Link matchers only: Python docstrings, Ruby =begin blocks and `#` comments in .py/.rb files, and
+// `/* */` and `//` comments elsewhere. Blocks go first, so a line-comment marker inside a string (a URL's `//`, a "#")
+// can't swallow a block's opener and leave its body. An unclosed block runs to the end of the file, which keeps the
+// scan linear. Each span becomes a space, so the text around it can't join into a call. Strings that look like comments
+// are stripped too; every step only removes text, which only loses Link evidence.
+const HASH_BLOCKS = /"""[\s\S]*?(?:"""|$(?![\s\S]))|'''[\s\S]*?(?:'''|$(?![\s\S]))|^=begin[\s\S]*?(?:^=end|$(?![\s\S]))/gm;
+const HASH_LINES = /#.*$/gm;
+const SLASH_BLOCKS = /\/\*[\s\S]*?(?:\*\/|$(?![\s\S]))/g;
+const SLASH_LINES = /\/\/.*$/gm;
+interface PlaidUsage { migrate: boolean; link: boolean; processorTokens: boolean; complete: boolean }
+
+// Which Plaid roles the app's source files show. Read under the same boundary as hashing: walked files only, no
+// symlinks. `complete` is false when the walk hid a directory, a symlink or a source file, or a source file couldn't be
+// read, so missing calls are unknown, not absent. Transfer and Identity Verification count anywhere in the text, comments
+// included; Link counts only outside comments. A misread either way keeps Migrate.
+function plaidUsage(root: string, scan: Walk): PlaidUsage {
+  const usage: PlaidUsage = { migrate: false, link: false, processorTokens: false, complete: !scan.truncated };
+  if (scan.hidden.some((p) => !NOT_APP_CODE.test(`${p}/`)) || scan.excluded.some((e) => e.reason === 'unreadable' || (SOURCE.test(e.path) && !NOT_APP_CODE.test(e.path)))) usage.complete = false;
+  for (const rel of scan.files) {
+    if (!SOURCE.test(rel) || NOT_APP_CODE.test(rel)) continue;
+    const file = openRegular(join(root, rel));
+    if (!file) { usage.complete = false; continue; }
+    try {
+      if (file.size > MAX_HASH_BYTES) { usage.complete = false; continue; }
+      const code = readFileSync(file.fd, 'utf8');
+      const live = /\.(?:py|rb)$/.test(rel) ? code.replace(HASH_BLOCKS, ' ').replace(HASH_LINES, ' ') : code.replace(SLASH_BLOCKS, ' ').replace(SLASH_LINES, ' ');
+      const idvLink = PLAID_LINK_TOKEN.test(code) && PLAID_IDV_PRODUCT.test(code);
+      const processor = PLAID_PROCESSOR.test(live);
+      usage.migrate ||= idvLink || PLAID_MIGRATE.test(code);
+      usage.link ||= (!idvLink && PLAID_LINK_TOKEN.test(live)) || processor || PLAID_EXCHANGE.test(live);
+      usage.processorTokens ||= processor;
+    } catch { usage.complete = false; } finally {
+      closeSync(file.fd);
+    }
+  }
+  return usage;
+}
 
 interface Manifest { ecosystem: Ecosystem; language: string; evidence: string[]; deps: Map<string, string>; file: string }
 
@@ -239,6 +320,14 @@ export function discover(root: string, exclude: readonly string[]): RepoFacts {
       if (provider) providers.add(provider[1]);
     }
   }
+  // Plaid leaves the providers only on evidence: Link calls found, no Transfer or Identity Verification call, and a
+  // scan that read every source file. Anything less keeps Migrate, as for any declared provider.
+  let bankLink: BankLink | null = null;
+  if (providers.has('plaid')) {
+    const plaid = plaidUsage(root, scan);
+    if (plaid.link) bankLink = { source: 'plaid', processorTokens: plaid.processorTokens };
+    if (plaid.link && !plaid.migrate && plaid.complete) providers.delete('plaid');
+  }
 
   return {
     root,
@@ -246,6 +335,7 @@ export function discover(root: string, exclude: readonly string[]): RepoFacts {
     framework,
     straddleSdk,
     providers: [...providers].sort(),
+    bankLink,
     files: scan.files.length,
     excluded: scan.excluded,
     truncated: scan.truncated,

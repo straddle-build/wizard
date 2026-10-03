@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 import type { Bundle } from './bundle.ts';
 import { CLIENT_NAMES, type ClientName } from './clients.ts';
+import { PROVIDER_NAMES, type BankLink } from './discovery.ts';
 import { field } from './json.ts';
 import { PROGRAMS, isRunnableSkill, type ProgramName, type SkillName } from './programs.ts';
 
@@ -56,7 +57,9 @@ export interface Receipt {
   pluginLoad: 'installed' | 'session' | 'manual' | null;
   repo: string;
   exclude: string[];
-  context: { language: Answer; framework: Answer; choices: Choices | null };
+  // The run's providers (Migrate) and bank connection, decided when the run starts so Migrate's own edits can't change
+  // the program. Optional: receipts saved before them load, and resume records them.
+  context: { language: Answer; framework: Answer; choices: Choices | null; providers?: string[]; bankLink?: BankLink | null };
   bundle: Pick<Bundle, 'kind' | 'pluginVersion' | 'contentSha256' | 'path'> | null;
   state: RunState;
   stateReason: string;
@@ -135,6 +138,10 @@ function receiptProblem(r: unknown): string | null {
   }
   const choices = field(context, 'choices');
   if (choices !== null && !Object.entries(CHOICE_VALUES).every(([key, values]) => (values as readonly unknown[]).includes(field(choices, key)))) return 'invalid choices';
+  const providers = field(context, 'providers');
+  if (providers !== undefined && !(Array.isArray(providers) && providers.every((p) => PROVIDER_NAMES.includes(p)))) return 'invalid providers';
+  const bankLink = field(context, 'bankLink');
+  if (bankLink !== undefined && bankLink !== null && !(field(bankLink, 'source') === 'plaid' && typeof field(bankLink, 'processorTokens') === 'boolean')) return 'invalid bank link';
   const bundlePath = field(field(r, 'bundle'), 'path');
   if (field(r, 'bundle') !== null && typeof bundlePath !== 'string') return 'invalid bundle';
   const sessions = field(r, 'sessions');
