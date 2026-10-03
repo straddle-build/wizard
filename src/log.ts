@@ -27,18 +27,27 @@ interface SessionLog { steps: Step[]; unavailable: Unavailable[] }
 // Northwind's integration log rules (lib/recorded-session.ts): sk_/pk_/rk_/whsec_ keys, Bearer and Basic credentials,
 // `KEY=value` and `"secret": "value"` pairs, JWTs, long base64/hex runs, and home directories as `~`. Order matters:
 // Bearer before `Authorization:`. Added here: account and routing numbers, named or standing alone as 8 to 17 digits
-// (a table cell, a sentence), where digits inside a timestamp, path, version or id stay; and Markdown around a named
-// value (`**API key:** \`value\``). After the separator only an emphasis closer followed by a space (`:**`, `:*`) is
-// Markdown: any other asterisk is part of the value, so a secret holding `*` is redacted whole, never cut short. A named
-// rule matches at the separator and finds the name by looking behind it, so the name is never consumed and each
-// separator looks back over one run of name characters: matching from the start of the name retried a `[\w-]*` at
-// every word boundary and made long hyphenated text quadratic.
+// (a table cell, a sentence), where digits inside a timestamp, path, version or id stay; and the Markdown and quoting
+// agents put around a named value.
+//
+// The separator takes the label's closing delimiter on either side of the colon (`**Token**:`, `__API key:__`,
+// `` `api_key`: ``, `"api_key":`; after the colon only when a space follows) and the value's opening quote or
+// backtick. The value is then read by how it opens: a quoted or backticked value runs to its closing mark, spaces and
+// punctuation included; an emphasized one (`**…**`, `_…_`) to the matching closer before a space or punctuation; any
+// other runs to whitespace or a quote, and keeps `,` `;` `}` `\` when more value follows them, so a secret is never
+// cut at its own punctuation. A delimited value is read at most 512 characters ahead; past that it is read unquoted.
+// Values under 6 characters stay, as in Northwind.
+//
+// A named rule matches at the separator and finds the name by looking behind it, so the name is never consumed and
+// each separator looks back over one run of name characters: matching from the start of the name retried a `[\w-]*`
+// at every word boundary and made long hyphenated text quadratic.
 const named = (name: string, value: string) =>
-  new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=](?:\*{1,2}(?=\s))?\s*\\*["'\x60]?)${value}`, 'gi');
+  new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*\\*["'\x60]{0,2})${value}`, 'gi');
+const SECRET_VALUE = String.raw`(?!\[redacted\])(?:(?<=")[^"\\\n]{6,512}(?=\\?")|(?<=')[^'\\\n]{6,512}(?=\\?')|(?<=\x60)[^\x60\n]{6,512}(?=\x60)|([*_]{1,2})(?:(?!\2)[^\n]){6,512}?\2(?=[\s.,;:!?)\]]|$)|(?:[^\s"'\x60\\,;}]|[\\,;}](?=[^\s"'\x60\\,;}])){6,})`;
 const SECRETS: [RegExp, string][] = [
   [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_-]{6,}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
-  [named('(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)', String.raw`(?!\[redacted\])[^\s"'\x60,;\\}]{6,}`), '$1[redacted]'],
+  [named('(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)', SECRET_VALUE), '$1[redacted]'],
   [named('(?:account|routing)[_ -]?(?:number|num|no)?', String.raw`\d{4,17}\b`), '$1[redacted]'],
   [/(?<![\w.:/-])\d{8,17}(?![\w:/-]|[.,]\d)/g, '[redacted]'],
   [/\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g, '[redacted]'],

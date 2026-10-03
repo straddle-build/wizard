@@ -95,6 +95,28 @@ const PLANTED = {
   starItalic: 'ital*key*value',
 };
 
+// Markdown and quoting around a secret-named value, each line with its value and how the page shows it: label
+// delimiters inside and outside the colon, value delimiters, and punctuation or quoted spaces inside the value. No
+// `zq` fragment may survive.
+const DELIMITED: [string, string][] = [
+  ['M1 __API key:__ zq1a*zq1b', 'M1 __API key:__ [redacted]'],
+  ['M2 _API key:_ zq2a_zq2b', 'M2 _API key:_ [redacted]'],
+  ['M3 __API key__: zq3a,zq3b', 'M3 __API key__: [redacted]'],
+  ['M4 **Token**: zq4a;zq4b', 'M4 Token: [redacted]'],
+  ['M5 `api_key`: zq5a}zq5b', 'M5 api_key: [redacted]'],
+  ['M6 `api_key:` zq6a*zq6b', 'M6 api_key: [redacted]'],
+  ['M7 password: **zq7a zq7b**', 'M7 password: [redacted]'],
+  ['M8 password: _zq8a zq8b_', 'M8 password: [redacted]'],
+  ['M9 password: `zq9a zq9b`', 'M9 password: [redacted]'],
+  ['M10 password: ``zq0a zq0b``', 'M10 password: `[redacted]`'],
+  ['M11 "password": "zqAa, zqAb; zqAc"', 'M11 &#34;password&#34;: &#34;[redacted]&#34;'],
+  ["M12 'secret': 'zqBa zqBb'", 'M12 &#39;secret&#39;: &#39;[redacted]&#39;'],
+  ['M13 PASSWORD=zqCa,zqCb;zqCc}zqCd\\zqCe', 'M13 PASSWORD=[redacted]'],
+  ['M14 token = zqDa*zqDb.', 'M14 token = [redacted]'],
+  ['M15 **API key:** `zqEa zqEb`', 'M15 API key: [redacted]'],
+  ['M16 **Password:** _zqFa,zqFb_, then more', 'M16 Password: [redacted], then more'],
+];
+
 test('planted secrets never reach the page, in commands, results, diffs, written files, questions, MCP calls, long fields and Markdown replies', async () => {
   const s = PLANTED;
   const repo = recorded([
@@ -111,12 +133,12 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
     assistant('2026-10-03T10:00:03.600Z', { type: 'tool_use', name: 'Grep', input: { pattern: `${'a'.repeat(1978)}api_key=${s.envKey}` } }),
     assistant('2026-10-03T10:00:04.000Z', { type: 'tool_use', name: 'Write', input: { file_path: `${s.home}/shop/.env.local`, content: `STRADDLE_WEBHOOK_SECRET=${s.webhook}\nHASH=${s.hex}` } }),
-    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\napi_key: \`${s.envKey}\`\n**API key:** \`${s.envKey}\`\nsecret: \`${s.starTick}\`\n**Secret:** ${s.starBold}\n*API key:* ${s.starItalic}\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
+    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\napi_key: \`${s.envKey}\`\n**API key:** \`${s.envKey}\`\nsecret: \`${s.starTick}\`\n**Secret:** ${s.starBold}\n*API key:* ${s.starItalic}\n${DELIMITED.map(([line]) => line).join('\n')}\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
   ].join('\n'));
   const html = await page(repo);
   for (const [name, secret] of Object.entries(PLANTED)) assert.ok(!html.includes(secret), `planted ${name} is on the page`);
   // No part of an asterisk-bearing value survives either: Markdown delimiting never truncates a secret.
-  for (const piece of ['021000021', 'FAKEK', '/home/dana', '*er2secret', '*pass*value', '*tail99', '*key*value', '*secret*value']) assert.ok(!html.includes(piece), `${piece} is on the page`);
+  for (const piece of ['021000021', 'FAKEK', '/home/dana', '*er2secret', '*pass*value', '*tail99', '*key*value', '*secret*value', 'zq']) assert.ok(!html.includes(piece), `${piece} is on the page`);
   // The surrounding text stays readable; only the values go. `Authorization: Bearer` loses both words, as in Northwind.
   const rows = sections(html)[1]![1] as string[];
   for (const expected of [
@@ -130,7 +152,7 @@ test('planted secrets never reach the page, in commands, results, diffs, written
   ]) assert.ok(rows.includes(expected), `${expected.slice(0, 60)} missing from\n${rows.join('\n---\n')}`);
   const text = shown(html);
   for (const expected of [
-    '{&quot;paykey&quot;: &quot;[redacted]&quot;, &quot;token&quot;: &quot;[redacted]&quot;}Straddle-Signature: [redacted],[redacted]',
+    '{&quot;paykey&quot;: &quot;[redacted]&quot;, &quot;token&quot;: &quot;[redacted]&quot;}Straddle-Signature: [redacted]',
     'const key = &quot;[redacted]&quot;',
     'Approve the charge with paykey [redacted]?',
     '=&quot;Yes, use [redacted]&quot;',
@@ -144,6 +166,7 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     'Secret: [redacted]',
     '*API key:* [redacted]',
   ]) assert.ok(text.includes(expected) || text.includes(expected.replaceAll('&quot;', '"')), `${expected} missing`);
+  for (const [, expected] of DELIMITED) assert.ok(text.includes(`${expected}\n`) || text.includes(`${expected}┌`), `${expected} missing`);
   // A prose account number before a full stop, and a bare one in a table cell, go; the timestamp beside it stays.
   assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\. Use account \[redacted\]\./);
   assert.match(html, /│ \[redacted\] *│ 2026-10-03T10:00:05Z │/);
