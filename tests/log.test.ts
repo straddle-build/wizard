@@ -117,6 +117,18 @@ const DELIMITED: [string, string][] = [
   ['M16 **Password:** _zqFa,zqFb_, then more', 'M16 Password: [redacted], then more'],
 ];
 
+// Delimited values below, at and above 512 characters (where the previous rule stopped reading) and past the
+// 2000-character clip, closed and unclosed. A closed value keeps the text after it; an unclosed one is redacted to
+// the end of its line. Each value ends in `zqEND`, so a surviving tail shows.
+const zqValue = (length: number) => `${'zq '.repeat(length).slice(0, length - 5)}zqEND`;
+const LONG: [string, string][] = [511, 512, 513, 2100].flatMap((n): [string, string][] => [
+  [`L${n}q password: "${zqValue(n)}" kept`, `L${n}q password: &#34;[redacted]&#34; kept`],
+  [`L${n}b secret: \`${zqValue(n)}\` kept`, `L${n}b secret: [redacted] kept`],
+  [`L${n}e token: **${zqValue(n)}** kept`, `L${n}e token: [redacted] kept`],
+  [`L${n}u password: "${zqValue(n)}`, `L${n}u password: &#34;[redacted]`],
+  [`L${n}s token: **${zqValue(n)}`, `L${n}s token: [redacted]`],
+]);
+
 test('planted secrets never reach the page, in commands, results, diffs, written files, questions, MCP calls, long fields and Markdown replies', async () => {
   const s = PLANTED;
   const repo = recorded([
@@ -128,12 +140,17 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     result('t4', `User has answered your questions: "Approve?"="Yes, use ${s.key}". You can now continue.`),
     assistant('2026-10-03T10:00:03.300Z', { type: 'tool_use', id: 't5', name: 'mcp__plugin_straddle_straddle-api__execute-request', input: { method: 'POST', path: '/v1/charges' } }),
     result('t5', `{"api_key":"${s.envKey}","password":"${s.starJson}","token":"${s.starSuffix}","id":"01a0f80f-e858-4c1e-9d3b-2f5a6b7c8d9e"}`),
+    // A JSON value holding an escaped quote, a 2100-character JSON value in a result the page clips at 2000, and JSON
+    // inside a shell string, whose value holds an escaped quote of its own.
+    assistant('2026-10-03T10:00:03.310Z', { type: 'tool_use', id: 't7', name: 'Grep', input: { pattern: 'charges' } }),
+    result('t7', `{"password":"zqesc1\\"zqesc2","id":"keepme01"}\n{"password":"${zqValue(2100)}","id":"keepme02"}`),
+    assistant('2026-10-03T10:00:03.320Z', { type: 'tool_use', name: 'Bash', input: { command: String.raw`curl -d "{\"password\":\"zqopen\\\"zqmore\",\"id\":\"keepme03\"}"` } }),
     assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
     result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
     // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
     assistant('2026-10-03T10:00:03.600Z', { type: 'tool_use', name: 'Grep', input: { pattern: `${'a'.repeat(1978)}api_key=${s.envKey}` } }),
     assistant('2026-10-03T10:00:04.000Z', { type: 'tool_use', name: 'Write', input: { file_path: `${s.home}/shop/.env.local`, content: `STRADDLE_WEBHOOK_SECRET=${s.webhook}\nHASH=${s.hex}` } }),
-    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\napi_key: \`${s.envKey}\`\n**API key:** \`${s.envKey}\`\nsecret: \`${s.starTick}\`\n**Secret:** ${s.starBold}\n*API key:* ${s.starItalic}\n${DELIMITED.map(([line]) => line).join('\n')}\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
+    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\napi_key: \`${s.envKey}\`\n**API key:** \`${s.envKey}\`\nsecret: \`${s.starTick}\`\n**Secret:** ${s.starBold}\n*API key:* ${s.starItalic}\n${[...DELIMITED, ...LONG].map(([line]) => line).join('\n')}\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
   ].join('\n'));
   const html = await page(repo);
   for (const [name, secret] of Object.entries(PLANTED)) assert.ok(!html.includes(secret), `planted ${name} is on the page`);
@@ -166,7 +183,9 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     'Secret: [redacted]',
     '*API key:* [redacted]',
   ]) assert.ok(text.includes(expected) || text.includes(expected.replaceAll('&quot;', '"')), `${expected} missing`);
-  for (const [, expected] of DELIMITED) assert.ok(text.includes(`${expected}\n`) || text.includes(`${expected}┌`), `${expected} missing`);
+  for (const [, expected] of [...DELIMITED, ...LONG]) assert.ok(text.includes(`${expected}\n`) || text.includes(`${expected}┌`), `${expected} missing`);
+  for (const kept of ['&quot;id&quot;:&quot;keepme01&quot;', '&quot;id&quot;:&quot;keepme02&quot;']) assert.ok(text.includes(kept) || text.includes(kept.replaceAll('&quot;', '"')), `${kept} missing`);
+  assert.ok(rows.some((r) => r.startsWith('Bash: $ curl -d ') && r.includes('keepme03') && r.includes('[redacted]')), rows.join('\n---\n'));
   // A prose account number before a full stop, and a bare one in a table cell, go; the timestamp beside it stays.
   assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\. Use account \[redacted\]\./);
   assert.match(html, /│ \[redacted\] *│ 2026-10-03T10:00:05Z │/);

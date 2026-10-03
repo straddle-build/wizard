@@ -32,18 +32,22 @@ interface SessionLog { steps: Step[]; unavailable: Unavailable[] }
 //
 // The separator takes the label's closing delimiter on either side of the colon (`**Token**:`, `__API key:__`,
 // `` `api_key`: ``, `"api_key":`; after the colon only when a space follows) and the value's opening quote or
-// backtick. The value is then read by how it opens: a quoted or backticked value runs to its closing mark, spaces and
-// punctuation included; an emphasized one (`**…**`, `_…_`) to the matching closer before a space or punctuation; any
-// other runs to whitespace or a quote, and keeps `,` `;` `}` `\` when more value follows them, so a secret is never
-// cut at its own punctuation. A delimited value is read at most 512 characters ahead; past that it is read unquoted.
+// backtick. The value is then read by how it opens, with no length bound, and an unclosed one runs to the end of its
+// line rather than being reread as prose:
+// - a double-quoted value to its unescaped closing quote, reading `\"` and `\\` as escapes; one opened with an escaped
+//   quote (JSON inside a string, `\"password\":\"…\"`) to its `\"`, reading `\\\"` and `\\\\` as its escapes;
+// - a single-quoted or backticked value to its closing mark;
+// - an emphasized value (`**…**`, `_…_`) to the matching closer before a space or punctuation;
+// - any other value to whitespace or a quote, keeping runs of `,` `;` `}` `\` when more value follows them.
+// Every branch stops only where its own terminator is, so no attempt fails after a long scan and the work is linear.
 // Values under 6 characters stay, as in Northwind.
 //
 // A named rule matches at the separator and finds the name by looking behind it, so the name is never consumed and
 // each separator looks back over one run of name characters: matching from the start of the name retried a `[\w-]*`
 // at every word boundary and made long hyphenated text quadratic.
 const named = (name: string, value: string) =>
-  new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*\\*["'\x60]{0,2})${value}`, 'gi');
-const SECRET_VALUE = String.raw`(?!\[redacted\])(?:(?<=")[^"\\\n]{6,512}(?=\\?")|(?<=')[^'\\\n]{6,512}(?=\\?')|(?<=\x60)[^\x60\n]{6,512}(?=\x60)|([*_]{1,2})(?:(?!\2)[^\n]){6,512}?\2(?=[\s.,;:!?)\]]|$)|(?:[^\s"'\x60\\,;}]|[\\,;}](?=[^\s"'\x60\\,;}])){6,})`;
+  new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*\\*(?:\x60{1,2}|["'])?)${value}`, 'gi');
+const SECRET_VALUE = String.raw`(?!\[redacted\])(?:(?<=\\")(?:[^"\\\n]|\\\\(?:\\["\\]|[^"\\\n])|\\(?!")[^\n]?){6,}(?=\\?"|\n|$)|(?<=[^\\]")(?:[^"\\\n]|\\[^\n]?){6,}(?="|\n|$)|(?<=')(?:[^'\\\n]|\\[^\n]?){6,}(?='|\n|$)|(?<=\x60)[^\x60\n]{6,}(?=\x60|\n|$)|([*_]{1,2})[^\n]+?(?:\2(?=[\s.,;:!?)\]]|$)|(?=\n|$))|(?:[^\s"'\x60\\,;}]|[\\,;}]+(?=[^\s"'\x60\\,;}])){6,})`;
 const SECRETS: [RegExp, string][] = [
   [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_-]{6,}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
