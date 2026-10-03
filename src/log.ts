@@ -135,8 +135,9 @@ function redactNamed(text: string): string {
     const close = first && first.end === end ? first.close : 0;
     const content = text.slice(start + open, end - close);
     // Under an account or routing label a value of 4 or more digits is an account or routing number, so the 4-digit
-    // minimum of that rule still applies when the label also holds a secret keyword (`account_secret=4729`).
-    const numeric = m[1] !== undefined && /^\d{4,}$/.test(content);
+    // minimum of that rule still applies when the label also holds a secret keyword (`account_secret=4729`), with
+    // punctuation after the digits too (`4729.`). A word character after them (`4729a`) isn't a number, as in that rule.
+    const numeric = m[1] !== undefined && /^\d{4,}(?!\w)/.test(content);
     if ((end - start - open - (first?.close ?? 0) < 6 && !numeric) || content === '[redacted]') continue;
     const keepQuotes = quotedLabel && close > 0 && /["']$/.test(text.slice(start, start + open));
     out += text.slice(copied, start) + (keepQuotes ? `${text.slice(start, start + open)}[redacted]${text.slice(end - close, end)}` : '[redacted]');
