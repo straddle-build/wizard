@@ -86,32 +86,42 @@ const PLANTED = {
   signature: 't=1700000000,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd',
   account: '000123456789',
   home: '/Users/dana',
+  // Values with literal asterisks, plain, in JSON, in backticks and after emphasized labels.
+  starPlain: 'hunt*er2secret',
+  starJson: 'json*pass*value',
+  starSuffix: 'tok12345*tail99',
+  starTick: 'tick*key*value',
+  starBold: 'bold*secret*value',
+  starItalic: 'ital*key*value',
 };
 
 test('planted secrets never reach the page, in commands, results, diffs, written files, questions, MCP calls, long fields and Markdown replies', async () => {
   const s = PLANTED;
   const repo = recorded([
     assistant('2026-10-03T10:00:03.000Z', { type: 'tool_use', id: 't1', name: 'Bash', input: { command: `STRADDLE_API_KEY=${s.envKey} curl -H "Authorization: Bearer ${s.bearer}" -d '{"account_number": "${s.account}"}'` } }),
+    assistant('2026-10-03T10:00:03.050Z', { type: 'tool_use', name: 'Bash', input: { command: `DB_PASSWORD=${s.starPlain} npm run migrate` } }),
     result('t1', `{"paykey": "${s.paykey}", "token": "${s.jwt}"}\nStraddle-Signature: ${s.signature}`),
     assistant('2026-10-03T10:00:03.100Z', { type: 'tool_use', name: 'Edit', input: { file_path: '/repo/lib/straddle.ts', old_string: "const key = ''", new_string: `const key = "${s.key}"` } }),
     assistant('2026-10-03T10:00:03.200Z', { type: 'tool_use', id: 't4', name: 'AskUserQuestion', input: { questions: [{ question: `Approve the charge with paykey ${s.jwt}?` }] } }),
     result('t4', `User has answered your questions: "Approve?"="Yes, use ${s.key}". You can now continue.`),
     assistant('2026-10-03T10:00:03.300Z', { type: 'tool_use', id: 't5', name: 'mcp__plugin_straddle_straddle-api__execute-request', input: { method: 'POST', path: '/v1/charges' } }),
-    result('t5', `{"api_key":"${s.envKey}","id":"01a0f80f-e858-4c1e-9d3b-2f5a6b7c8d9e"}`),
+    result('t5', `{"api_key":"${s.envKey}","password":"${s.starJson}","token":"${s.starSuffix}","id":"01a0f80f-e858-4c1e-9d3b-2f5a6b7c8d9e"}`),
     assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
     result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
     // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
     assistant('2026-10-03T10:00:03.600Z', { type: 'tool_use', name: 'Grep', input: { pattern: `${'a'.repeat(1978)}api_key=${s.envKey}` } }),
     assistant('2026-10-03T10:00:04.000Z', { type: 'tool_use', name: 'Write', input: { file_path: `${s.home}/shop/.env.local`, content: `STRADDLE_WEBHOOK_SECRET=${s.webhook}\nHASH=${s.hex}` } }),
-    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\napi_key: \`${s.envKey}\`\n**API key:** \`${s.envKey}\`\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
+    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\napi_key: \`${s.envKey}\`\n**API key:** \`${s.envKey}\`\nsecret: \`${s.starTick}\`\n**Secret:** ${s.starBold}\n*API key:* ${s.starItalic}\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
   ].join('\n'));
   const html = await page(repo);
   for (const [name, secret] of Object.entries(PLANTED)) assert.ok(!html.includes(secret), `planted ${name} is on the page`);
-  for (const piece of ['021000021', 'FAKEK', '/home/dana']) assert.ok(!html.includes(piece), `${piece} is on the page`);
+  // No part of an asterisk-bearing value survives either: Markdown delimiting never truncates a secret.
+  for (const piece of ['021000021', 'FAKEK', '/home/dana', '*er2secret', '*pass*value', '*tail99', '*key*value', '*secret*value']) assert.ok(!html.includes(piece), `${piece} is on the page`);
   // The surrounding text stays readable; only the values go. `Authorization: Bearer` loses both words, as in Northwind.
   const rows = sections(html)[1]![1] as string[];
   for (const expected of [
     'Bash: $ STRADDLE_API_KEY=[redacted] curl -H &#34;Authorization: [redacted] [redacted]&#34; -d &#39;{&#34;account_number&#34;: &#34;[redacted]&#34;}&#39;',
+    'Bash: $ DB_PASSWORD=[redacted] npm run migrate',
     'Edit: /repo/lib/straddle.ts',
     'straddle-api execute-request: method: POST\npath: /v1/chargesresult',
     'Bash: $ ls ~/straddle-demo/bin',
@@ -129,6 +139,10 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     'STRADDLE_WEBHOOK_SECRET=[redacted][redacted]',
     'api_key: [redacted]',
     'API key: [redacted]',
+    '&quot;password&quot;:&quot;[redacted]&quot;,&quot;token&quot;:&quot;[redacted]&quot;',
+    'secret: [redacted]',
+    'Secret: [redacted]',
+    '*API key:* [redacted]',
   ]) assert.ok(text.includes(expected) || text.includes(expected.replaceAll('&quot;', '"')), `${expected} missing`);
   // A prose account number before a full stop, and a bare one in a table cell, go; the timestamp beside it stays.
   assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\. Use account \[redacted\]\./);
