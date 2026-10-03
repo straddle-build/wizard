@@ -175,6 +175,15 @@ const FENCES = [
   '\n| Check | Result |\n| --- | --- |\n| sig | ok |',
 ].join('\n');
 
+// The line after a label crossed with plain and quoted labels, LF and CRLF, and what that line holds: a backtick
+// value closed on the line is a value (its `zq` goes, the word after it stays); a real fence opener (backticks and an
+// info string, or bare backticks) is code, and its code stays.
+const FENCE_CROSS = ['api_key', '"api_key"', 'PASSWORD'].flatMap((label, l) => ['\n', '\r\n'].flatMap((nl, n) => [
+  `${label}:${nl}\`\`\`zqFIN${l}${n} two\`\`\` keepFIN${l}${n}`,
+  `${label}:${nl}\`\`\`shell${nl}keepFENCE${l}${n} code${nl}\`\`\``,
+  `${label}:${nl}\`\`\`${nl}keepBARE${l}${n} code${nl}\`\`\``,
+])).join('\n');
+
 // Delimited values below, at and above 512 characters (where the previous rule stopped reading) and past the
 // 2000-character clip, closed and unclosed. A closed value keeps the text after it; an unclosed one is redacted to
 // the end of its line. Each value ends in `zqEND`, so a surviving tail shows.
@@ -217,6 +226,7 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     assistant('2026-10-03T10:00:04.500Z', { type: 'text', text: CROSS.map((line, i) => `X${i} ${line} keepX${i}`).join('\n') }),
     assistant('2026-10-03T10:00:04.600Z', { type: 'text', text: FENCES }),
     assistant('2026-10-03T10:00:04.700Z', { type: 'tool_use', name: 'Write', input: { file_path: 'docs/setup.md', content: FENCES } }),
+    assistant('2026-10-03T10:00:04.800Z', { type: 'tool_use', name: 'Write', input: { file_path: 'docs/fences.md', content: FENCE_CROSS } }),
     assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
     result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
     // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
@@ -259,6 +269,7 @@ test('planted secrets never reach the page, in commands, results, diffs, written
   ]) assert.ok(text.includes(expected) || text.includes(expected.replaceAll('&quot;', '"')), `${expected} missing`);
   for (const [, expected] of [...DELIMITED, ...LONG]) assert.ok(text.includes(`${expected}\n`) || text.includes(`${expected}┌`), `${expected} missing`);
   for (const kept of ['&quot;id&quot;:&quot;keepme01&quot;', '&quot;id&quot;:&quot;keepme02&quot;', '&quot;id&quot;: &quot;keepme25&quot;', 'keepme26', '&quot;id&quot;: &quot;keepme27&quot;', 'keepme30', 'keepme31', 'keepme32 stays in the fence as code']) assert.ok(text.includes(kept) || text.includes(kept.replaceAll('&quot;', '"')), `${kept} missing`);
+  for (const l of [0, 1, 2]) for (const n of [0, 1]) for (const kept of [`[redacted] keepFIN${l}${n}`, `keepFENCE${l}${n} code`, `keepBARE${l}${n} code`]) assert.ok(text.includes(kept), `${kept} missing`);
   assert.ok(rows.some((r) => r.startsWith('Bash: $ curl -d ') && r.includes('keepme03') && r.includes('[redacted]')), rows.join('\n---\n'));
   for (const [, expected] of WORDS) assert.ok(rows.includes(expected), `${expected} missing from\n${rows.join('\n---\n')}`);
   for (const i of CROSS.keys()) {

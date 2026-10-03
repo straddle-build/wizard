@@ -46,9 +46,11 @@ interface SessionLog { steps: Step[]; unavailable: Unavailable[] }
 // The value is replaced whole, except a single quoted string after a quoted label keeps its quotes. It stays when it
 // has fewer than 6 characters between its delimiters, as in Northwind, or is an earlier `[redacted]`. A label holding a
 // secret keyword anywhere is a secret label, whatever comes first (`ACCOUNT_TOKEN`, `routing_signature`); only an
-// account or routing label without one takes just the 4 to 17 digits after it. A Markdown code fence (```` ``` ```` at
-// the start of a line) after a line break isn't a value: it is the reply's code, read as code, and only a value on the
-// label's own line or a quoted, emphasized or plain value on a later line is taken.
+// account or routing label without one takes just the 4 to 17 digits after it. A Markdown code fence opener after a
+// line break isn't a value: it is the reply's code, read as code. An opener is a line of three or more backticks
+// followed only by an info string with no backtick (CommonMark's rule), so ```` ```shell ```` opens a fence while
+// ```` ```value``` ```` closed on its own line is a value, on the label's line or the next, LF or CRLF.
+const FENCE_OPENER = /`{3,}[^`\r\n]*\r?(?:\n|$)/y;
 const SECRET_KEYWORD = /api[_ -]?key|secret|token|password|paykey|signature|authorization/i;
 const LABEL = /(account|routing)(?: (?:number|num|no))?[\w-]*|(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)[\w-]*/gi;
 const STRAY = ',;}\\"\'`';
@@ -100,7 +102,8 @@ function redactNamed(text: string): string {
     let newLine = false;
     for (; /\s/.test(text[i] ?? ''); i++) newLine ||= text[i] === '\n';
     const start = i;
-    if (newLine && text.startsWith('```', start)) continue;
+    FENCE_OPENER.lastIndex = start;
+    if (newLine && FENCE_OPENER.test(text)) continue;
 
     if (m[1] && !SECRET_KEYWORD.test(m[0])) {
       for (j = start; text[j] === '\\'; j++);
