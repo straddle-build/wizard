@@ -231,6 +231,18 @@ test('default journey: one agent session walks the whole program, with a live ch
   assert.match(receipt.sessions[0]!.sessionId ?? '', /^[0-9a-f-]{36}$/);
   const events = readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8');
   for (const secret of [JSON.stringify(receipt), events]) assert.ok(!secret.includes('sk_test_value_in_test_env'), 'no record holds the key');
+
+  // The report points at the session log, a pipe is never asked to open it, and `wizard log` replays this session.
+  assert.match(r.stdout, /Session log\s+wizard log\n/);
+  assert.doesNotMatch(r.stdout, /Open the session log\?/);
+  const log = await runWizard(['log'], { cwd: repo, claude, env: CONFIGURED });
+  assert.equal(log.code, 0, log.stderr);
+  const page = readFileSync(join(repo, '.straddle-wizard', 'session-log.html'), 'utf8');
+  const headings = [...page.matchAll(/<h2>(.*?)<\/h2>/g)].map((m) => m[1]!);
+  assert.deepEqual([...new Set(headings.map((h) => h.split(' · ')[0]))], ['Session start', 'straddle-setup', 'straddle-plan', 'straddle-integrate', 'straddle-test', 'straddle-go-live']);
+  assert.deepEqual(headings.slice(1, 6), ['straddle-setup · 01-begin', 'straddle-setup · 02-repository', 'straddle-setup · 03-cli-and-context', 'straddle-setup · 04-mcp', 'straddle-setup · 05-report']);
+  assert.match(page, /<span class="who">Write<\/span><div class="body"><details><summary>[^<]*\/src\/straddle\.ts<\/summary>/);
+  assert.ok(!page.includes('sk_test_value_in_test_env'), 'the page holds no key');
 });
 
 const LAUNCH = { skill: 'straddle-plan', repo: '/repo', context: 'ctx', settingsPath: '/run/session.settings.json', pluginDir: '/bundle' };

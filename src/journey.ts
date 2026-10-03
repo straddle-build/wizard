@@ -12,6 +12,7 @@ import { checklistPage, followCodex } from './codex.ts';
 import { straddleConfiguration } from './configuration.ts';
 import { changedFiles, discover, readRepoFile, snapshot, type RepoFacts } from './discovery.ts';
 import { appendEvents, readObservedEvents, transcriptAssistantText, verifyChecklist } from './events.ts';
+import { offerLog } from './log.ts';
 import { CONTRACT_FILES, SKILLS, programFor, programSkills, stepTitles, type ProgramName, type SkillName } from './programs.ts';
 import { goLiveSkippable, header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
 import { SESSION_ID, WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Mode, type Receipt, type RunState, type SessionRun } from './receipt.ts';
@@ -27,6 +28,8 @@ export interface JourneyOptions {
   client: ClientName | undefined;
   mode: Mode | undefined;
   exclude: string[];
+  // Ask to open the session log when a session ends: a terminal on both ends, and not --json.
+  offerLog: boolean;
 }
 
 const EXIT_CODE: Record<RunState, number> = { completed: 0, ready: 0, running: 1, blocked: 1, aborted: 130 };
@@ -36,11 +39,17 @@ const STATUSLINE_SCRIPT = join(dirname(here), `statusline${extname(here)}`);
 // The Straddle dashboard serves Sandbox and Production at one address; its Sandbox switch picks the environment.
 const DASHBOARD = 'https://dashboard.straddle.com';
 
-// The receipt a Ctrl-C at a Wizard prompt must mark as aborted. While an agent client runs, it owns Ctrl-C.
-const active: { receipt: Receipt | null; clientRunning: boolean } = { receipt: null, clientRunning: false };
+// The receipt a Ctrl-C at a Wizard prompt must mark as aborted. While an agent client runs, it owns Ctrl-C. Once a
+// session's report is out, its outcome is saved and `settled` holds its exit code: a Ctrl-C at a later optional
+// question leaves both alone.
+const active: { receipt: Receipt | null; clientRunning: boolean; settled: number | null } = { receipt: null, clientRunning: false, settled: null };
 
 export function handleInterrupt(io: Prompter): void {
   if (active.clientRunning) return;
+  if (active.settled !== null) {
+    io.say();
+    process.exit(active.settled);
+  }
   if (active.receipt) {
     finish(active.receipt, 'aborted', 'you cancelled at a Wizard prompt');
     io.say('\nStopped. Everything done so far stays in place. Run `wizard resume` to pick up where you left off.');
@@ -672,7 +681,12 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   }
   io.say();
   if (skills.includes('straddle-audit')) showAuditFindings(io, receipt);
-  return printReport(io, receipt, atEnd, ready.bundle);
+  const code = await printReport(io, receipt, atEnd, ready.bundle);
+  if (opts.offerLog && events.length) {
+    active.settled = code;
+    await offerLog(io, repo);
+  }
+  return code;
 }
 
 function interrupted(io: Prompter, receipt: Receipt, session: SessionRun, reason: string): void {
@@ -778,6 +792,7 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
     ...receipt.client ? [['Agent', `${CLIENT_LABEL[receipt.client]}, plugin ${receipt.pluginLoad === 'session' ? 'loaded into the session with --plugin-dir (not installed)' : receipt.pluginLoad ?? 'not ready'}`] as [string, string]] : [],
     ...bundle ? [['Skill bundle', bundleLabel(bundle)] as [string, string]] : [],
     ['Run record', `${WIZARD_DIR}/receipt.json and ${WIZARD_DIR}/events.jsonl`],
+    ...readObservedEvents(eventsPath(receipt.repo)).events.length ? [['Session log', 'wizard log'] as [string, string]] : [],
   ];
   const look = io.look;
   if (look) io.say(card(look, title, rows));

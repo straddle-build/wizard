@@ -102,7 +102,7 @@ function walk(repo: string, exclude: readonly string[]): Walk {
 
 // Opens a regular file without following a symlink, even one swapped in after the walk, and without blocking on a
 // FIFO. Null when it cannot be opened that way.
-function openRegular(abs: string): { fd: number; size: number; mtimeMs: number } | null {
+export function openRegular(abs: string): { fd: number; size: number; mtimeMs: number } | null {
   let fd: number;
   try { fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return null; }
   const info = fstatSync(fd);

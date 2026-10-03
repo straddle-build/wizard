@@ -217,6 +217,12 @@ export function table(look: Look, headers: readonly string[], rows: readonly (re
   ].join('\n');
 }
 
+// One pipe-table line as its cells, or null for the `| --- |` line under the header.
+export function tableCells(line: string): string[] | null {
+  if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) return null;
+  return line.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
+}
+
 // The Markdown the skills' report files use: headings, pipe tables, bullet, numbered and checkbox lists, fenced code,
 // paragraphs, and inline bold, code and links. HTML comments are dropped, and the text is sanitized first.
 export function markdown(look: Look, text: string): string {
@@ -229,7 +235,8 @@ export function markdown(look: Look, text: string): string {
     if (/^\s*\|/.test(line)) {
       const rows: string[][] = [];
       for (; i < lines.length && /^\s*\|/.test(lines[i]!); i++) {
-        if (!/^\s*\|[\s:|-]+\|\s*$/.test(lines[i]!)) rows.push(lines[i]!.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|')));
+        const cells = tableCells(lines[i]!);
+        if (cells) rows.push(cells);
       }
       i--;
       if (rows.length) out.push(table(look, rows[0]!, rows.slice(1)));
