@@ -269,9 +269,10 @@ summary:focus-visible,.md:focus-visible{outline:2px solid var(--accent);outline-
 </style>
 <style>${code.styles}</style>
 <script type="module">${code.script}</script>
-<h1>Straddle Wizard session log</h1><p>${clean(repo)}. Built on this machine from ${WIZARD_DIR}/events.jsonl and your agent's transcript; nothing was uploaded.</p>
+<main><h1>Straddle Wizard session log</h1><p>${clean(repo)}. Built on this machine from ${WIZARD_DIR}/events.jsonl and your agent's transcript; nothing was uploaded.</p>
 ${missing.join('\n')}
 ${steps.join('\n')}
+</main>
 </html>
 `;
 }
