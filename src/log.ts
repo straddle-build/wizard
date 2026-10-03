@@ -150,6 +150,7 @@ p{max-width:75ch;margin:0 0 .75rem;overflow-wrap:anywhere}
 .t1{font-weight:bold}.t2{color:var(--muted)}.t36{color:var(--accent)}.t1-36{color:var(--heading);font-weight:bold}.t32{color:#bae67e}.t33{color:var(--heading)}.t31{color:#f28779}
 .warn{color:#f28779}
 @media (max-width:640px){body{padding:1rem}h1{font-size:1.2rem}.row{display:flex;flex-wrap:wrap;gap:0 1rem}.row .body{flex:0 0 100%;margin-top:.25rem}}
+.md{line-height:1.2}
 </style>
 <h1>Straddle Wizard session log</h1><p>${clean(repo)}. Built on this machine from ${WIZARD_DIR}/events.jsonl and your agent's transcript; nothing was uploaded.</p>
 ${missing.join('\n')}
