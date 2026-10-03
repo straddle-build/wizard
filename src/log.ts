@@ -243,7 +243,8 @@ function terminalHtml(md: string): string {
 function tableHtml(lines: readonly string[]): string {
   const [head = [], ...body] = lines.flatMap((l) => [tableCells(l) ?? []]).filter((cells) => cells.length);
   const cell = (tag: 'th' | 'td', c: string) => `<${tag}${tag === 'th' ? ' scope="col"' : ''}>${escape(c.replace(/`([^`]+)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1'))}</${tag}>`;
-  return `<div class="md" tabindex="0"><pre aria-hidden="true">${terminalHtml(lines.join('\n'))}</pre><table class="visually-hidden"><thead><tr>${head.map((c) => cell('th', c)).join('')}</tr></thead><tbody>${body.map((r) => `<tr>${r.map((c) => cell('td', c)).join('')}</tr>`).join('')}</tbody></table></div>`;
+  // A table box grows to its content whatever its width, so the clipping goes on a wrapper.
+  return `<div class="md" tabindex="0"><pre aria-hidden="true">${terminalHtml(lines.join('\n'))}</pre><div class="visually-hidden"><table><thead><tr>${head.map((c) => cell('th', c)).join('')}</tr></thead><tbody>${body.map((r) => `<tr>${r.map((c) => cell('td', c)).join('')}</tr>`).join('')}</tbody></table></div></div>`;
 }
 
 const row = (at: string, who: string, body: string, kind = '') => `<div class="row${kind}"><span class="at">${clean(at)}</span><span class="who">${who}</span>${body}</div>`;

@@ -155,7 +155,7 @@ test('a resumed session names its transcript twice: every row shows once, a call
   assert.ok(!html.includes('\x1b') && !html.includes('[1m') && !html.includes('[0m'), 'a terminal color code is on the page');
   const art = /<pre aria-hidden="true">([\s\S]*?)<\/pre>/.exec(html)![1]!.replace(/<[^>]+>/g, '');
   assert.equal(art, '┌───────┬────────┐\n│ Check │ Result │\n├───────┼────────┤\n│ CLI   │ ok     │\n└───────┴────────┘');
-  assert.ok(html.includes('<table class="visually-hidden"><thead><tr><th scope="col">Check</th><th scope="col">Result</th></tr></thead><tbody><tr><td>CLI</td><td>ok</td></tr></tbody></table>'), html);
+  assert.ok(html.includes('<div class="visually-hidden"><table><thead><tr><th scope="col">Check</th><th scope="col">Result</th></tr></thead><tbody><tr><td>CLI</td><td>ok</td></tr></tbody></table></div>'), html);
 });
 
 test('Codex session: the rollout found by session id gives its tool calls and replies under the step', async () => {
