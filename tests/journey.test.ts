@@ -241,7 +241,7 @@ test('default journey: one agent session walks the whole program, with a live ch
   const headings = [...page.matchAll(/<h2>(.*?)<\/h2>/g)].map((m) => m[1]!);
   assert.deepEqual([...new Set(headings.map((h) => h.split(' · ')[0]))], ['Session start', 'straddle-setup', 'straddle-plan', 'straddle-integrate', 'straddle-test', 'straddle-go-live']);
   assert.deepEqual(headings.slice(1, 6), ['straddle-setup · 01-begin', 'straddle-setup · 02-repository', 'straddle-setup · 03-cli-and-context', 'straddle-setup · 04-mcp', 'straddle-setup · 05-report']);
-  assert.match(page, /<span class="who">Write<\/span><pre class="body">file_path: [^\n]*\/src\/straddle\.ts\n/);
+  assert.match(page, /<span class="who">Write<\/span><div class="body"><details><summary>[^<]*\/src\/straddle\.ts<\/summary>/);
   assert.ok(!page.includes('sk_test_value_in_test_env'), 'the page holds no key');
 });
 

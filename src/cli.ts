@@ -204,8 +204,8 @@ async function journey(run: (opts: JourneyOptions) => Promise<number>): Promise<
 }
 
 // Built from the run record in this repo; a pipe gets the page's path instead of a browser.
-function log(): number {
-  const path = writeLog(repo);
+async function log(): Promise<number> {
+  const path = await writeLog(repo);
   if (!path) fail(`No Wizard session is recorded in ${repo}: ${WIZARD_DIR}/events.jsonl is missing or empty. Run \`wizard\` first.`, 1);
   if (process.stdout.isTTY) openFile(path);
   say(`Session log: ${path}`);

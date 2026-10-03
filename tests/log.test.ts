@@ -40,20 +40,33 @@ test('no session recorded: wizard log says so and exits 1 instead of opening an 
   assert.equal(r.stderr, `No Wizard session is recorded in ${repo}: .straddle-wizard/events.jsonl is missing or empty. Run \`wizard\` first.\n`);
 });
 
-// Each step's heading and its rows as `who: body`, read from the page the way a reader scans it.
-const sections = (html: string) => [...html.matchAll(/<section><h2>(.*?)<\/h2>([\s\S]*?)<\/section>/g)].map((m) => [m[1], [...m[2]!.matchAll(/<span class="who">(.*?)<\/span><(?:pre|div) class="body[^"]*">([\s\S]*?)<\/(?:pre|div)><\/div>/g)].map((r) => `${r[1]}: ${r[2]}`)]);
+// Each step's heading and its rows as `who: text`, read the way a reader scans the page: a tool call's one-line summary
+// (or its fields), without the highlighted output it opens to.
+const sections = (html: string) => [...html.matchAll(/<section><h2>(.*?)<\/h2>([\s\S]*?)<\/section>/g)].map((m) => [m[1], [...m[2]!.matchAll(/<span class="who">(.*?)<\/span>([\s\S]*?)<\/div>(?=<div class="row|$)/g)].map((r) => `${r[1]}: ${r[2]!.replace(/<div class="expressive-code"[\s\S]*?<\/details>/g, '').replace(/<[^>]+>/g, '')}`)]);
+// What the page shows once every row is open: its text without markup, highlighted spans joined back up.
+const shown = (html: string) => html.replace(/<style>[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/g, '').replace(/ data-code="[^"]*"/g, '').replace(/<[^>]+>/g, '');
+const result = (id: string, content: unknown) => JSON.stringify({ type: 'user', timestamp: '2026-10-03T10:00:03.500Z', message: { content: [{ type: 'tool_result', tool_use_id: id, content }] } });
 
-test('normal session: each step in order, with its tool calls as rows under the step they ran in', async () => {
+test('normal session: each step in order, each tool call under the step it ran in, opening to its highlighted result', async () => {
   const repo = recorded([
     assistant('2026-10-03T10:00:01.000Z', { type: 'tool_use', name: 'Read', input: { file_path: '/b/skills/straddle-setup/steps/01-begin.md' } }),
     assistant('2026-10-03T10:00:03.000Z', { type: 'tool_use', name: 'Write', input: { file_path: 'straddle-setup.md', content: '# Setup\nStatus: complete\n' } }),
+    assistant('2026-10-03T10:00:03.200Z', { type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm test' } }),
+    result('b1', [{ type: 'text', text: '12 passing' }]),
     assistant('2026-10-03T10:00:07.000Z', { type: 'text', text: 'Plan drafted.' }),
   ].join('\n'));
-  assert.deepEqual(sections(await page(repo)), [
+  const html = await page(repo);
+  assert.deepEqual(sections(html), [
     ['Session start', ['wizard: Session started (abc12345-0000)']],
-    ['straddle-setup · 01-begin', ['Read: file_path: /b/skills/straddle-setup/steps/01-begin.md', 'Write: file_path: straddle-setup.md\ncontent: # Setup\nStatus: complete\n', 'wizard: Edited straddle-setup.md']],
+    ['straddle-setup · 01-begin', ['Read: file_path: /b/skills/straddle-setup/steps/01-begin.md', 'Write: straddle-setup.md', 'Bash: $ npm test', 'wizard: Edited straddle-setup.md']],
     ['straddle-plan · 01-begin', ['agent: Plan drafted.']],
   ]);
+  // Read has no recorded result here, so it opens to nothing rather than an invented one.
+  assert.equal(html.match(/<div class="expressive-code"/g)?.length, 2);
+  assert.ok(shown(html).includes('$ npm test12 passing'), 'the Bash result is paired with its call');
+  assert.ok(shown(html).includes('# SetupStatus: complete'), 'the written file is shown');
+  // Highlighted, not plain: the Write block's Markdown takes several Ayu Mirage token colors.
+  assert.ok(new Set(html.match(/--0:#[0-9A-F]{6,8}/gi)).size >= 3, 'code is highlighted in several colors');
 });
 
 // Northwind's planted secrets (tests/recorded-session.test.ts), in every place a transcript carries text, plus an
@@ -75,29 +88,40 @@ const PLANTED = {
 test('planted secrets (keys, bearer, KEY=value, paykey, JWT, hex, signature, account number, home directory) never reach the page', async () => {
   const s = PLANTED;
   const repo = recorded([
-    assistant('2026-10-03T10:00:03.000Z', { type: 'tool_use', name: 'Bash', input: { command: `STRADDLE_API_KEY=${s.envKey} curl -H "Authorization: Bearer ${s.bearer}" -d '{"paykey": "${s.paykey}", "token": "${s.jwt}", "account_number": "${s.account}"}'\nStraddle-Signature: ${s.signature}` } }),
+    assistant('2026-10-03T10:00:03.000Z', { type: 'tool_use', id: 't1', name: 'Bash', input: { command: `STRADDLE_API_KEY=${s.envKey} curl -H "Authorization: Bearer ${s.bearer}" -d '{"account_number": "${s.account}"}'` } }),
+    result('t1', `{"paykey": "${s.paykey}", "token": "${s.jwt}"}\nStraddle-Signature: ${s.signature}`),
     assistant('2026-10-03T10:00:04.000Z', { type: 'tool_use', name: 'Write', input: { file_path: `${s.home}/shop/.env.local`, content: `STRADDLE_WEBHOOK_SECRET=${s.webhook}\nHASH=${s.hex}` } }),
-    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021.\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
+    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021. Use account ${s.account}.\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
   ].join('\n'));
   const html = await page(repo);
-  // A bare account number in a table cell goes; the timestamp beside it stays.
-  assert.match(html, /│ \[redacted\] *│ 2026-10-03T10:00:05Z │/);
   for (const [name, secret] of Object.entries(PLANTED)) assert.ok(!html.includes(secret), `planted ${name} is on the page`);
   assert.ok(!html.includes('021000021'), 'routing number is on the page');
-  // The surrounding command stays readable; only the values go. `Authorization: Bearer` loses both words, as in Northwind.
+  // The surrounding text stays readable; only the values go. `Authorization: Bearer` loses both words, as in Northwind.
   const rows = sections(html)[1]![1] as string[];
-  assert.ok(rows.includes("Bash: command: STRADDLE_API_KEY=[redacted] curl -H &#34;Authorization: [redacted] [redacted]&#34; -d &#39;{&#34;paykey&#34;: &#34;[redacted]&#34;, &#34;token&#34;: &#34;[redacted]&#34;, &#34;account_number&#34;: &#34;[redacted]&#34;}&#39;\nStraddle-Signature: [redacted],[redacted]"), rows.join('\n---\n'));
-  assert.ok(rows.includes('Write: file_path: ~/shop/.env.local\ncontent: STRADDLE_WEBHOOK_SECRET=[redacted]\n[redacted]'), rows.join('\n---\n'));
-  assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\./);
+  assert.ok(rows.includes('Bash: $ STRADDLE_API_KEY=[redacted] curl -H &#34;Authorization: [redacted] [redacted]&#34; -d &#39;{&#34;account_number&#34;: &#34;[redacted]&#34;}&#39;'), rows.join('\n---\n'));
+  assert.ok(rows.includes('Write: ~/shop/.env.local'), rows.join('\n---\n'));
+  const text = shown(html);
+  assert.ok(text.includes('{&quot;paykey&quot;: &quot;[redacted]&quot;, &quot;token&quot;: &quot;[redacted]&quot;}Straddle-Signature: [redacted],[redacted]') || text.includes('{"paykey": "[redacted]", "token": "[redacted]"}Straddle-Signature: [redacted],[redacted]'), 'the paired result is redacted');
+  assert.ok(text.includes('STRADDLE_WEBHOOK_SECRET=[redacted][redacted]'), 'the written file is redacted');
+  // A prose account number before a full stop, and a bare one in a table cell, go; the timestamp beside it stays.
+  assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\. Use account \[redacted\]\./);
+  assert.match(html, /│ \[redacted\] *│ 2026-10-03T10:00:05Z │/);
 });
 
-test('a resumed session names its transcript twice and every row still shows once; a report renders as on the terminal, tables box-drawn', async () => {
-  const repo = recorded(assistant('2026-10-03T10:00:07.000Z', { type: 'text', text: '## Setup report\n- **Status:** complete\n\n| Check | Result |\n| --- | --- |\n| CLI | ok |' }));
+test('a resumed session names its transcript twice: every row shows once, a call keeps its result across the resume, and a report renders as on the terminal', async () => {
+  const repo = recorded([
+    assistant('2026-10-03T10:00:07.000Z', { type: 'text', text: '## Setup report\n- **Status:** complete\n\n| Check | Result |\n| --- | --- |\n| CLI | ok |' }),
+    assistant('2026-10-03T10:00:07.500Z', { type: 'tool_use', id: 'r1', name: 'Bash', input: { command: 'straddle --version' } }),
+    // Written after the resume below (second session-start at :08).
+    JSON.stringify({ type: 'user', timestamp: '2026-10-03T10:00:09.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 'r1', content: 'straddle 1.0.3' }] } }),
+  ].join('\n'));
   const events = readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8');
   const first = JSON.parse(events.split('\n')[0]!);
   writeFiles(repo, { '.straddle-wizard/events.jsonl': `${events}${JSON.stringify({ ...first, at: '2026-10-03T10:00:08.000Z' })}\n` });
   const html = await page(repo);
   assert.equal(html.split('Setup report').length, 2, html);
+  assert.deepEqual(sections(html).flatMap(([, rows]) => rows as string[]).filter((r) => r.startsWith('Bash: ')), ['Bash: $ straddle --version']);
+  assert.ok(shown(html).includes('$ straddle --versionstraddle 1.0.3'), 'the result written after the resume is paired');
   const report = sections(html).flatMap(([, rows]) => rows as string[]).find((r) => r.startsWith('agent: '))!.replace(/<[^>]+>/g, '');
   assert.equal(report, 'agent: Setup report\n• Status: complete\n\n┌───────┬────────┐\n│ Check │ Result │\n├───────┼────────┤\n│ CLI   │ ok     │\n└───────┴────────┘');
 });
@@ -112,6 +136,7 @@ test('Codex session: the rollout found by session id gives its tool calls and re
   ];
   const rollout = [
     { timestamp: '2026-10-03T10:00:03.000Z', type: 'response_item', payload: { type: 'function_call', name: 'shell', arguments: '{"command":["npm","test"]}', call_id: 'c1' } },
+    { timestamp: '2026-10-03T10:00:03.500Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: JSON.stringify({ output: '3 passing', metadata: { exit_code: 0 } }) } },
     { timestamp: '2026-10-03T10:00:04.000Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Tests pass.' }] } },
   ];
   writeFiles(repo, { '.straddle-wizard/events.jsonl': events.map((e) => JSON.stringify(e)).join('\n') + '\n' });
@@ -121,8 +146,9 @@ test('Codex session: the rollout found by session id gives its tool calls and re
   const html = readFileSync(join(repo, '.straddle-wizard', 'session-log.html'), 'utf8');
   assert.deepEqual(sections(html), [
     ['Session start', [`wizard: Session started (${id})`]],
-    ['straddle-test · 01-begin', ['shell: command: npm test', 'agent: Tests pass.']],
+    ['straddle-test · 01-begin', ['shell: $ npm test', 'agent: Tests pass.']],
   ]);
+  assert.ok(shown(html).includes('$ npm test3 passing'), 'the call output is paired with its call');
 });
 
 test('the page replaces a symlink or a world-readable file at its path, never writing through it or keeping its mode', async () => {

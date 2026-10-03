@@ -8,10 +8,13 @@ import { WIZARD_DIR } from './receipt.ts';
 import { markdown } from './tui.ts';
 import type { Prompter } from './ui.ts';
 
+// A tool call's highlighted view, as Northwind's integration log draws it (app/integration-log/code.ts).
+interface CodeBlock { code: string; language: string; meta?: string; props: { frame: 'terminal' | 'code' | 'none'; title?: string } }
+
 // One line of the session, from events.jsonl or the client transcript, in time order.
 type Entry =
   | { at: string; kind: 'step'; title: string; file: string }
-  | { at: string; kind: 'tool'; name: string; input: string }
+  | { at: string; kind: 'tool'; name: string; input: string; block: CodeBlock | null }
   | { at: string; kind: 'text'; text: string }
   | { at: string; kind: 'event'; text: string };
 
@@ -27,7 +30,7 @@ const SECRETS: [RegExp, string][] = [
   [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
   [/\b([\w-]*(?:api[_-]?key|secret|token|password|paykey|signature|authorization)[\w-]*)(\\*["']?\s*[:=]\s*\\*["']?)(?!\[redacted\])[^\s"'`,;\\}]{6,}/gi, '$1$2[redacted]'],
   [/\b([\w-]*(?:account|routing)[_ -]?(?:number|num|no)?[\w-]*)(\\*["']?\s*[:=]\s*\\*["']?)\d{4,17}\b/gi, '$1$2[redacted]'],
-  [/(?<![\w.:/-])\d{8,17}(?![\w.:/-])/g, '[redacted]'],
+  [/(?<![\w.:/-])\d{8,17}(?![\w:/-]|[.,]\d)/g, '[redacted]'],
   [/\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g, '[redacted]'],
   [/(?<![\w+=])(?=[\w+=]*\d)(?=[\w+=]*[A-Za-z])[A-Za-z0-9+_=]{32,}/g, '[redacted]'],
   [/\/(?:Users|home)\/[\w.-]+(?=\/|\b)/g, '~'],
@@ -56,10 +59,52 @@ function toolInput(input: unknown): string {
   return Object.entries(input).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : Array.isArray(v) && v.every((w) => typeof w === 'string') ? v.join(' ') : JSON.stringify(v)}`).join('\n');
 }
 
-// Claude Code transcripts and Codex rollouts: assistant text and tool calls, timestamped.
+// Shiki ids for the files the Wizard writes and edits; anything else renders as plain text.
+const LANG: Record<string, string> = { ts: 'ts', tsx: 'tsx', js: 'js', jsx: 'jsx', mjs: 'js', json: 'json', md: 'md', css: 'css', html: 'html', yaml: 'yaml', yml: 'yaml', sh: 'bash', py: 'python', rb: 'ruby', go: 'go' };
+
+// Northwind's block(): Bash shows `$ command` over its output in a terminal frame; Edit's old and new lines become a
+// diff in the file's language; Write shows the file; any other call shows its result, as JSON when it reads as JSON.
+// A Codex shell call reads as Bash. A call with no recorded result and nothing of its own to show gets no block.
+// Redaction runs before the 2000-character clip, so a clip never splits a secret past its rule.
+function toolBlock(name: string, input: unknown, result: string): CodeBlock | null {
+  const s = (k: string) => text(field(input, k)) ?? '';
+  const words = field(input, 'command');
+  const command = Array.isArray(words) ? words.join(' ') : s('command') || s('cmd');
+  const target = s('file_path');
+  const lang = LANG[target.split('.').pop() ?? ''] ?? 'txt';
+  const block: CodeBlock | null =
+    name === 'Bash' || (/^(shell|exec_command|local_shell)/.test(name) && command) ? { code: `$ ${command}\n${result}`, language: 'shellsession', props: { frame: 'terminal' } }
+    : name === 'Edit' ? { code: `${s('old_string').replace(/^/gm, '- ')}\n${s('new_string').replace(/^/gm, '+ ')}`, language: 'diff', meta: `lang="${lang}"`, props: { frame: 'code', title: target } }
+    : name === 'Write' ? { code: s('content'), language: lang, props: { frame: 'code', title: target } }
+    : result ? { code: result, language: /^\s*[[{]/.test(result) ? 'json' : 'txt', props: { frame: 'none' } }
+    : null;
+  if (!block) return null;
+  const code = redact(block.code);
+  return { ...block, code: code.length > 2000 ? `${code.slice(0, 2000)}\n… ${code.length - 2000} more characters` : code, props: { ...block.props, ...(block.props.title === undefined ? {} : { title: redact(block.props.title) }) } };
+}
+
+// The text of a Claude Code tool_result or a Codex call output, which may wrap it as `{"output": …}`.
+function resultText(value: unknown): string {
+  if (Array.isArray(value)) return value.map((part) => text(field(part, 'text')) ?? '').join('\n');
+  const raw = text(value) ?? (value === undefined ? '' : JSON.stringify(value));
+  return text(field(parseJson(raw), 'output')) ?? raw;
+}
+
+// Claude Code transcripts and Codex rollouts: assistant text and tool calls, timestamped, each call with the result
+// recorded for it (paired by id, so a resumed session appending to the same file keeps its pairs).
 function transcriptEntries(path: string): Entry[] {
-  return readFileSync(path, 'utf8').split('\n').flatMap((line): Entry[] => {
-    const entry = parseJson(line);
+  const rows = readFileSync(path, 'utf8').split('\n').map(parseJson);
+  const results = new Map<string, string>();
+  for (const row of rows) {
+    const payload = field(row, 'payload');
+    const call = text(field(payload, 'call_id'));
+    if (call && (text(field(payload, 'type')) ?? '').endsWith('_output')) results.set(call, resultText(field(payload, 'output')));
+    const content = field(field(row, 'message'), 'content');
+    if (field(row, 'type') === 'user' && Array.isArray(content)) {
+      for (const block of content) if (field(block, 'type') === 'tool_result') results.set(text(field(block, 'tool_use_id')) ?? '', resultText(field(block, 'content')));
+    }
+  }
+  return rows.flatMap((entry): Entry[] => {
     const at = text(field(entry, 'timestamp'));
     if (!at) return [];
     if (field(entry, 'type') === 'response_item') {
@@ -67,7 +112,9 @@ function transcriptEntries(path: string): Entry[] {
       const type = text(field(payload, 'type')) ?? '';
       if (type.endsWith('_call')) {
         const args = text(field(payload, 'arguments'));
-        return [{ at, kind: 'tool', name: text(field(payload, 'name')) ?? type, input: toolInput(args === undefined ? field(payload, 'input') ?? field(payload, 'action') : parseJson(args) ?? args) }];
+        const input = args === undefined ? field(payload, 'input') ?? field(payload, 'action') : parseJson(args) ?? args;
+        const name = text(field(payload, 'name')) ?? type;
+        return [{ at, kind: 'tool', name, input: toolInput(input), block: toolBlock(name, input, results.get(text(field(payload, 'call_id')) ?? '') ?? '') }];
       }
       const content = field(payload, 'content');
       if (type !== 'message' || field(payload, 'role') !== 'assistant' || !Array.isArray(content)) return [];
@@ -78,8 +125,10 @@ function transcriptEntries(path: string): Entry[] {
     return content.flatMap((block): Entry[] => {
       const type = field(block, 'type');
       if (type === 'text') return [{ at, kind: 'text', text: text(field(block, 'text')) ?? '' }];
-      if (type === 'tool_use') return [{ at, kind: 'tool', name: text(field(block, 'name')) ?? 'tool', input: toolInput(field(block, 'input')) }];
-      return [];
+      if (type !== 'tool_use') return [];
+      const name = text(field(block, 'name')) ?? 'tool';
+      const input = field(block, 'input');
+      return [{ at, kind: 'tool', name, input: toolInput(input), block: toolBlock(name, input, results.get(text(field(block, 'id')) ?? '') ?? '') }];
     });
   });
 }
@@ -123,11 +172,37 @@ const agentText = (raw: string) =>
 
 const row = (at: string, who: string, body: string, kind = '') => `<div class="row${kind}"><span class="at">${clean(at)}</span><span class="who">${who}</span>${body}</div>`;
 
-function renderLog(log: SessionLog, repo: string): string {
+// Highlights every tool block with Expressive Code and Shiki's Ayu Mirage. Imported here, not at the top: every Wizard
+// command loads this module, and only `wizard log` should pay for the highlighter. Everything comes from installed
+// packages; the page carries its HTML, CSS and copy-button script inline.
+async function highlight(blocks: readonly CodeBlock[]): Promise<{ html: string[]; styles: string; script: string }> {
+  const { ExpressiveCode, loadShikiTheme } = await import('expressive-code');
+  const { toHtml } = await import('expressive-code/hast');
+  const ec = new ExpressiveCode({
+    themes: [await loadShikiTheme('ayu-mirage')],
+    frames: { extractFileNameFromCode: false },
+    defaultProps: { wrap: true },
+    styleOverrides: { codeFontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', uiFontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', codeFontSize: '0.8rem', uiFontSize: '0.8rem' },
+  });
+  const done = await Promise.all(blocks.map((b) => ec.render(b)));
+  const styles = new Set([await ec.getBaseStyles(), await ec.getThemeStyles(), ...done.flatMap((d) => [...d.styles])]);
+  return { html: done.map((d) => toHtml(d.renderedGroupAst)), styles: [...styles].join(''), script: (await ec.getJsModules()).join('\n') };
+}
+
+async function renderLog(log: SessionLog, repo: string): Promise<string> {
+  const tools = log.steps.flatMap((s) => s.entries).flatMap((e) => (e.kind === 'tool' && e.block ? [{ e, block: e.block }] : []));
+  const code = await highlight(tools.map((t) => t.block));
+  const blockOf = new Map<Entry, string>(tools.map((t, i) => [t.e, code.html[i]!]));
   const missing = log.missingTranscripts.map((t) => `<p class="warn">The client transcript is missing (moved or deleted): ${clean(t)}. Showing the Wizard's events only.</p>`);
   const steps = log.steps.map((s) => {
     const rows = s.entries.map((e) => {
-      if (e.kind === 'tool') return row(e.at, clean(e.name), `<pre class="body">${clean(e.input)}</pre>`, ' tool');
+      // Like Northwind's rows, a call reads as one line (the command, the file, or the call's fields) and opens to its
+      // highlighted output. Frame `none` keeps the fields above, since the block holds only the result.
+      if (e.kind === 'tool') {
+        const summary = !e.block ? '' : e.block.props.frame === 'terminal' ? e.block.code.split('\n')[0]! : e.block.props.title || 'result';
+        const fields = e.block && e.block.props.frame !== 'none' ? '' : `<pre class="fields">${clean(e.input)}</pre>`;
+        return row(e.at, clean(e.name), `<div class="body">${fields}${e.block ? `<details><summary>${escape(summary)}</summary>${blockOf.get(e)}</details>` : ''}</div>`, ' tool');
+      }
       if (e.kind === 'text') return row(e.at, 'agent', `<pre class="body md">${agentText(e.text)}</pre>`);
       return row(e.at, 'wizard', `<div class="body">${clean(e.kind === 'event' ? e.text : e.title)}</div>`, ' wizard');
     });
@@ -148,12 +223,18 @@ p{max-width:75ch;margin:0 0 .75rem;overflow-wrap:anywhere}
 .tool .who{color:var(--accent)}
 .wizard .body{color:var(--muted)}
 .body{margin:0;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+.fields{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+.body .expressive-code{margin-top:.5rem;white-space:normal}
+summary{cursor:pointer;white-space:pre-wrap;overflow-wrap:anywhere}
+summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .md{white-space:pre;overflow-x:auto;overflow-wrap:normal;padding-bottom:.25rem}
 .t1{font-weight:bold}.t2{color:var(--muted)}.t36{color:var(--accent)}.t1-36{color:var(--heading);font-weight:bold}.t32{color:#bae67e}.t33{color:var(--heading)}.t31{color:#f28779}
 .warn{color:#f28779}
 @media (max-width:640px){body{padding:1rem}h1{font-size:1.2rem}.row{display:flex;flex-wrap:wrap;gap:0 1rem}.row .body{flex:0 0 100%;margin-top:.25rem}}
 .md{line-height:1.2}
 </style>
+<style>${code.styles}</style>
+<script type="module">${code.script}</script>
 <h1>Straddle Wizard session log</h1><p>${clean(repo)}. Built on this machine from ${WIZARD_DIR}/events.jsonl and your agent's transcript; nothing was uploaded.</p>
 ${missing.join('\n')}
 ${steps.join('\n')}
@@ -164,13 +245,14 @@ ${steps.join('\n')}
 // Writes the viewer next to the run record and returns its path, or null when no session was recorded. The page holds
 // the session's commands and replies, so it goes to a fresh owner-only file renamed into place: a symlink or a looser
 // file already at the path is replaced, never followed or reused.
-export function writeLog(repo: string): string | null {
+export async function writeLog(repo: string): Promise<string | null> {
   const log = sessionLog(repo);
   if (!log) return null;
+  const html = await renderLog(log, repo);
   const path = join(repo, WIZARD_DIR, 'session-log.html');
   const tmp = `${path}.${process.pid}.tmp`;
   rmSync(tmp, { force: true });
-  writeFileSync(tmp, renderLog(log, repo), { mode: 0o600, flag: 'wx' });
+  writeFileSync(tmp, html, { mode: 0o600, flag: 'wx' });
   renameSync(tmp, path);
   return path;
 }
@@ -185,7 +267,7 @@ export async function offerLog(io: Prompter, repo: string, open: (path: string) 
   if (!sessionLog(repo)) return;
   const answer = await io.ask('Open the session log? [Y/n] ');
   if (answer === null || !['', 'y', 'yes'].includes(answer.toLowerCase())) return;
-  const path = writeLog(repo)!;
+  const path = (await writeLog(repo))!;
   open(path);
   io.say(`Opened ${path}`);
 }
