@@ -54,7 +54,7 @@ test('normal session: each step in order, with its tool calls as rows under the 
   assert.deepEqual(sections, [
     ['Session start', ['wizard: Session started (abc12345-0000)', 'Read: <code>{&#34;file_path&#34;:&#34;/b/skills/straddle-setup/steps/01-begin.md&#34;}</code>']],
     ['straddle-setup · 01-begin', ['Write: <code>{&#34;file_path&#34;:&#34;straddle-setup.md&#34;}</code>', 'wizard: Edited straddle-setup.md']],
-    ['straddle-plan · 01-begin', ['agent: <pre>Plan drafted.</pre>']],
+    ['straddle-plan · 01-begin', ['agent: <div class="md">Plan drafted.</div>']],
   ]);
 });
 
@@ -67,7 +67,30 @@ test('secrets in the transcript (sk_ key, bearer token, paykey, account number) 
   const html = await page(repo);
   for (const secret of SECRETS) assert.ok(!html.includes(secret), `${secret} is on the page`);
   assert.ok(html.includes(String.raw`<code>{&#34;command&#34;:&#34;curl -H \&#34;Authorization: Bearer [redacted]\&#34; -d &#39;{\&#34;paykey\&#34;:\&#34;[redacted]\&#34;,\&#34;account_number\&#34;:\&#34;[redacted number]\&#34;}&#39;&#34;}</code>`), html);
-  assert.ok(html.includes('<pre>STRADDLE_API_KEY=[redacted]</pre>'), html);
+  assert.ok(html.includes('<div class="md">STRADDLE_API_KEY=[redacted]</div>'), html);
+});
+
+test('Codex session: the rollout found by session id gives tool calls, Markdown tables as tables and highlighted code', async () => {
+  const repo = realpathSync(tempDir('log-codex'));
+  const codexHome = tempDir('log-codex-home');
+  const id = '0199a0b1-c2d3-7e4f-8a9b-0c1d2e3f4a5b';
+  const events = [
+    { at: '2026-10-03T10:00:00.000Z', kind: 'session-start', session: id },
+    { at: '2026-10-03T10:00:02.000Z', kind: 'step-entered', skill: 'straddle-test', step: '01-begin' },
+  ];
+  const rollout = [
+    { timestamp: '2026-10-03T10:00:03.000Z', type: 'response_item', payload: { type: 'function_call', name: 'shell', arguments: '{"command":["npm","test"]}', call_id: 'c1' } },
+    { timestamp: '2026-10-03T10:00:04.000Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '| Scenario | Result |\n| --- | --- |\n| charge | passed |\n```ts\nconst ok = "yes"; // done\n```' }] } },
+  ];
+  writeFiles(repo, { '.straddle-wizard/events.jsonl': events.map((e) => JSON.stringify(e)).join('\n') + '\n' });
+  writeFiles(codexHome, { [`sessions/2026/10/03/rollout-2026-10-03T10-00-00-${id}.jsonl`]: rollout.map((e) => JSON.stringify(e)).join('\n') + '\n' });
+  const r = await runWizard(['log'], { cwd: repo, env: { CODEX_HOME: codexHome } });
+  assert.equal(r.code, 0, r.stderr);
+  const html = readFileSync(join(repo, '.straddle-wizard', 'session-log.html'), 'utf8');
+  assert.ok(html.includes('<h2>straddle-test · 01-begin</h2><table><tr><td class="at">2026-10-03T10:00:03.000Z</td><td class="tool">shell</td><td><code>{&#34;command&#34;:[&#34;npm&#34;,&#34;test&#34;]}</code></td></tr>'), html);
+  assert.ok(html.includes('<table class="md"><tr><th>Scenario</th><th>Result</th></tr><tr><td>charge</td><td>passed</td></tr></table>'), html);
+  assert.ok(html.includes('<pre class="code"><span class="k">const</span> ok = <span class="s">&#34;yes&#34;</span>; <span class="c">// done</span></pre>'), html);
+  assert.ok(!html.includes('transcript is missing'), html);
 });
 
 test('transcript moved: the page still shows the recorded steps and says the transcript is missing', async () => {
