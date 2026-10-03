@@ -44,8 +44,12 @@ interface SessionLog { steps: Step[]; unavailable: Unavailable[] }
 //   a dict) a run holding a quote, or one followed by `{` or `[`, ends it, so the next field or object stays, and an
 //   object or array value is skipped.
 // The value is replaced whole, except a single quoted string after a quoted label keeps its quotes. It stays when it
-// has fewer than 6 characters between its delimiters, as in Northwind, or is an earlier `[redacted]`. An account or
-// routing number is the 4 to 17 digits after its label.
+// has fewer than 6 characters between its delimiters, as in Northwind, or is an earlier `[redacted]`. A label holding a
+// secret keyword anywhere is a secret label, whatever comes first (`ACCOUNT_TOKEN`, `routing_signature`); only an
+// account or routing label without one takes just the 4 to 17 digits after it. A Markdown code fence (```` ``` ```` at
+// the start of a line) after a line break isn't a value: it is the reply's code, read as code, and only a value on the
+// label's own line or a quoted, emphasized or plain value on a later line is taken.
+const SECRET_KEYWORD = /api[_ -]?key|secret|token|password|paykey|signature|authorization/i;
 const LABEL = /(account|routing)(?: (?:number|num|no))?[\w-]*|(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)[\w-]*/gi;
 const STRAY = ',;}\\"\'`';
 const isWordChar = (c: string | undefined) => c !== undefined && !/\s/.test(c) && !STRAY.includes(c);
@@ -93,10 +97,12 @@ function redactNamed(text: string): string {
     i++;
     for (j = i; j < i + 3 && '*_`'.includes(text[j] ?? '\n'); j++);
     if (j > i && /\s/.test(text[j] ?? '')) i = j;
-    while (/\s/.test(text[i] ?? '')) i++;
+    let newLine = false;
+    for (; /\s/.test(text[i] ?? ''); i++) newLine ||= text[i] === '\n';
     const start = i;
+    if (newLine && text.startsWith('```', start)) continue;
 
-    if (m[1]) {
+    if (m[1] && !SECRET_KEYWORD.test(m[0])) {
       for (j = start; text[j] === '\\'; j++);
       if (text[j] === '"' || text[j] === "'") j++;
       else for (; text[j] === '`' && j < start + 2; j++);

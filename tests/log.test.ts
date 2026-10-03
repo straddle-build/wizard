@@ -148,13 +148,32 @@ const WORDS: [string, string][] = [
   ['echo \'"password": `abcdef ghTAILC` keepme22\'', 'Bash: $ echo &#39;&#34;password&#34;: [redacted] keepme22&#39;'],
   ['echo \'"secret": **abcdef ghTAILD** keepme23\'', 'Bash: $ echo &#39;&#34;secret&#34;: [redacted] keepme23&#39;'],
   ['echo \'{"paykey":"zqpk123456","paykey_details":{"id":"keepme24"}}\'', 'Bash: $ echo &#39;{&#34;paykey&#34;:&#34;[redacted]&#34;,&#34;paykey_details&#34;:{&#34;id&#34;:&#34;keepme24&#34;}}&#39;'],
+  // An account or routing label holding a secret keyword is a secret label; one without keeps the digits rule.
+  ['ACCOUNT_TOKEN=zqacct12345 npm run migrate', 'Bash: $ ACCOUNT_TOKEN=[redacted] npm run migrate'],
+  ['echo \'{"account_password":"zqacct67890","id":"keepme28"}\'', 'Bash: $ echo &#39;{&#34;account_password&#34;:&#34;[redacted]&#34;,&#34;id&#34;:&#34;keepme28&#34;}&#39;'],
+  ['SERVICE_ACCOUNT_TOKEN=zqsvc12345 npm run migrate', 'Bash: $ SERVICE_ACCOUNT_TOKEN=[redacted] npm run migrate'],
+  ['routing_signature=zqrout12345 npm run migrate', 'Bash: $ routing_signature=[redacted] npm run migrate'],
+  ['echo account_number=000123456789 account_name=keepme29', 'Bash: $ echo account_number=[redacted] account_name=keepme29'],
 ];
 
 // Every label style crossed with both separators and every value form: each line must lose its value and keep the
-// word after it. Values hold punctuation, spaces inside delimiters, escaped quotes and concatenated parts.
-const LABELS = ['password', '"password"', '`password`', '**password**', '__Secret__', '\\"token\\"'];
+// word after it. Values hold punctuation, spaces inside delimiters, escaped quotes and concatenated parts. The labels
+// include account and routing names that hold a secret keyword.
+const LABELS = ['password', '"password"', '`password`', '**password**', '__Secret__', '\\"token\\"', 'ACCOUNT_TOKEN', '"routing_signature"'];
 const VALUES = ['"zqA_b_c_d_"', '"zqB \\"esc\\" tail"', '`zqC ghTAIL`', '**zqD ghTAIL**', '_zqE ghTAIL_', '"zqF".zqG\'zqH zqI\'', 'zqJ*,;}\\zqK', "'zqL it\\'s'"];
 const CROSS = LABELS.flatMap((label) => [':', ' ='].flatMap((sep) => VALUES.map((value) => `${label}${sep} ${value}`)));
+
+// A Markdown fence after a secret label and a line break is the reply's code, not the label's value: it renders as
+// highlighted code with the table after it, a labelled secret inside it is still redacted, and plain code in it stays.
+// A fenced or delimited value on the label's own line, and a value on the next line that isn't a fence, are values.
+const FENCES = [
+  'Verify the webhook signature:\n\n```typescript\nconst signingSecret = "zqINFENCE1";\n```',
+  'Set your API key:\n\n```shell\nexport STRADDLE_API_KEY=zqINFENCE2\n```',
+  'Rotate the token:\n```\nkeepme32 stays in the fence as code\n```',
+  'api_key: ```zqINLINE4 two words``` keepme30',
+  'password:\n  "zqNEXT5 value" keepme31',
+  '\n| Check | Result |\n| --- | --- |\n| sig | ok |',
+].join('\n');
 
 // Delimited values below, at and above 512 characters (where the previous rule stopped reading) and past the
 // 2000-character clip, closed and unclosed. A closed value keeps the text after it; an unclosed one is redacted to
@@ -196,6 +215,8 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     assistant('2026-10-03T10:00:03.360Z', { type: 'tool_use', id: 't10', name: 'Grep', input: { pattern: 'credentials' } }),
     result('t10', '{\n  "password":\n    "zqMULTILINE1",\n  "id": "keepme25"\n}\napi_key:\n    zqNEXTLINE2 keepme26\n{\r\n  "token":\r\n    "zqCRLFVALUE3",\r\n  "id": "keepme27"\r\n}'),
     assistant('2026-10-03T10:00:04.500Z', { type: 'text', text: CROSS.map((line, i) => `X${i} ${line} keepX${i}`).join('\n') }),
+    assistant('2026-10-03T10:00:04.600Z', { type: 'text', text: FENCES }),
+    assistant('2026-10-03T10:00:04.700Z', { type: 'tool_use', name: 'Write', input: { file_path: 'docs/setup.md', content: FENCES } }),
     assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
     result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
     // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
@@ -237,7 +258,7 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     '*API key:* [redacted]',
   ]) assert.ok(text.includes(expected) || text.includes(expected.replaceAll('&quot;', '"')), `${expected} missing`);
   for (const [, expected] of [...DELIMITED, ...LONG]) assert.ok(text.includes(`${expected}\n`) || text.includes(`${expected}┌`), `${expected} missing`);
-  for (const kept of ['&quot;id&quot;:&quot;keepme01&quot;', '&quot;id&quot;:&quot;keepme02&quot;', '&quot;id&quot;: &quot;keepme25&quot;', 'keepme26', '&quot;id&quot;: &quot;keepme27&quot;']) assert.ok(text.includes(kept) || text.includes(kept.replaceAll('&quot;', '"')), `${kept} missing`);
+  for (const kept of ['&quot;id&quot;:&quot;keepme01&quot;', '&quot;id&quot;:&quot;keepme02&quot;', '&quot;id&quot;: &quot;keepme25&quot;', 'keepme26', '&quot;id&quot;: &quot;keepme27&quot;', 'keepme30', 'keepme31', 'keepme32 stays in the fence as code']) assert.ok(text.includes(kept) || text.includes(kept.replaceAll('&quot;', '"')), `${kept} missing`);
   assert.ok(rows.some((r) => r.startsWith('Bash: $ curl -d ') && r.includes('keepme03') && r.includes('[redacted]')), rows.join('\n---\n'));
   for (const [, expected] of WORDS) assert.ok(rows.includes(expected), `${expected} missing from\n${rows.join('\n---\n')}`);
   for (const i of CROSS.keys()) {
@@ -245,6 +266,12 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     assert.ok(line.endsWith(`keepX${i}`) && line.includes('[redacted]'), `${CROSS[i]} shows as ${JSON.stringify(line)}`);
   }
   assert.ok(text.includes('$ cat credspassword=[redacted] keep100'), 'the value after the backslashes is redacted and the next word kept');
+  // In the reply, each fence renders as code in its language and the table after them as a screen-reader table; the
+  // lines before the fences keep their wording. In the written file, the fences stay as written.
+  for (const language of ['typescript', 'shell']) assert.ok(html.includes(`<pre data-language="${language}"`), `${language} fence missing`);
+  assert.ok(html.includes('<th scope="col">Check</th><th scope="col">Result</th>'), 'the table after the fences is missing');
+  for (const prose of ['Verify the webhook signature:', 'Set your API key:', 'Rotate the token:']) assert.ok(new RegExp(`${prose.replace(/[?:]/g, '\\$&')}\\s*</`).test(html), `${prose} is followed by a redaction`);
+  for (const kept of ['```typescript', '```shell', 'export STRADDLE_API_KEY=[redacted]', 'api_key: [redacted] keepme30', 'password:  [redacted] keepme31']) assert.ok(text.includes(kept), `${kept} missing from the written file`);
   // A prose account number before a full stop, and a bare one in a table cell, go; the timestamp beside it stays.
   assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\. Use account \[redacted\]\./);
   assert.match(html, /│ \[redacted\] *│ 2026-10-03T10:00:05Z │/);
