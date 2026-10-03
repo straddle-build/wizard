@@ -85,6 +85,9 @@ function statusLine() {
   appendFileSync(join(stateDir, 'statusline.log'), r.stdout);
 }
 
+// Like Claude Code's transcript: every assistant entry is timestamped, and each tool call is a tool_use block.
+const assistant = (content) => appendFileSync(transcript, JSON.stringify({ type: 'assistant', uuid: randomUUID(), timestamp: new Date().toISOString(), message: { role: 'assistant', content } }) + '\n');
+const toolUse = (call) => assistant([{ type: 'tool_use', id: randomUUID(), name: call.tool_name, input: call.tool_input }]);
 hook('SessionStart', { source: args.includes('--resume') ? 'resume' : 'startup' });
 appendFileSync(transcript, JSON.stringify({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: prompt } }) + '\n');
 statusLine();
@@ -100,20 +103,23 @@ for (const skill of program.slice(program.indexOf(first))) {
   const stepFile = (step) => `${process.env.FAKE_PLUGIN_ROOT ?? '/plugin'}/skills/${skill}/steps/${step}.md`;
   for (const step of script.steps ?? []) {
     const call = { tool_name: 'Read', tool_input: { file_path: stepFile(step) } };
+    toolUse(call);
     if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
   }
   for (const step of script.shellSteps ?? []) {
     const call = { tool_name: 'Bash', tool_input: { command: `cat ${stepFile(step)}` } };
+    toolUse(call);
     if (hook('PreToolUse', call) === 'allow' && !deniedByDeveloper.has(step)) hook('PostToolUse', call);
   }
   for (const w of script.writes ?? []) {
     const call = { tool_name: 'Write', tool_input: { file_path: join(process.cwd(), w.path), content: w.content } };
+    toolUse(call);
     let decision = hook('PreToolUse', call);
     if (decision === 'allow' && deniedByDeveloper.has(w.path)) decision = 'denied by developer';
     if (decision === 'allow') { writeFileSync(join(process.cwd(), w.path), w.content); hook('PostToolUse', call); }
     log(`write ${w.path} ${decision}`);
   }
-  appendFileSync(transcript, JSON.stringify({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', content: [{ type: 'text', text: script.text ?? '' }] } }) + '\n');
+  assistant([{ type: 'text', text: script.text ?? '' }]);
   hook('Stop', {});
   statusLine();
   // `stop`: the developer exits after this step; `exit` or `signal`: the session ends abnormally here.

@@ -10,7 +10,8 @@ import {
 import { straddleConfiguration } from './configuration.ts';
 import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, savedHandoff, savedStatus, start, type JourneyOptions } from './journey.ts';
 import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
-import { loadReceipt, type Mode } from './receipt.ts';
+import { openFile, writeLog } from './log.ts';
+import { WIZARD_DIR, loadReceipt, type Mode } from './receipt.ts';
 import { Prompter } from './ui.ts';
 import { WIZARD_VERSION } from './version.ts';
 
@@ -26,6 +27,7 @@ Sets up Straddle in your repo with your own coding agent, in one guided session.
   wizard install | update | remove [--client claude|codex|cursor] [--yes]
   wizard mcp add | mcp remove [--client claude|codex|cursor] [--yes]
   wizard status [--json]
+  wizard log                   Open this repo's recorded sessions as a local page, grouped by step, secrets redacted
 
 Options
   --dir <path>        Repo to work in (default: current directory)
@@ -194,10 +196,20 @@ async function skillList(): Promise<number> {
 
 async function journey(run: (opts: JourneyOptions) => Promise<number>): Promise<number> {
   // Options first, so a bad --client or --mode fails before the splash.
-  const opts = { repo, env, io: io(), bundlePath, client: clientOption(), mode: modeOption(), exclude };
+  // The end-of-session log question needs someone at a terminal, and never interrupts --json.
+  const opts = { repo, env, io: io(), bundlePath, client: clientOption(), mode: modeOption(), exclude, offerLog: !values.json && Boolean(process.stdin.isTTY && process.stdout.isTTY) };
   process.on('SIGINT', () => handleInterrupt(io()));
   await io().splash();
   return run(opts);
+}
+
+// Built from the run record in this repo; a pipe gets the page's path instead of a browser.
+function log(): number {
+  const path = writeLog(repo);
+  if (!path) fail(`No Wizard session is recorded in ${repo}: ${WIZARD_DIR}/events.jsonl is missing or empty. Run \`wizard\` first.`, 1);
+  if (process.stdout.isTTY) openFile(path);
+  say(`Session log: ${path}`);
+  return 0;
 }
 
 async function main(): Promise<number> {
@@ -209,6 +221,7 @@ async function main(): Promise<number> {
   if (command === 'resume' && sub === undefined) return journey(resume);
   if ((command === 'install' || command === 'update' || command === 'remove') && sub === undefined) return configure(command);
   if (command === 'status' && sub === undefined) return status();
+  if (command === 'log' && sub === undefined) return log();
   if (command === 'mcp' && (sub === 'add' || sub === 'remove')) return configure(`mcp ${sub}`);
   if (command === 'skill' && sub === 'list') return skillList();
   if (command === 'skill' && sub === 'run') {
