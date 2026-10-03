@@ -1055,6 +1055,47 @@ test('Manual starts no agent process for any client: it prints the paste text, a
   }
 });
 
+// A pipe gets the end-of-session report it got before the Wizard drew terminal screens, line for line: plain rows, and
+// no report file (a terminal gets straddle-setup.md rendered after the evidence).
+test('a piped Setup run that finishes prints the plain end-of-session report, without the report file', async () => {
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-setup.md': SETUP_FILE });
+  const r = await runWizard(['setup', '--client', 'cursor', '--mode', 'manual'], { cwd: repo, env: { ...CONFIGURED, ...fake.env }, input: [...CHOICES, '1'] });
+  const report = r.stdout.slice(r.stdout.indexOf('Straddle Wizard report:')).replaceAll(realpathSync(repo), '<repo>')
+    .replace(/local bundle .*/, 'local bundle <skills>').replace(/(  - \[ \] .*\n)+/, "  <the skill's checklist>\n");
+  assert.equal(report, [
+    'Straddle Wizard report: setup program, completed',
+    '  Reason            every step is done and on file',
+    '  Repository        <repo>',
+    '  Agent             Cursor, plugin manual',
+    '  Skill bundle      local bundle <skills>',
+    '  Run record        .straddle-wizard/receipt.json and .straddle-wizard/events.jsonl',
+    '',
+    'Steps',
+    '  ✓ Setup  straddle-setup.md: Status: complete · no handoff reported · progress not observable',
+    "  ✓ means the file says the step is done. I read each file myself; I can't see your agent's handoffs here.",
+    '',
+    'Changed files (I compared them before and after each session)',
+    '  none',
+    '  Not a complete list: I compared no files for a Manual session',
+    '',
+    'Server-side resources',
+    "  I created or enabled none. What your agent reports creating is in its handoffs and evidence files; I didn't verify it.",
+    'Checks',
+    '  I sent no Straddle request and ran no test. The checks your agent reports running are its own.',
+    '',
+    "Verify before merging (from the straddle-setup 0.1.0 skill; I can't see what your agent printed)",
+    "  <the skill's checklist>",
+    '',
+    'Evidence',
+    '  straddle-setup.md',
+    '',
+    'Next: review the changed files and the checklist before you merge.',
+    '',
+  ].join('\n'));
+});
+
 test('with no checklist printed, the report shows the "Verify before merging" checklist of the last skill this run finished, or ran when it has no state file, and none before', async () => {
   const fake = fakeClients('✓ Logged in as dev@example.com');
   const env = { ...CONFIGURED, ...fake.env };

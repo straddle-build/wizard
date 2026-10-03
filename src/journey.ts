@@ -15,7 +15,7 @@ import { appendEvents, readObservedEvents, transcriptAssistantText, verifyCheckl
 import { CONTRACT_FILES, SKILLS, programFor, programSkills, stepTitles, type ProgramName, type SkillName } from './programs.ts';
 import { goLiveSkippable, header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
 import { SESSION_ID, WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Mode, type Receipt, type RunState, type SessionRun } from './receipt.ts';
-import { card, markdown, paint, table } from './tui.ts';
+import { card, markdown, paint, sanitize, table } from './tui.ts';
 import type { Prompter } from './ui.ts';
 import { WIZARD_VERSION } from './version.ts';
 
@@ -416,8 +416,11 @@ const MARK = { '✓': 'green', '▶': 'yellow', ' ': 'dim' } as const;
 
 function printSteps(io: Prompter, { items, skipped }: Progress, observed: boolean): void {
   const look = io.look;
-  if (look) io.say(table(look, ['', 'Step', 'File', 'Handoff', 'Progress'], stepCells(items, observed).map(([mark, ...rest]) => [paint(look, MARK[mark], mark === ' ' ? '○' : mark), ...rest])));
-  else for (const line of stepRows(items, observed)) io.say(`  ${line}`);
+  if (look) {
+    // The File column quotes the step file's header, so it's sanitized like a report.
+    const rows = stepCells(items, observed).map(([mark, ...rest]) => [paint(look, MARK[mark], mark === ' ' ? '○' : mark), ...rest.map(sanitize)]);
+    io.say(table({ ...look, width: look.width - 2 }, ['', 'Step', 'File', 'Handoff', 'Progress'], rows).replace(/^/gm, '  '));
+  } else for (const line of stepRows(items, observed)) io.say(`  ${line}`);
   if (skipped) io.say(`  ${skippedNote(skipped)}`);
 }
 
@@ -460,10 +463,12 @@ function showPlan(io: Prompter, receipt: Receipt, skill: SkillName): void {
   io.say();
 }
 
+// Auto's audit findings. In a terminal the report at the end of the session renders the whole file instead.
 function showAuditFindings(io: Prompter, receipt: Receipt): void {
   const report = readRepoFile(receipt.repo, 'straddle-audit-report.md', receipt.exclude);
   if (report.kind === 'absent') { io.say("  straddle-audit-report.md wasn't written."); return; }
   if (report.kind === 'skipped') { io.say(`  straddle-audit-report.md isn't shown: I don't open it because ${report.reason}.`); return; }
+  if (io.look) return;
   io.say(io.bold('Findings (straddle-audit-report.md)'));
   const table = section(report.text, 'Findings').filter((l) => l.trim().startsWith('|'));
   for (const line of table.length ? table : ['(no findings table in the report)']) io.say(`  ${line.trim()}`);
@@ -800,13 +805,13 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   const ran = now.items.findLast((p) => (p.finished || p.record === null) && !p.skipped && receipt.sessions.some((s) => s.skills.includes(p.skill)))?.skill;
   if (printed) {
     io.say(io.bold('Verify before merging (as your agent last printed it)'));
-    if (look) io.say(markdown(look, printed.checklist.join('\n')));
+    if (look) io.say(markdown({ ...look, width: look.width - 2 }, printed.checklist.join('\n')).replace(/^(?=.)/gm, '  '));
     else for (const item of printed.checklist) io.say(`  ${item}`);
     io.say();
   } else if (bundle && ran) {
     io.say(io.bold(`Verify before merging (from the ${ran} ${bundle.skills[ran]?.version ?? ''} skill; ${receipt.mode === 'manual' ? "I can't see what your agent printed" : "your agent didn't print it"})`));
     const items = checklistFromBundle(bundle, ran);
-    if (look && items.length) io.say(markdown(look, items.join('\n')));
+    if (look && items.length) io.say(markdown({ ...look, width: look.width - 2 }, items.join('\n')).replace(/^(?=.)/gm, '  '));
     else for (const item of items) io.say(`  ${item}`);
     io.say();
   }
@@ -817,19 +822,22 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
     for (const f of evidence) io.say(`  ${f}`);
     io.say();
   }
-  // Each report file the steps this run covered wrote (the plans have their own screen): boxed in a terminal, as
-  // written in a pipe.
-  for (const skill of new Set(receipt.sessions.flatMap((s) => s.skills))) {
-    const file = SKILLS[skill].record?.file;
-    if (!file || skill === 'straddle-plan') continue;
-    const report = readRepoFile(receipt.repo, file, receipt.exclude);
-    if (report.kind !== 'read') continue;
-    io.say(io.bold(`${SKILLS[skill].title} report (${file})`));
-    io.say(look ? markdown(look, report.text) : report.text.trimEnd().split('\n').map((l) => `  ${l}`.trimEnd()).join('\n'));
-    io.say();
+  // In a terminal, each report the steps this run covered wrote (a plan has its own screen), rendered from its Markdown.
+  // A pipe keeps the plain lines above.
+  const shown = new Set<string>();
+  if (look) {
+    for (const skill of new Set(receipt.sessions.flatMap((s) => s.skills))) {
+      const file = SKILLS[skill].report;
+      const report = file ? readRepoFile(receipt.repo, file, receipt.exclude) : null;
+      if (!file || report?.kind !== 'read') continue;
+      shown.add(file);
+      io.say(io.bold(`${SKILLS[skill].title} report (${file})`));
+      io.say(markdown({ ...look, width: look.width - 2 }, report.text).replace(/^(?=.)/gm, '  '));
+      io.say();
+    }
   }
   const next = nextStep(now.items);
-  const goLive = next === 'straddle-go-live' ? readRepoFile(receipt.repo, 'straddle-go-live-report.md', receipt.exclude) : null;
+  const goLive = next === 'straddle-go-live' && !shown.has('straddle-go-live-report.md') ? readRepoFile(receipt.repo, 'straddle-go-live-report.md', receipt.exclude) : null;
   if (goLive?.kind === 'read') {
     io.say(io.bold('Go Live gaps (straddle-go-live-report.md)'));
     const gaps = section(goLive.text, 'Blocking gaps').filter((l) => l.trim().startsWith('|'));

@@ -3,11 +3,12 @@
 // Integrate step 1, not a copy. A template or hash format the Wizard can't read fails here, before a real run loops.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { SkillName } from '../src/programs.ts';
 import { approvalHash, nextStep, progress, stepRecord } from '../src/progress.ts';
+import { cells, markdown } from '../src/tui.ts';
 import { SKILLS_SOURCE, nextRepo, tempDir } from './helpers.ts';
 
 const skillFile = (path: string) => readFileSync(join(SKILLS_SOURCE, 'skills', path), 'utf8');
@@ -100,5 +101,21 @@ test('the approval hash command in Integrate step 1 and the Wizard agree on plan
   for (const variant of [plan, plan.trimEnd(), plan.replaceAll('\n', '\r\n')]) {
     writeFileSync(join(repo, 'straddle-integration-plan.md'), variant);
     assert.equal(approvalHash(variant), skillsHash(repo, 'straddle-integration-plan.md'), JSON.stringify(variant.slice(-6)));
+  }
+});
+
+// Every report and plan template the skills give (each ```markdown block in a skill file) renders as a terminal
+// report at 60, 80 and 100 columns, in color and without, with no line wider than the terminal.
+test('every report and plan template in the skills renders within the terminal width', () => {
+  const skills = join(SKILLS_SOURCE, 'skills');
+  const templates = readdirSync(skills, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.md'))
+    .flatMap((f) => [...readFileSync(join(skills, f), 'utf8').matchAll(/^```markdown\n([\s\S]*?)^```/gm)].map((m) => ({ file: f, text: m[1]! })));
+  assert.ok(templates.some((t) => t.file.includes('straddle-integrate')), 'found the Integrate report template');
+  for (const { file, text } of templates) {
+    for (const width of [60, 80, 100]) {
+      for (const color of [false, true]) {
+        for (const line of markdown({ width, color }, text).split('\n')) assert.ok(cells(line) <= width, `${file} at ${width}: ${line}`);
+      }
+    }
   }
 });

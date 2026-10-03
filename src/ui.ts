@@ -18,7 +18,8 @@ export class Prompter {
   constructor(input: NodeJS.ReadableStream, output: NodeJS.WritableStream & { isTTY?: boolean; columns?: number }) {
     this.#input = input;
     this.#output = output;
-    this.#color = Boolean(output.isTTY) && !process.env.NO_COLOR;
+    // No color in a pipe, with NO_COLOR, on a dumb terminal (as the Straddle CLI), or in CI.
+    this.#color = Boolean(output.isTTY) && !process.env.NO_COLOR && process.env.TERM !== 'dumb' && !process.env.CI;
     input.setEncoding('utf8');
     input.on('data', (chunk: string) => {
       this.#buffer += chunk;
@@ -64,19 +65,20 @@ export class Prompter {
     return this.#color ? styleText('dim', value) : value;
   }
 
-  // The boxed screens, sized to the terminal (at most the CLI's 100 columns), or null for plain lines in a pipe.
+  // The boxed screens, sized to the terminal and capped at 100 columns (the CLI's default card width), or null for
+  // plain lines in a pipe. A terminal that reports no width (a pty without a window size says 0) gets 80.
   get look(): Look | null {
-    return this.#output.isTTY ? { width: Math.min(this.#output.columns ?? 80, 100), color: this.#color } : null;
+    const columns = this.#output.columns ?? 0;
+    return this.#output.isTTY ? { width: Math.min(columns > 0 ? columns : 80, 100), color: this.#color } : null;
   }
 
-  // The start splash, drawn a line at a time over ~300 ms in a color terminal outside CI. A pipe gets none.
+  // The start splash, drawn a line at a time over ~300 ms in a color terminal. A pipe, CI and a dumb terminal get none.
   async splash(): Promise<void> {
     const look = this.look;
-    if (!look) return;
-    const reveal = look.color && !process.env.CI;
+    if (!look || process.env.CI || process.env.TERM === 'dumb') return;
     for (const line of splash(look)) {
       this.say(line);
-      if (reveal) await sleep(25);
+      if (look.color) await sleep(25);
     }
     this.say();
   }
