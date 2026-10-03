@@ -77,9 +77,11 @@ test('planted secrets (keys, bearer, KEY=value, paykey, JWT, hex, signature, acc
   const repo = recorded([
     assistant('2026-10-03T10:00:03.000Z', { type: 'tool_use', name: 'Bash', input: { command: `STRADDLE_API_KEY=${s.envKey} curl -H "Authorization: Bearer ${s.bearer}" -d '{"paykey": "${s.paykey}", "token": "${s.jwt}", "account_number": "${s.account}"}'\nStraddle-Signature: ${s.signature}` } }),
     assistant('2026-10-03T10:00:04.000Z', { type: 'tool_use', name: 'Write', input: { file_path: `${s.home}/shop/.env.local`, content: `STRADDLE_WEBHOOK_SECRET=${s.webhook}\nHASH=${s.hex}` } }),
-    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021.` }),
+    assistant('2026-10-03T10:00:05.000Z', { type: 'text', text: `Use ${s.key} and ${s.publishable}; routing_number: 021000021.\n\n| Account | Opened |\n| --- | --- |\n| ${s.account} | 2026-10-03T10:00:05Z |` }),
   ].join('\n'));
   const html = await page(repo);
+  // A bare account number in a table cell goes; the timestamp beside it stays.
+  assert.match(html, /│ \[redacted\] *│ 2026-10-03T10:00:05Z │/);
   for (const [name, secret] of Object.entries(PLANTED)) assert.ok(!html.includes(secret), `planted ${name} is on the page`);
   assert.ok(!html.includes('021000021'), 'routing number is on the page');
   // The surrounding command stays readable; only the values go. `Authorization: Bearer` loses both words, as in Northwind.

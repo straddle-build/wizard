@@ -20,12 +20,14 @@ interface SessionLog { steps: Step[]; missingTranscripts: string[] }
 
 // Northwind's integration log rules (lib/recorded-session.ts): sk_/pk_/rk_/whsec_ keys, Bearer and Basic credentials,
 // `KEY=value` and `"secret": "value"` pairs, JWTs, long base64/hex runs, and home directories as `~`. Order matters:
-// Bearer before `Authorization:`. Added here: account and routing numbers.
+// Bearer before `Authorization:`. Added here: account and routing numbers, named or standing alone as 8 to 17 digits
+// (a table cell, a sentence); digits inside a timestamp, path, version or id stay.
 const SECRETS: [RegExp, string][] = [
   [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_-]{6,}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
   [/\b([\w-]*(?:api[_-]?key|secret|token|password|paykey|signature|authorization)[\w-]*)(\\*["']?\s*[:=]\s*\\*["']?)(?!\[redacted\])[^\s"'`,;\\}]{6,}/gi, '$1$2[redacted]'],
   [/\b([\w-]*(?:account|routing)[_ -]?(?:number|num|no)?[\w-]*)(\\*["']?\s*[:=]\s*\\*["']?)\d{4,17}\b/gi, '$1$2[redacted]'],
+  [/(?<![\w.:/-])\d{8,17}(?![\w.:/-])/g, '[redacted]'],
   [/\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g, '[redacted]'],
   [/(?<![\w+=])(?=[\w+=]*\d)(?=[\w+=]*[A-Za-z])[A-Za-z0-9+_=]{32,}/g, '[redacted]'],
   [/\/(?:Users|home)\/[\w.-]+(?=\/|\b)/g, '~'],
