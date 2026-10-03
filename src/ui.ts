@@ -1,4 +1,6 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import { styleText } from 'node:util';
+import { splash, type Look } from './tui.ts';
 
 export interface Option<T> { label: string; value: T; hint?: string }
 
@@ -6,14 +8,14 @@ export interface Option<T> { label: string; value: T; hint?: string }
 // the same code reads scripted answers from a pipe.
 export class Prompter {
   #input: NodeJS.ReadableStream;
-  #output: NodeJS.WritableStream;
+  #output: NodeJS.WritableStream & { isTTY?: boolean; columns?: number };
   #color: boolean;
   #lines: string[] = [];
   #waiting: ((line: string | null) => void) | null = null;
   #buffer = '';
   #ended = false;
 
-  constructor(input: NodeJS.ReadableStream, output: NodeJS.WritableStream & { isTTY?: boolean }) {
+  constructor(input: NodeJS.ReadableStream, output: NodeJS.WritableStream & { isTTY?: boolean; columns?: number }) {
     this.#input = input;
     this.#output = output;
     this.#color = Boolean(output.isTTY) && !process.env.NO_COLOR;
@@ -60,6 +62,23 @@ export class Prompter {
 
   dim(value: string): string {
     return this.#color ? styleText('dim', value) : value;
+  }
+
+  // The boxed screens, sized to the terminal (at most the CLI's 100 columns), or null for plain lines in a pipe.
+  get look(): Look | null {
+    return this.#output.isTTY ? { width: Math.min(this.#output.columns ?? 80, 100), color: this.#color } : null;
+  }
+
+  // The start splash, drawn a line at a time over ~300 ms in a color terminal outside CI. A pipe gets none.
+  async splash(): Promise<void> {
+    const look = this.look;
+    if (!look) return;
+    const reveal = look.color && !process.env.CI;
+    for (const line of splash(look)) {
+      this.say(line);
+      if (reveal) await sleep(25);
+    }
+    this.say();
   }
 
   say(line = ''): void {

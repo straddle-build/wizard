@@ -15,6 +15,7 @@ import { appendEvents, readObservedEvents, transcriptAssistantText, verifyCheckl
 import { CONTRACT_FILES, SKILLS, programFor, programSkills, stepTitles, type ProgramName, type SkillName } from './programs.ts';
 import { goLiveSkippable, header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
 import { SESSION_ID, WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Mode, type Receipt, type RunState, type SessionRun } from './receipt.ts';
+import { card, markdown, paint, table } from './tui.ts';
 import type { Prompter } from './ui.ts';
 import { WIZARD_VERSION } from './version.ts';
 
@@ -78,26 +79,41 @@ const SDK_FOR_LANGUAGE: Record<string, Choices['sdk']> = { TypeScript: 'TypeScri
 
 function printWelcome(io: Prompter, facts: RepoFacts, context: Receipt['context'], program: ProgramName): void {
   const skills = programSkills(program, facts.providers);
-  io.say(io.bold(`Straddle Wizard ${WIZARD_VERSION}`));
-  io.say("I'll set up Straddle in this repo with your coding agent. Here's what I found; correct anything that's off.");
-  io.say();
-  row(io, 'Directory', facts.root);
-  row(io, 'Language', answerText(context.language, facts.language.evidence));
-  row(io, 'Framework', answerText(context.framework, facts.framework.evidence));
-  row(io, 'Straddle SDK', facts.straddleSdk ? `${facts.straddleSdk.package} ${facts.straddleSdk.version} (declared in ${facts.straddleSdk.manifest})`.trim() : 'none declared');
-  row(io, 'Provider code', facts.providers.length ? facts.providers.join(', ') : 'none to migrate from');
-  if (facts.bankLink) row(io, 'Bank connection', 'Plaid Link found: Plan will ask whether to keep Plaid tokens or move to Straddle Bridge');
-  row(io, 'Program', stepTitles(skills) + (skills.includes('straddle-migrate') && program === 'integration' ? ` (Migrate, because you already use ${facts.providers.join(', ')})` : ''));
-  row(io, 'Purpose', programFor(program).purpose);
-  if (facts.errors.length) {
+  const rows: [string, string][] = [
+    ['Directory', facts.root],
+    ['Language', answerText(context.language, facts.language.evidence)],
+    ['Framework', answerText(context.framework, facts.framework.evidence)],
+    ['Straddle SDK', facts.straddleSdk ? `${facts.straddleSdk.package} ${facts.straddleSdk.version} (declared in ${facts.straddleSdk.manifest})`.trim() : 'none declared'],
+    ['Provider code', facts.providers.length ? facts.providers.join(', ') : 'none to migrate from'],
+    ...facts.bankLink ? [['Bank connection', 'Plaid Link found: Plan will ask whether to keep Plaid tokens or move to Straddle Bridge'] as [string, string]] : [],
+    ['Program', stepTitles(skills) + (skills.includes('straddle-migrate') && program === 'integration' ? ` (Migrate, because you already use ${facts.providers.join(', ')})` : '')],
+    ['Purpose', programFor(program).purpose],
+  ];
+  const errors = facts.errors.map((err) => `Detection error: ${err}`);
+  const privacy = [
+    'Your coding agent reads and edits this repo on your machine. I read dependency manifests and file names, and hash',
+    `other files locally so I can tell you what changed. I never open .env files, keys or credential files (${facts.excluded.length} skipped),`,
+    'and I send nothing to Straddle.',
+    ...facts.bankLink || facts.providers.includes('plaid') ? ['Plaid is declared, so I also searched your source files for its Transfer, Identity Verification and Link calls.'] : [],
+  ];
+  const intro = "I'll set up Straddle in this repo with your coding agent. Here's what I found; correct anything that's off.";
+  const look = io.look;
+  if (look) {
+    io.say(intro);
+    io.say(card(look, `Straddle Wizard ${WIZARD_VERSION}`, [...rows, ...errors.length ? ['', ...errors] : [], '', privacy.join(' ')]));
     io.say();
-    for (const err of facts.errors) io.say(`  Detection error: ${err}`);
+    return;
+  }
+  io.say(io.bold(`Straddle Wizard ${WIZARD_VERSION}`));
+  io.say(intro);
+  io.say();
+  for (const [label, value] of rows) row(io, label, value);
+  if (errors.length) {
+    io.say();
+    for (const err of errors) io.say(`  ${err}`);
   }
   io.say();
-  io.say('  Your coding agent reads and edits this repo on your machine. I read dependency manifests and file names, and hash');
-  io.say(`  other files locally so I can tell you what changed. I never open .env files, keys or credential files (${facts.excluded.length} skipped),`);
-  io.say('  and I send nothing to Straddle.');
-  if (facts.bankLink || facts.providers.includes('plaid')) io.say('  Plaid is declared, so I also searched your source files for its Transfer, Identity Verification and Link calls.');
+  for (const line of privacy) io.say(`  ${line}`);
   io.say();
 }
 
@@ -378,8 +394,7 @@ const skippedNote = (skipped: number) =>
 
 // One row per step: the tick, what its file says (read by the Wizard), what the agent reported, and what the client
 // showed of the step files the agent opened.
-function stepRows(items: readonly StepProgress[], observed: boolean): string[] {
-  const width = Math.max(...items.map((p) => SKILLS[p.skill].title.length)) + 2;
+function stepCells(items: readonly StepProgress[], observed: boolean): ['✓' | '▶' | ' ', string, string, string, string][] {
   return items.map((p) => {
     const route = SKILLS[p.skill];
     const file = p.skipped ? 'skipped: you finished after Test' : p.record && route.record ? `${route.record.file}: ${p.record.detail}` : 'writes no status file';
@@ -387,12 +402,22 @@ function stepRows(items: readonly StepProgress[], observed: boolean): string[] {
       : p.reported.kind === 'abort' ? `reported STRADDLE_ABORT${p.reported.reason ? ` (${p.reported.reason})` : ''}`
         : `reported ${p.reported.status ?? 'a handoff with no status'}`;
     const seen = observed ? `${p.total ? `${p.entered} of ${p.total}` : p.entered} step file${(p.total || p.entered) === 1 ? '' : 's'} opened` : 'progress not observable';
-    return `${p.done ? '✓' : p.entered ? '▶' : ' '} ${route.title.padEnd(width)}${[file, said, seen].join(' · ')}`;
+    return [p.done ? '✓' : p.entered ? '▶' : ' ', route.title, file, said, seen];
   });
 }
 
+function stepRows(items: readonly StepProgress[], observed: boolean): string[] {
+  const width = Math.max(...items.map((p) => SKILLS[p.skill].title.length)) + 2;
+  return stepCells(items, observed).map(([mark, title, ...rest]) => `${mark} ${title.padEnd(width)}${rest.join(' · ')}`);
+}
+
+// In a terminal the checklist is a table, its tick a status mark: green done, yellow under way, a dim dot not started.
+const MARK = { '✓': 'green', '▶': 'yellow', ' ': 'dim' } as const;
+
 function printSteps(io: Prompter, { items, skipped }: Progress, observed: boolean): void {
-  for (const line of stepRows(items, observed)) io.say(`  ${line}`);
+  const look = io.look;
+  if (look) io.say(table(look, ['', 'Step', 'File', 'Handoff', 'Progress'], stepCells(items, observed).map(([mark, ...rest]) => [paint(look, MARK[mark], mark === ' ' ? '○' : mark), ...rest])));
+  else for (const line of stepRows(items, observed)) io.say(`  ${line}`);
   if (skipped) io.say(`  ${skippedNote(skipped)}`);
 }
 
@@ -739,12 +764,20 @@ function finishWithoutGoLive(io: Prompter, receipt: Receipt, planHash: string): 
 const FINISH_HERE = 'Finish here (skip Go Live)';
 
 async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bundle | null): Promise<number> {
-  io.say(io.bold(`Straddle Wizard report: ${receipt.program} program, ${receipt.state}`));
-  row(io, 'Reason', receipt.stateReason);
-  row(io, 'Repository', receipt.repo);
-  if (receipt.client) row(io, 'Agent', `${CLIENT_LABEL[receipt.client]}, plugin ${receipt.pluginLoad === 'session' ? 'loaded into the session with --plugin-dir (not installed)' : receipt.pluginLoad ?? 'not ready'}`);
-  if (bundle) row(io, 'Skill bundle', bundleLabel(bundle));
-  row(io, 'Run record', `${WIZARD_DIR}/receipt.json and ${WIZARD_DIR}/events.jsonl`);
+  const title = `Straddle Wizard report: ${receipt.program} program, ${receipt.state}`;
+  const rows: [string, string][] = [
+    ['Reason', receipt.stateReason],
+    ['Repository', receipt.repo],
+    ...receipt.client ? [['Agent', `${CLIENT_LABEL[receipt.client]}, plugin ${receipt.pluginLoad === 'session' ? 'loaded into the session with --plugin-dir (not installed)' : receipt.pluginLoad ?? 'not ready'}`] as [string, string]] : [],
+    ...bundle ? [['Skill bundle', bundleLabel(bundle)] as [string, string]] : [],
+    ['Run record', `${WIZARD_DIR}/receipt.json and ${WIZARD_DIR}/events.jsonl`],
+  ];
+  const look = io.look;
+  if (look) io.say(card(look, title, rows));
+  else {
+    io.say(io.bold(title));
+    for (const [label, value] of rows) row(io, label, value);
+  }
   io.say();
   io.say(io.bold('Steps'));
   const observed = observedRun(receipt);
@@ -767,11 +800,14 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   const ran = now.items.findLast((p) => (p.finished || p.record === null) && !p.skipped && receipt.sessions.some((s) => s.skills.includes(p.skill)))?.skill;
   if (printed) {
     io.say(io.bold('Verify before merging (as your agent last printed it)'));
-    for (const item of printed.checklist) io.say(`  ${item}`);
+    if (look) io.say(markdown(look, printed.checklist.join('\n')));
+    else for (const item of printed.checklist) io.say(`  ${item}`);
     io.say();
   } else if (bundle && ran) {
     io.say(io.bold(`Verify before merging (from the ${ran} ${bundle.skills[ran]?.version ?? ''} skill; ${receipt.mode === 'manual' ? "I can't see what your agent printed" : "your agent didn't print it"})`));
-    for (const item of checklistFromBundle(bundle, ran)) io.say(`  ${item}`);
+    const items = checklistFromBundle(bundle, ran);
+    if (look && items.length) io.say(markdown(look, items.join('\n')));
+    else for (const item of items) io.say(`  ${item}`);
     io.say();
   }
   printInStraddle(io, receipt);
@@ -779,6 +815,17 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   if (evidence.length) {
     io.say(io.bold('Evidence'));
     for (const f of evidence) io.say(`  ${f}`);
+    io.say();
+  }
+  // Each report file the steps this run covered wrote (the plans have their own screen): boxed in a terminal, as
+  // written in a pipe.
+  for (const skill of new Set(receipt.sessions.flatMap((s) => s.skills))) {
+    const file = SKILLS[skill].record?.file;
+    if (!file || skill === 'straddle-plan') continue;
+    const report = readRepoFile(receipt.repo, file, receipt.exclude);
+    if (report.kind !== 'read') continue;
+    io.say(io.bold(`${SKILLS[skill].title} report (${file})`));
+    io.say(look ? markdown(look, report.text) : report.text.trimEnd().split('\n').map((l) => `  ${l}`.trimEnd()).join('\n'));
     io.say();
   }
   const next = nextStep(now.items);

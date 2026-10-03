@@ -194,6 +194,7 @@ async function skillList(): Promise<number> {
 
 async function journey(run: (opts: JourneyOptions) => Promise<number>): Promise<number> {
   process.on('SIGINT', () => handleInterrupt(io()));
+  await io().splash();
   return run({ repo, env, io: io(), bundlePath, client: clientOption(), mode: modeOption(), exclude });
 }
 
