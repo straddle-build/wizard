@@ -48,7 +48,7 @@ function words(text: string, look: Look): Word[] {
   return out;
 }
 
-// Word-wraps to lines no wider than w cells, hard-breaking (and unstyling) a word longer than w. Always one line.
+// Word-wraps to lines no wider than w cells, hard-breaking (and unstyling) a word longer than w. Always at least one line.
 export function wrap(text: string, w: number, look: Look): string[] {
   w = Math.max(1, w);
   const lines: string[] = [];
@@ -183,7 +183,7 @@ const GLYPHS: Record<string, readonly [string, string, string]> = {
 };
 const wordmark = (look: Look, word: string) => [0, 1, 2].map((row) => paint(look, 'heading', [...word].map((ch) => GLYPHS[ch]![row]).join('  ')));
 
-// The splash: a wizard beside "STRADDLE WIZARD" in block letters, 12 lines, 66 cells. Under 80 columns it's one line.
+// The splash: a wizard beside "STRADDLE WIZARD" in block letters, 12 lines, 68 cells. Under 80 columns it's one line.
 export function splash(look: Look): string[] {
   if (look.width < 80) return [`${paint(look, 'yellow', '✦')} ${paint(look, 'heading', 'Straddle Wizard')}`];
   const right = ['', '', ...wordmark(look, 'STRADDLE'), '', ...wordmark(look, 'WIZARD'), '', paint(look, 'dim', 'Straddle, set up by your coding agent')];
