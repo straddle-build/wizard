@@ -30,41 +30,113 @@ interface SessionLog { steps: Step[]; unavailable: Unavailable[] }
 // (a table cell, a sentence), where digits inside a timestamp, path, version or id stay; and the Markdown and quoting
 // agents put around a named value.
 //
-// A secret-named value is read in one of two contexts, decided by its label:
-// - A quoted label (`"password":`, `'secret':`, `\"token\":` in JSON inside a string) is JSON or a dict: the value is
-//   its quoted string, read to its unescaped closing quote (`\"` and `\\` are escapes; inside `\"…\"`, `\\\"`), or to
-//   the end of the line when unclosed, or an unquoted scalar to `,` `}` `]` or whitespace. The quotes stay, so the
-//   next field (`,"id":…`) is untouched.
-// - Any other label (`KEY=`, `key: `, `**Token:**`, `__API key__:`) takes the whole shell word: parts written
-//   together without whitespace are one value (`"a".b'c d'`, `_x_.y`), so it runs to unquoted whitespace and is
-//   replaced, delimiters and all. A quote, backtick or emphasis that opens the value is read to its closer or, unclosed,
-//   to the end of the line; one inside the word opens a part only when its closer is on the line (so `it's` stays one
-//   word) and it isn't followed by a space or `,;}` (so the closing quote of an enclosing string ends the word);
-//   `,` `;` `}` `\` join the word only when more of it follows.
-// Values with fewer than 6 characters besides whitespace, quotes and emphasis marks stay, as in Northwind, and so does a
-// value that is only an earlier `[redacted]`.
-//
-// A named rule matches at the separator and finds the name by looking behind it, so the name is never consumed and
-// each separator looks back over one run of name characters: matching from the start of the name retried a `[\w-]*`
-// at every word boundary and made long hyphenated text quadratic. No two parts of a rule take the same character, and
-// every part stops at its own terminator, so the work is linear.
-const named = (name: string, value: string) =>
-  new RegExp(String.raw`(?=[*\\"'\x60\s:=])(?<=${name}[\w-]*)([*\\]*["'\x60]?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*(?:\\*["']|\x60{1,2})?)${value}`, 'gi');
-const SECRET_NAME = '(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)';
-const QUOTED_LABEL = new RegExp(String.raw`(?=\\?["'])(?<=${SECRET_NAME}[\w-]*)(\\?["']\s*:\s*(?:\\?["'])?)(?:(?<=\\")(?:[^"\\\n]|\\\\(?:\\["\\]|[^"\\\n])|\\(?!")[^\n]?)*|(?<=[^\\]")(?:[^"\\\n]|\\[^\n]?)*|(?<=')(?:[^'\\\n]|\\[^\n]?)*|(?<![\\"'])[^\s,}\]"'\\]*)`, 'gi');
-const WORD_PART = String.raw`"(?=[^\s"'\x60\\,;}])(?:[^"\\\n]|\\[^\n]?)*"|'(?=[^\s"'\x60\\,;}])(?:[^'\\\n]|\\[^\n]?)*'|\x60(?=[^\s"'\x60\\,;}])[^\x60\n]*\x60|[^\s"'\x60\\,;}]|[\\,;}"'\x60]+(?=[^\s"'\x60\\,;}])`;
-const WORD_OPENER = String.raw`"(?:[^"\\\n]|\\[^\n]?)*(?:"|(?=\n|$))|'(?:[^'\\\n]|\\[^\n]?)*(?:'|(?=\n|$))|\x60\x60(?:[^\x60\n]|\x60(?!\x60))*(?:\x60\x60|(?=\n|$))|\x60[^\x60\n]*(?:\x60|(?=\n|$))|([*_]{1,2})[^\n]+?(?:\2(?=[\s.,;:!?)\]]|$)|(?=\n|$))`;
-const WORD_LABEL = new RegExp(String.raw`(?=[*_\x60\s:=])(?<=${SECRET_NAME}[\w-]*)((?:\*{1,2}|\x60)?\s*[:=](?:[*_\x60]{1,3}(?=\s))?\s*)(?:${WORD_OPENER}|${WORD_PART})(?:${WORD_PART})*`, 'gi');
-const redactValue = (match: string, separator: string) => {
-  const value = match.slice(separator.length);
-  return value.replace(/[\s"'`*_]/g, '').length < 6 || /^["'`*_]*\[redacted\]["'`*_]*$/.test(value) ? match : `${separator}[redacted]`;
-};
-const SECRETS: [RegExp, string | typeof redactValue][] = [
+// Named values are found by one forward scan (redactNamed), not by regexes that look behind: a label is a keyword
+// (`password`, `api key`, `account number`, …) plus the name characters after it, found left to right, so each
+// character is read a bounded number of times. After the label come its closer (`"`, `\"`, a backtick, `*`, `**`,
+// `_`, `__`), spaces, `:` or `=`, and a closer of the label's emphasis written after the colon (`**API key:** `).
+// The value then starts:
+// - A quote, `\"` or deeper-escaped quote reads to the same quote at the same escape level (`\"` inside `"…"`, `\\\"`
+//   inside `\"…\"`); backticks to the same number of backticks; `*`, `**`, `_`, `__` to the same mark before a space or
+//   punctuation. Unclosed, the value runs to the end of its line.
+// - Then the word goes on until whitespace: more delimited parts (a quote or backtick followed by a word character
+//   and closed on the line), plain characters, and runs of `,` `;` `}` `\` and stray quotes when a word character
+//   follows them. So `DB_PASSWORD="a".b'c d'` and `PASSWORD=it's-a-secret` are one value. After a quoted label (JSON,
+//   a dict) a run holding a quote, or one followed by `{` or `[`, ends it, so the next field or object stays, and an
+//   object or array value is skipped.
+// The value is replaced whole, except a single quoted string after a quoted label keeps its quotes. It stays when it
+// has fewer than 6 characters between its delimiters, as in Northwind, or is an earlier `[redacted]`. An account or
+// routing number is the 4 to 17 digits after its label.
+const LABEL = /(account|routing)(?: (?:number|num|no))?[\w-]*|(?:api[_ -]?key|secret|token|password|paykey|signature|authorization)[\w-]*/gi;
+const STRAY = ',;}\\"\'`';
+const isWordChar = (c: string | undefined) => c !== undefined && !/\s/.test(c) && !STRAY.includes(c);
+
+// The delimited part opening at p: where it ends, and its opener's and closer's lengths (closer 0: unclosed, so it runs
+// to the end of the line). Null when nothing opens at p.
+function delimited(text: string, p: number, emphasis: boolean): { end: number; open: number; close: number } | null {
+  let k = 0;
+  while (text[p + k] === '\\') k++;
+  const q = text[p + k];
+  const n = text[p + k + 1] === q ? 2 : 1;
+  const kind = q === '"' || q === "'" ? 'quote' : k === 0 && q === '`' ? 'tick' : k === 0 && emphasis && (q === '*' || q === '_') ? 'mark' : null;
+  if (!kind || q === undefined) return null;
+  const open = kind === 'quote' ? k + 1 : n;
+  let run = 0;
+  for (let i = p + open; i < text.length && text[i] !== '\n'; i++) {
+    const c = text[i];
+    if (kind === 'quote') {
+      if (c === q && run % (2 * k + 2) === k) return { end: i + 1, open, close: k + 1 };
+      run = c === '\\' ? run + 1 : 0;
+    } else if (c === q && text.startsWith(q.repeat(n), i) && text[i + n] !== q && (kind === 'tick' || (i > p + open && /^[\s.,;:!?)\]]?$/.test(text[i + n] ?? '')))) {
+      return { end: i + n, open, close: n };
+    }
+  }
+  const eol = text.indexOf('\n', p);
+  return { end: eol < 0 ? text.length : eol, open, close: 0 };
+}
+
+function redactNamed(text: string): string {
+  let out = '';
+  let copied = 0;
+  LABEL.lastIndex = 0;
+  for (let m; (m = LABEL.exec(text)); ) {
+    let i = m.index + m[0].length;
+    let quotedLabel = false;
+    let j = i;
+    while (text[j] === '\\') j++;
+    if (text[j] === '"' || text[j] === "'") { quotedLabel = true; i = j + 1; }
+    else if (text[i] === '`') i++;
+    else if (text[i] === '*' || text[i] === '_') i += text[i + 1] === text[i] ? 2 : 1;
+    while (text[i] === ' ' || text[i] === '\t') i++;
+    if (text[i] !== ':' && text[i] !== '=') continue;
+    i++;
+    for (j = i; j < i + 3 && '*_`'.includes(text[j] ?? '\n'); j++);
+    if (j > i && (text[j] === ' ' || text[j] === '\t')) i = j;
+    while (text[i] === ' ' || text[i] === '\t') i++;
+    const start = i;
+
+    if (m[1]) {
+      for (j = start; text[j] === '\\'; j++);
+      if (text[j] === '"' || text[j] === "'") j++;
+      else for (; text[j] === '`' && j < start + 2; j++);
+      let d = j;
+      while (d < text.length && d - j <= 17 && /\d/.test(text[d]!)) d++;
+      if (d - j >= 4 && d - j <= 17 && !/\w/.test(text[d] ?? '')) { out += text.slice(copied, j) + '[redacted]'; copied = d; LABEL.lastIndex = d; }
+      continue;
+    }
+
+    // After a quoted label an object or array is structure, not a secret: its own fields are labelled if they are.
+    if (quotedLabel && (text[start] === '{' || text[start] === '[')) continue;
+    const first = delimited(text, start, true);
+    i = first ? first.end : start;
+    if (!first || first.close) {
+      while (i < text.length && !/\s/.test(text[i]!)) {
+        const c = text[i]!;
+        if (!STRAY.includes(c)) { i++; continue; }
+        const part = c !== '\\' && isWordChar(text[i + 1]) ? delimited(text, i, false) : null;
+        if (part?.close) { i = part.end; continue; }
+        for (j = i; j < text.length && STRAY.includes(text[j]!); j++);
+        if (!isWordChar(text[j]) || (quotedLabel && (/["'`]/.test(text.slice(i, j)) || text[j] === '{' || text[j] === '['))) break;
+        i = j;
+      }
+    }
+    const end = i;
+    const open = first?.open ?? 0;
+    const close = first && first.end === end ? first.close : 0;
+    const content = text.slice(start + open, end - close);
+    if (end - start - open - (first?.close ?? 0) < 6 || content === '[redacted]') continue;
+    const keepQuotes = quotedLabel && close > 0 && /["']$/.test(text.slice(start, start + open));
+    out += text.slice(copied, start) + (keepQuotes ? `${text.slice(start, start + open)}[redacted]${text.slice(end - close, end)}` : '[redacted]');
+    copied = end;
+    LABEL.lastIndex = end;
+  }
+  return out + text.slice(copied);
+}
+
+const SECRETS: [RegExp, string][] = [
   [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_-]{6,}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+(?!\[redacted\])[^\s"'`\\]+/gi, '$1 [redacted]'],
-  [QUOTED_LABEL, redactValue],
-  [WORD_LABEL, redactValue],
-  [named('(?:account|routing)[_ -]?(?:number|num|no)?', String.raw`\d{4,17}\b`), '$1[redacted]'],
+];
+const AFTER_NAMED: [RegExp, string][] = [
   [/(?<![\w.:/-])\d{8,17}(?![\w:/-]|[.,]\d)/g, '[redacted]'],
   [/\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g, '[redacted]'],
   [/(?<![\w+=])(?=[\w+=]*\d)(?=[\w+=]*[A-Za-z])[A-Za-z0-9+_=]{32,}/g, '[redacted]'],
@@ -72,7 +144,8 @@ const SECRETS: [RegExp, string | typeof redactValue][] = [
 ];
 
 function redact(raw: string): string {
-  return SECRETS.reduce((s, [pattern, replacement]) => (typeof replacement === 'string' ? s.replace(pattern, replacement) : s.replace(pattern, replacement)), raw);
+  const apply = (s: string, rules: [RegExp, string][]) => rules.reduce((t, [pattern, to]) => t.replace(pattern, to), s);
+  return apply(redactNamed(apply(raw, SECRETS)), AFTER_NAMED);
 }
 
 // Long outputs and inputs stop at 2000 characters, always after redaction, so a clip never splits a secret past its rule.

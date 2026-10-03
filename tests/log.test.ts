@@ -142,7 +142,19 @@ const WORDS: [string, string][] = [
   ['curl -H "X-Api-Key: zqhdr12345" -H "X-Other: keepme09"', 'Bash: $ curl -H &#34;X-Api-Key: [redacted]&#34; -H &#34;X-Other: keepme09&#34;'],
   ['curl -d \'{"password":"zqesc\\"zqx","id":"keepme06"}\'', 'Bash: $ curl -d &#39;{&#34;password&#34;:&#34;[redacted]&#34;,&#34;id&#34;:&#34;keepme06&#34;}&#39;'],
   ["grep -n \"paykey: '[redacted]'\" src/redact.ts", 'Bash: $ grep -n &#34;paykey: &#39;[redacted]&#39;&#34; src/redact.ts'],
+  // A quoted label doesn't mean JSON: `=`, backticks and emphasis after it, and underscores counted inside the value.
+  ['echo \'{"password":"a_b_c_d_e_","id":"keepme20"}\'', 'Bash: $ echo &#39;{&#34;password&#34;:&#34;[redacted]&#34;,&#34;id&#34;:&#34;keepme20&#34;}&#39;'],
+  ['echo \'"password" = "hunter2TAILA" keepme21\'', 'Bash: $ echo &#39;&#34;password&#34; = &#34;[redacted]&#34; keepme21&#39;'],
+  ['echo \'"password": `abcdef ghTAILC` keepme22\'', 'Bash: $ echo &#39;&#34;password&#34;: [redacted] keepme22&#39;'],
+  ['echo \'"secret": **abcdef ghTAILD** keepme23\'', 'Bash: $ echo &#39;&#34;secret&#34;: [redacted] keepme23&#39;'],
+  ['echo \'{"paykey":"zqpk123456","paykey_details":{"id":"keepme24"}}\'', 'Bash: $ echo &#39;{&#34;paykey&#34;:&#34;[redacted]&#34;,&#34;paykey_details&#34;:{&#34;id&#34;:&#34;keepme24&#34;}}&#39;'],
 ];
+
+// Every label style crossed with both separators and every value form: each line must lose its value and keep the
+// word after it. Values hold punctuation, spaces inside delimiters, escaped quotes and concatenated parts.
+const LABELS = ['password', '"password"', '`password`', '**password**', '__Secret__', '\\"token\\"'];
+const VALUES = ['"zqA_b_c_d_"', '"zqB \\"esc\\" tail"', '`zqC ghTAIL`', '**zqD ghTAIL**', '_zqE ghTAIL_', '"zqF".zqG\'zqH zqI\'', 'zqJ*,;}\\zqK', "'zqL it\\'s'"];
+const CROSS = LABELS.flatMap((label) => [':', ' ='].flatMap((sep) => VALUES.map((value) => `${label}${sep} ${value}`)));
 
 // Delimited values below, at and above 512 characters (where the previous rule stopped reading) and past the
 // 2000-character clip, closed and unclosed. A closed value keeps the text after it; an unclosed one is redacted to
@@ -177,6 +189,10 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     // each is read once, not once per backslash, which took seconds at this length.
     assistant('2026-10-03T10:00:03.340Z', { type: 'tool_use', id: 't8', name: 'Bash', input: { command: 'cat creds' } }),
     result('t8', `password=${'\\'.repeat(100_000)}zqEND keep100\npassword=${'\\'.repeat(100_000)} keep101`),
+    // A long run of name characters with no label, which a lookbehind rescanned at every underscore.
+    assistant('2026-10-03T10:00:03.350Z', { type: 'tool_use', id: 't9', name: 'Grep', input: { pattern: 'benign' } }),
+    result('t9', 'benign_'.repeat(40_000)),
+    assistant('2026-10-03T10:00:04.500Z', { type: 'text', text: CROSS.map((line, i) => `X${i} ${line} keepX${i}`).join('\n') }),
     assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
     result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
     // The value straddles the 2000-character clip: clipping first would leave five characters too few to redact.
@@ -221,6 +237,10 @@ test('planted secrets never reach the page, in commands, results, diffs, written
   for (const kept of ['&quot;id&quot;:&quot;keepme01&quot;', '&quot;id&quot;:&quot;keepme02&quot;']) assert.ok(text.includes(kept) || text.includes(kept.replaceAll('&quot;', '"')), `${kept} missing`);
   assert.ok(rows.some((r) => r.startsWith('Bash: $ curl -d ') && r.includes('keepme03') && r.includes('[redacted]')), rows.join('\n---\n'));
   for (const [, expected] of WORDS) assert.ok(rows.includes(expected), `${expected} missing from\n${rows.join('\n---\n')}`);
+  for (const i of CROSS.keys()) {
+    const line = text.slice(text.indexOf(`X${i} `), text.indexOf(`keepX${i}`) + `keepX${i}`.length);
+    assert.ok(line.endsWith(`keepX${i}`) && line.includes('[redacted]'), `${CROSS[i]} shows as ${JSON.stringify(line)}`);
+  }
   assert.ok(text.includes('$ cat credspassword=[redacted] keep100'), 'the value after the backslashes is redacted and the next word kept');
   // A prose account number before a full stop, and a bare one in a table cell, go; the timestamp beside it stays.
   assert.match(html, /Use \[redacted\] and \[redacted\]; routing_number: \[redacted\]\. Use account \[redacted\]\./);
