@@ -192,6 +192,9 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     // A long run of name characters with no label, which a lookbehind rescanned at every underscore.
     assistant('2026-10-03T10:00:03.350Z', { type: 'tool_use', id: 't9', name: 'Grep', input: { pattern: 'benign' } }),
     result('t9', 'benign_'.repeat(40_000)),
+    // A value on the line after its separator: pretty-printed JSON, a YAML-style key, and the same JSON with CRLF.
+    assistant('2026-10-03T10:00:03.360Z', { type: 'tool_use', id: 't10', name: 'Grep', input: { pattern: 'credentials' } }),
+    result('t10', '{\n  "password":\n    "zqMULTILINE1",\n  "id": "keepme25"\n}\napi_key:\n    zqNEXTLINE2 keepme26\n{\r\n  "token":\r\n    "zqCRLFVALUE3",\r\n  "id": "keepme27"\r\n}'),
     assistant('2026-10-03T10:00:04.500Z', { type: 'text', text: CROSS.map((line, i) => `X${i} ${line} keepX${i}`).join('\n') }),
     assistant('2026-10-03T10:00:03.400Z', { type: 'tool_use', id: 't6', name: 'Bash', input: { command: `ls ${s.home}/straddle-demo/bin` } }),
     result('t6', `${s.home}/straddle-demo/bin/straddle\n/home/dana/.npm/_logs/debug-0.log`),
@@ -234,7 +237,7 @@ test('planted secrets never reach the page, in commands, results, diffs, written
     '*API key:* [redacted]',
   ]) assert.ok(text.includes(expected) || text.includes(expected.replaceAll('&quot;', '"')), `${expected} missing`);
   for (const [, expected] of [...DELIMITED, ...LONG]) assert.ok(text.includes(`${expected}\n`) || text.includes(`${expected}┌`), `${expected} missing`);
-  for (const kept of ['&quot;id&quot;:&quot;keepme01&quot;', '&quot;id&quot;:&quot;keepme02&quot;']) assert.ok(text.includes(kept) || text.includes(kept.replaceAll('&quot;', '"')), `${kept} missing`);
+  for (const kept of ['&quot;id&quot;:&quot;keepme01&quot;', '&quot;id&quot;:&quot;keepme02&quot;', '&quot;id&quot;: &quot;keepme25&quot;', 'keepme26', '&quot;id&quot;: &quot;keepme27&quot;']) assert.ok(text.includes(kept) || text.includes(kept.replaceAll('&quot;', '"')), `${kept} missing`);
   assert.ok(rows.some((r) => r.startsWith('Bash: $ curl -d ') && r.includes('keepme03') && r.includes('[redacted]')), rows.join('\n---\n'));
   for (const [, expected] of WORDS) assert.ok(rows.includes(expected), `${expected} missing from\n${rows.join('\n---\n')}`);
   for (const i of CROSS.keys()) {

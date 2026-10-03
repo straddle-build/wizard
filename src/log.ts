@@ -86,12 +86,14 @@ function redactNamed(text: string): string {
     if (text[j] === '"' || text[j] === "'") { quotedLabel = true; i = j + 1; }
     else if (text[i] === '`') i++;
     else if (text[i] === '*' || text[i] === '_') i += text[i + 1] === text[i] ? 2 : 1;
-    while (text[i] === ' ' || text[i] === '\t') i++;
+    // Whitespace around the separator may break the line (pretty-printed JSON, `\r\n` included): only an unclosed value
+    // stops at the end of its line.
+    while (/\s/.test(text[i] ?? '')) i++;
     if (text[i] !== ':' && text[i] !== '=') continue;
     i++;
     for (j = i; j < i + 3 && '*_`'.includes(text[j] ?? '\n'); j++);
-    if (j > i && (text[j] === ' ' || text[j] === '\t')) i = j;
-    while (text[i] === ' ' || text[i] === '\t') i++;
+    if (j > i && /\s/.test(text[j] ?? '')) i = j;
+    while (/\s/.test(text[i] ?? '')) i++;
     const start = i;
 
     if (m[1]) {
