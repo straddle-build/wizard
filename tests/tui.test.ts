@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { markdown, table } from '../src/tui.ts';
+import { markdown, splash, table } from '../src/tui.ts';
 import { Prompter } from '../src/ui.ts';
 
 const plain = { width: 60, color: false };
@@ -111,4 +111,15 @@ test('the splash is plain art at 80 columns with NO_COLOR, one line under 80, an
   ].join('\n'));
   assert.equal(await splashIn({ isTTY: true, columns: 60 }), '✦ Straddle Wizard\n\n');
   assert.equal(await splashIn({}), '');
+});
+
+test('a markdown table with only delimiter rows does not crash and emits no table', () => {
+  assert.equal(markdown(plain, '| --- | --- |\n|---|'), '');
+});
+
+test('the splash in color styles the wordmark as heading and subtitle as dim without nesting', () => {
+  const lines = splash({ width: 80, color: true });
+  assert.match(lines[2]!, /\x1b\[1;36m/);
+  assert.ok(lines[10]!.includes('\x1b[2mStraddle, set up by your coding agent\x1b[0m'));
+  assert.ok(!lines[10]!.includes('\x1b[1;36m\x1b[2m'));
 });

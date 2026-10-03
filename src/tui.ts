@@ -137,7 +137,7 @@ export function markdown(look: Look, text: string): string {
         if (!/^\s*\|[\s:|-]+\|\s*$/.test(lines[i]!)) rows.push(lines[i]!.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|')));
       }
       i--;
-      out.push(table(look, rows[0]!, rows.slice(1)));
+      if (rows.length) out.push(table(look, rows[0]!, rows.slice(1)));
     } else if (line.trimStart().startsWith('```')) {
       for (i++; i < lines.length && !lines[i]!.trimStart().startsWith('```'); i++) out.push(paint(look, 'dim', `  ${lines[i]}`.slice(0, look.width)));
     } else if ((m = /^(#{1,6})\s+(.*)$/.exec(line))) {
@@ -181,11 +181,11 @@ const GLYPHS: Record<string, readonly [string, string, string]> = {
   D: ['█▀▀▄', '█  █', '█▄▄▀'], L: ['█   ', '█   ', '█▄▄▄'], E: ['█▀▀▀', '█▀▀ ', '█▄▄▄'], W: ['█   █', '█ █ █', '▀▄▀▄▀'],
   I: ['▀█▀', ' █ ', '▄█▄'], Z: ['▀▀▀█', ' ▄▀ ', '█▄▄▄'],
 };
-const wordmark = (word: string) => [0, 1, 2].map((row) => [...word].map((ch) => GLYPHS[ch]![row]).join('  '));
+const wordmark = (look: Look, word: string) => [0, 1, 2].map((row) => paint(look, 'heading', [...word].map((ch) => GLYPHS[ch]![row]).join('  ')));
 
 // The splash: a wizard beside "STRADDLE WIZARD" in block letters, 12 lines, 66 cells. Under 80 columns it's one line.
 export function splash(look: Look): string[] {
   if (look.width < 80) return [`${paint(look, 'yellow', '✦')} ${paint(look, 'heading', 'Straddle Wizard')}`];
-  const right = ['', '', ...wordmark('STRADDLE'), '', ...wordmark('WIZARD'), '', paint(look, 'dim', 'Straddle, set up by your coding agent')];
-  return FIGURE.map((f, i) => (f.padEnd(21).replace(/[✦*.]+|[^\s✦*.]+/g, (run) => paint(look, /[✦*.]/.test(run) ? 'yellow' : 'accent', run)) + '  ' + paint(look, 'heading', right[i] ?? '')).trimEnd());
+  const right = ['', '', ...wordmark(look, 'STRADDLE'), '', ...wordmark(look, 'WIZARD'), '', paint(look, 'dim', 'Straddle, set up by your coding agent')];
+  return FIGURE.map((f, i) => (f.padEnd(21).replace(/[✦*.]+|[^\s✦*.]+/g, (run) => paint(look, /[✦*.]/.test(run) ? 'yellow' : 'accent', run)) + '  ' + (right[i] ?? '')).trimEnd());
 }
