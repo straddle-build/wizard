@@ -78,13 +78,12 @@ function answerText(answer: Answer, evidence: string[]): string {
 
 const CHOICE_LABELS: Record<keyof Choices, string> = { products: 'products', integrationType: 'integration type', sdk: 'SDK', notificationPath: 'notification path' };
 const CHOICE_KEYS = Object.keys(CHOICE_LABELS) as (keyof Choices)[];
-// The plan also settles the bank connection, which the Wizard only detects.
 const PLAN_LABELS = { ...CHOICE_LABELS, bankConnection: 'bank connection' };
 type PlanDecisions = Partial<Record<keyof typeof PLAN_LABELS, string>>;
 
-// What the integration plan's Decisions table settles. The plan is the developer's latest word: a plan revised and
-// re-approved after the Wizard asked supersedes what the Wizard saved or detected. Template placeholders (`a / b`)
-// and open questions settle nothing.
+// What the integration plan's Decisions table settles, in any plan state. A choice settled there supersedes the one
+// the Wizard saved or detected; reading it approves nothing, and Integrate and Test still run only an approved plan.
+// Template placeholders (`a / b`), `open (round N)` and `Unresolved` settle nothing (plan-template.md, Decisions).
 function planDecisions(receipt: Receipt): PlanDecisions {
   const plan = readRepoFile(receipt.repo, INTEGRATION_PLAN, receipt.exclude);
   if (plan.kind !== 'read') return {};
@@ -92,7 +91,7 @@ function planDecisions(receipt: Receipt): PlanDecisions {
   for (const row of tableRows(section(plan.text, 'Decisions'))) {
     const key = (Object.keys(PLAN_LABELS) as (keyof typeof PLAN_LABELS)[]).find((k) => PLAN_LABELS[k].toLowerCase() === row.Decision?.toLowerCase());
     const answer = sanitize(row.Answer ?? '');
-    if (key && answer && !answer.includes(' / ') && !answer.startsWith('open (')) settled[key] = answer;
+    if (key && answer && !answer.includes(' / ') && !answer.startsWith('open (') && answer !== 'Unresolved') settled[key] = answer;
   }
   return settled;
 }
@@ -474,12 +473,11 @@ function section(textContent: string, heading: string): string[] {
   const name = heading.toLowerCase();
   const start = lines.findIndex((l) => /^#{2,6} /.test(l.trim()) && l.trim().replace(/^#+ +/, '').toLowerCase().startsWith(name));
   if (start < 0) return [];
-  const level = /^#+/.exec(lines[start]!.trim())![0].length;
-  const end = lines.findIndex((l, i) => i > start && new RegExp(`^#{1,${level}} `).test(l));
+  const closes = new RegExp(`^#{1,${/^#+/.exec(lines[start]!.trim())![0].length}} `);
+  const end = lines.findIndex((l, i) => i > start && closes.test(l));
   return lines.slice(start + 1, end < 0 ? undefined : end).filter((l) => l.trim());
 }
 
-// A section's Markdown table as rows keyed by its header cells.
 function tableRows(lines: readonly string[]): Record<string, string>[] {
   const cells = (l: string) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
   const table = lines.filter((l) => l.trim().startsWith('|'));
@@ -831,7 +829,7 @@ function finishWithoutGoLive(io: Prompter, receipt: Receipt, planHash: string): 
 const FINISH_HERE = 'Finish here (skip Go Live)';
 
 // Where the skills record the Sandbox resources the agent created: the file, its section, and the column naming each
-// row (skills straddle-integrate step 07-handoff and straddle-test step 06-evidence, whose latest run comes first).
+// row (skills straddle-integrate step 07-handoff and straddle-test step 06-evidence).
 const RECORDED_IDS = [
   ['straddle-integration-report.md', 'Sandbox writes run', 'Operation', 'Created or reused'],
   ['straddle-test-evidence.md', 'Server-side resources', 'Resource', 'Created, reused, or observed'],
@@ -843,20 +841,39 @@ const SANDBOX_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const ROW_LABEL = /^[a-z][a-z ]{0,40}$/i;
 const ORIGIN = /^(created|reused|observed)$/i;
 
-function recordedSandboxIds(receipt: Receipt): { ids: string[]; leftOut: number } {
+// The test evidence keeps every run, latest first. Only the run `Latest run:` names counts (else the first run
+// section; a file with no run sections is one run). When that run is missing, nothing counts: an older run's
+// resources are never shown as the latest.
+function latestRun(text: string): string {
+  const lines = text.split('\n');
+  const runs = lines.flatMap((l, i) => (l.startsWith('## Run ') ? [i] : []));
+  if (!runs.length) return text;
+  const latest = header(text, 'Latest run');
+  const start = latest ? runs.find((i) => lines[i]!.slice('## Run '.length).split(',')[0]!.trim() === latest) : runs[0];
+  if (start === undefined) return '';
+  const end = lines.findIndex((l, i) => i > start && l.startsWith('## '));
+  return lines.slice(start, end < 0 ? undefined : end).join('\n');
+}
+
+// `synthetic`: the files whose run targeted an offline synthetic upstream (`Target: offline synthetic localhost ...`),
+// whose records are nothing Straddle holds, so none of them is listed as a Sandbox ID.
+function recordedSandboxIds(receipt: Receipt): { ids: string[]; leftOut: number; synthetic: string[] } {
   const ids: string[] = [];
+  const synthetic: string[] = [];
   let leftOut = 0;
   for (const [file, heading, name, origin] of RECORDED_IDS) {
     const recorded = readRepoFile(receipt.repo, file, receipt.exclude);
     if (recorded.kind !== 'read') continue;
-    for (const row of tableRows(section(recorded.text, heading))) {
+    const run = file === 'straddle-test-evidence.md' ? latestRun(recorded.text) : recorded.text;
+    if (/offline synthetic/i.test(header(run, 'Target') ?? '')) { synthetic.push(file); continue; }
+    for (const row of tableRows(section(run, heading))) {
       const id = row.ID ?? '';
       if (!id || /^(none|-|n\/a)$/i.test(id)) continue;
       if (!SANDBOX_ID.test(id) || !ROW_LABEL.test(row[name] ?? '')) { leftOut++; continue; }
       ids.push(`${file}: ${row[name]} ${id}${ORIGIN.test(row[origin] ?? '') ? ` (${row[origin]!.toLowerCase()})` : ''}`);
     }
   }
-  return { ids, leftOut };
+  return { ids, leftOut, synthetic };
 }
 
 async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bundle | null): Promise<number> {
@@ -887,7 +904,7 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   for (const limit of new Set(receipt.sessions.flatMap((s) => s.evidenceLimits))) io.say(`  Not a complete list: ${limit}`);
   io.say();
   io.say(io.bold('Server-side resources'));
-  const { ids, leftOut } = recordedSandboxIds(receipt);
+  const { ids, leftOut, synthetic } = recordedSandboxIds(receipt);
   if (ids.length) {
     io.say("  The Wizard created or enabled none. Your agent recorded these Sandbox IDs; I didn't verify them:");
     for (const id of ids) io.say(`    ${id}`);
@@ -895,6 +912,7 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
     io.say(`  The Wizard created or enabled none. Your agent recorded no Sandbox IDs in ${RECORDED_IDS.map(([file]) => file).join(' or ')}.`);
   }
   if (leftOut) io.say(`  I left out ${leftOut === 1 ? "1 row that doesn't" : `${leftOut} rows that don't`} look like a Sandbox resource record.`);
+  for (const file of synthetic) io.say(`  ${file} records an offline synthetic target, so I list none of its records as Sandbox IDs.`);
   io.say(io.bold('Checks'));
   io.say('  I sent no Straddle request and ran no test. The checks your agent reports running are its own.');
   io.say();
