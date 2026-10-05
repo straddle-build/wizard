@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { delimiter, dirname, join } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 import { field, parseJson, text } from './json.ts';
 
 // The Straddle CLI installed with the Wizard (@straddlecom/cli, an optional dependency), never one from the
@@ -37,11 +37,13 @@ export function bundledCli(): StraddleCli {
 }
 
 // An agent session's environment: the bundled CLI first on PATH, so the skills' `straddle` calls use it. Windows
-// spells the variable `Path`; a second, differently cased key would leave which one wins to chance.
-export function sessionEnv(env: NodeJS.ProcessEnv, cli: StraddleCli): NodeJS.ProcessEnv {
+// names are case-insensitive and it spells the variable `Path`, so a second, differently cased key would leave which
+// one wins to chance; elsewhere `Path` is a different variable and only `PATH` counts.
+export function sessionEnv(env: NodeJS.ProcessEnv, cli: StraddleCli, platform: NodeJS.Platform): NodeJS.ProcessEnv {
   if (cli.kind !== 'bundled') return env;
+  if (platform !== 'win32') return { ...env, PATH: [cli.dir, env.PATH].filter(Boolean).join(posix.delimiter) };
   const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-  return { ...env, [key]: [cli.dir, env[key]].filter(Boolean).join(delimiter) };
+  return { ...env, [key]: [cli.dir, env[key]].filter(Boolean).join(win32.delimiter) };
 }
 
 // One line for readiness and `wizard status`.

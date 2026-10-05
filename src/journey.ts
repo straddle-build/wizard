@@ -648,7 +648,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const follower = client === 'codex' ? followCodex(opts.env, repo, eventsFile, Date.now() - 1000, previous?.sessionId ?? null) : null;
   const chatsBefore = client === 'cursor' ? cursorTranscripts(opts.env, repo) : null;
   const command = launchCommand({ client, skill: begin, repo, context: programPrompt(run, receipt, previous !== undefined), settingsPath, pluginDir: ready.bundle.path, resume: previous?.sessionId ?? null });
-  const exit = await runInteractive(command, repo, sessionEnv(opts.env, bundledCli()));
+  const exit = await runInteractive(command, repo, sessionEnv(opts.env, bundledCli(), process.platform));
   const rollout = follower?.stop();
   page?.close();
 

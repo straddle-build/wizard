@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { cpSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { sessionEnv } from '../src/straddle-cli.ts';
 import { ROOT, fakeClaude, nextRepo, runWizard, tempDir } from './helpers.ts';
 
 const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENVIRONMENT: 'sandbox' };
@@ -39,6 +40,15 @@ test('a launched Claude Code session runs `straddle` from the Wizard\'s own inst
   assert.equal(readFileSync(join(claude.state, 'straddle.txt'), 'utf8'), `${bundled}\nstraddle 1.0.3\n`);
   assert.ok(r.stdout.includes(`Straddle CLI      straddle 1.0.3 at ${bundled}, first on PATH in the agent session\n`), r.stdout);
   assert.ok(status.stdout.includes(`  Straddle CLI   straddle 1.0.3 at ${bundled}, first on PATH in the agent session\n`), status.stdout);
+});
+
+test('the session PATH change touches only the variable the platform reads: `PATH` on macOS and Linux, Windows\' own `Path`', () => {
+  const posix = { kind: 'bundled', dir: '/w/vendor', path: '/w/vendor/straddle', version: '1.0.3' } as const;
+  const windows = { kind: 'bundled', dir: 'C:\\w\\vendor', path: 'C:\\w\\vendor\\straddle.exe', version: '1.0.3' } as const;
+
+  assert.deepEqual(sessionEnv({ Path: '/custom', PATH: '/usr/bin' }, posix, 'darwin'), { Path: '/custom', PATH: '/w/vendor:/usr/bin' });
+  assert.deepEqual(sessionEnv({ Path: '/custom', PATH: '/usr/bin' }, posix, 'linux'), { Path: '/custom', PATH: '/w/vendor:/usr/bin' });
+  assert.deepEqual(sessionEnv({ Path: 'C:\\Windows', HOME: 'C:\\h' }, windows, 'win32'), { Path: 'C:\\w\\vendor;C:\\Windows', HOME: 'C:\\h' });
 });
 
 for (const layout of ['no binary', 'no package'] as const) {
