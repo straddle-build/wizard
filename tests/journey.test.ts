@@ -1077,38 +1077,13 @@ test('a piped Setup run that finishes prints the plain end-of-session report, wi
   const repo = nextRepo();
   writeFiles(repo, { 'straddle-setup.md': SETUP_FILE });
   const r = await runWizard(['setup', '--client', 'cursor', '--mode', 'manual'], { cwd: repo, env: { ...CONFIGURED, ...fake.env }, input: [...CHOICES, '1'] });
-  const report = r.stdout.slice(r.stdout.indexOf('Straddle Wizard report:')).replaceAll(realpathSync(repo), '<repo>')
-    .replace(/local bundle .*/, 'local bundle <skills>').replace(/(  - \[ \] .*\n)+/, "  <the skill's checklist>\n");
-  assert.equal(report, [
-    'Straddle Wizard report: setup program, completed',
-    '  Reason            every step is done and on file',
-    '  Repository        <repo>',
-    '  Agent             Cursor, plugin manual',
-    '  Skill bundle      local bundle <skills>',
-    '  Run record        .straddle-wizard/receipt.json and .straddle-wizard/events.jsonl',
-    '',
-    'Steps',
-    '  ✓ Setup  straddle-setup.md: Status: complete · no handoff reported · progress not observable',
-    "  ✓ means the file says the step is done. I read each file myself; I can't see your agent's handoffs here.",
-    '',
-    'Changed files (I compared them before and after each session)',
-    '  none',
-    '  Not a complete list: I compared no files for a Manual session',
-    '',
-    'Server-side resources',
-    "  I created or enabled none. What your agent reports creating is in its handoffs and evidence files; I didn't verify it.",
-    'Checks',
-    '  I sent no Straddle request and ran no test. The checks your agent reports running are its own.',
-    '',
-    "Verify before merging (from the straddle-setup 0.1.0 skill; I can't see what your agent printed)",
-    "  <the skill's checklist>",
-    '',
-    'Evidence',
-    '  straddle-setup.md',
-    '',
-    'Next: review the changed files and the checklist before you merge.',
-    '',
-  ].join('\n'));
+  const report = r.stdout.slice(r.stdout.indexOf('Straddle Wizard report:'));
+  assert.match(report, /^Straddle Wizard report: setup program, completed\n/);
+  assert.match(report, /\n  ✓ Setup  straddle-setup\.md: Status: complete · no handoff reported · progress not observable\n/);
+  assert.match(report, /\nServer-side resources\n  The Wizard created or enabled none\. Your agent recorded no Sandbox IDs in straddle-integration-report\.md or straddle-test-evidence\.md\.\n/);
+  assert.match(report, /\nEvidence\n  straddle-setup\.md\n/);
+  // A pipe gets plain lines: no box drawing, no escape codes, and no rendered report file.
+  assert.doesNotMatch(report, /[\u001b┌│└]|^# Straddle setup/m);
 });
 
 test('with no checklist printed, the report shows the "Verify before merging" checklist of the last skill this run finished, or ran when it has no state file, and none before', async () => {
@@ -1304,6 +1279,128 @@ test('receipt removal is configuration loss the next run reports as a fresh star
 
   assert.equal(r.code, 1);
   assert.match(r.stdout, /There's no saved Wizard run in this repo\. Start one with `wizard`\./);
+});
+
+// ME-919: a plan the developer revised and re-approved, written from the current Plan template.
+const PLAN_TEMPLATE = readFileSync(join(SKILLS_SOURCE, 'skills', 'straddle-plan', 'references', 'plan-template.md'), 'utf8');
+const revisedPlan = (sandboxHeading = '## Future Sandbox writes') => PLAN_TEMPLATE
+  .replace('| | Products | charges / payouts / both | | |', '| 1 | Products | charges | developer | |')
+  .replace('| | Bank connection | Bridge widget / Plaid / Quiltt / bank details | | |', '| 3 | Bank connection | Bridge widget | developer | |')
+  .replace('| | Notification path | webhook endpoint / FIFO endpoint / polling endpoint | | |', '| 5 | Notification path | polling endpoint | developer | changed course from webhooks |')
+  .replace('## Future Sandbox writes', sandboxHeading)
+  .replace('| | | SDK method / CLI command / permitted MCP operation | | | |', '| 1 | create customer | SDK | platform | cust-1 | external ID |');
+const approved = (plan: string) => plan.replace('- Plan state: Draft | Approved | Blocked', '- Plan state: Approved')
+  .replace(/^- Approval: none \|.*$/m, `- Approval: 2026-10-05, "approved", recorded by straddle-plan, sha256 ${approvalHash(plan)}`);
+
+test('after the plan changes course and is re-approved, status, resume and the paste text follow it, also once its approval goes stale', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'package.json': PLAID_PACKAGE, 'src/plaid.ts': 'await plaid.linkTokenCreate(request);\nawait plaid.itemPublicTokenExchange({ public_token });\n' });
+  const env = { ...CONFIGURED, ...fakeClients('✓ Logged in as dev@example.com').env };
+  // The saved run: the choices (webhook endpoint), Manual, then "I'm back".
+  await runWizard(['setup', '--client', 'cursor'], { cwd: repo, env, input: [...CHOICES, '2', '1'] });
+  const before = await runWizard(['status'], { cwd: repo, env });
+  // The plan reran: polling and Bridge, re-approved with a new hash.
+  writeFiles(repo, { 'straddle-integration-plan.md': approved(revisedPlan()) });
+  const status = await runWizard(['status'], { cwd: repo, env });
+  const resumed = await runWizard(['resume'], { cwd: repo, env, input: ['1', '2'] });
+  // Edited after approval: the recorded approval no longer matches, and the plan still decides.
+  writeFiles(repo, { 'straddle-integration-plan.md': approved(revisedPlan()).replace('## Verification', '## Verification\n\nEdited.') });
+  const stale = await runWizard(['status'], { cwd: repo, env });
+
+  assert.match(before.stdout, /notification path webhook endpoint/);
+  assert.match(before.stdout, /Bank connection already in the repo: Plaid Link/);
+  const context = "Developer choices from the Straddle Wizard: integration type marketplace; SDK TypeScript. Decided in straddle-integration-plan.md, which supersedes the Wizard's saved choices: products charges; notification path polling endpoint; bank connection Bridge widget.";
+  for (const out of [status.stdout, resumed.stdout, stale.stdout]) {
+    assert.ok(out.includes(context), out);
+    assert.doesNotMatch(out, /webhook endpoint|Plaid Link/);
+  }
+  assert.match(resumed.stdout, /Choices\s+charges, marketplace, TypeScript, polling endpoint \(products and notification path from straddle-integration-plan\.md, which supersedes the choices saved here\)\n/);
+});
+
+test('a plan with no readable Decisions table leaves the saved choices in place', async () => {
+  const repo = nextRepo();
+  writeFiles(repo, { 'straddle-integration-plan.md': `${PLAN}\n## Decisions\n\nnotification path: polling\n` });
+  const env = { ...CONFIGURED, ...fakeClients('✓ Logged in as dev@example.com').env };
+
+  await runWizard(['setup', '--client', 'cursor'], { cwd: repo, env, input: [...CHOICES, '2', '1'] });
+  const resumed = await runWizard(['resume'], { cwd: repo, env, input: ['1', '2'] });
+
+  assert.match(resumed.stdout, /Choices\s+charges, marketplace, TypeScript, webhook endpoint\n/);
+  assert.ok(resumed.stdout.includes('Developer choices from the Straddle Wizard: products charges; integration type marketplace; SDK TypeScript; notification path webhook endpoint.'), resumed.stdout);
+});
+
+test('a Decisions answer the developer left Unresolved settles nothing, so the saved choice stays', async () => {
+  const repo = nextRepo();
+  const plan = revisedPlan().replace('| 5 | Notification path | polling endpoint | developer | changed course from webhooks |', '| 5 | Notification path | Unresolved | developer | can\'t answer now |');
+  writeFiles(repo, { 'straddle-integration-plan.md': plan });
+  const env = { ...CONFIGURED, ...fakeClients('✓ Logged in as dev@example.com').env };
+
+  await runWizard(['setup', '--client', 'cursor'], { cwd: repo, env, input: [...CHOICES, '2', '1'] });
+  const resumed = await runWizard(['resume'], { cwd: repo, env, input: ['1', '2'] });
+
+  assert.match(resumed.stdout, /Choices\s+charges, marketplace, TypeScript, webhook endpoint \(products from straddle-integration-plan\.md, which supersedes the choices saved here\)\n/);
+  assert.ok(resumed.stdout.includes("Developer choices from the Straddle Wizard: integration type marketplace; SDK TypeScript; notification path webhook endpoint. Decided in straddle-integration-plan.md, which supersedes the Wizard's saved choices: products charges; bank connection Bridge widget."), resumed.stdout);
+  assert.doesNotMatch(resumed.stdout, /Unresolved/);
+});
+
+test('the plan summary finds Future Sandbox writes in a template plan, including a revised heading', async () => {
+  for (const heading of ['## Future Sandbox writes', '## Future Sandbox writes (revised)']) {
+    const repo = nextRepo();
+    writeFiles(repo, { 'straddle-integration-plan.md': revisedPlan(heading) });
+
+    const r = await runWizard(['integrate', '--client', 'claude'], { cwd: repo, claude: fakeClaude(), env: CONFIGURED, input: ['1', '1', '2'] });
+
+    assert.match(r.stdout, /  Future Sandbox writes\n[\s\S]*?\n    \| 1 \| create customer \| SDK \| platform \| cust-1 \| external ID \|\n/, heading);
+    assert.doesNotMatch(r.stdout, /section not found/, heading);
+  }
+});
+
+test('the report lists the Sandbox IDs the agent recorded apart from what the Wizard did, and never prints a value that is not an ID', async () => {
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+  const repo = nextRepo();
+  writeFiles(repo, {
+    'straddle-setup.md': SETUP_FILE,
+    'straddle-integration-report.md': `${report('complete')}\n## Sandbox writes run\n| # | Operation | Tool | Acting account | External ID | Idempotency key | Result | ID | Created or reused | Approved at |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| 1 | create customer | SDK | platform | cust-1 | k1 | 201 | 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b | created | 10:00 |\n| 2 | create paykey | SDK | platform | pk-1 | k2 | 201 | tok.secret.value | created | 10:01 |\n| 3 | create charge | SDK | platform | ch-1 | k3 | 201 | sk_test_leaked | created | 10:02 |\n| 4 | create webhook | SDK | platform | wh-1 | k4 | 201 | whsec_leaked123 | created | 10:03 |\n| 5 | sk_live_label_leak | SDK | platform | x-1 | k5 | 201 | 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c | created | 10:04 |\n\n## Tests\n`,
+    'straddle-test-evidence.md': `${EVIDENCE}\n### Server-side resources\n| Resource | ID | External ID | Acting account | Status | Executing tool | Replayed | Created, reused, or observed |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| charge | ${CHARGE} | ch-2 | platform | paid | SDK | no | created |\n| customer | 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d | cu-2 | platform | verified | SDK | no | whsec_origin_leak |\n\n## Run r0, 2026-09-29\n\n### Server-side resources\n| Resource | ID | External ID | Acting account | Status | Executing tool | Replayed | Created, reused, or observed |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| charge | 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5e | ch-0 | platform | paid | SDK | no | created |\n`,
+  });
+
+  const r = await runWizard(['setup', '--client', 'cursor', '--mode', 'manual'], { cwd: repo, env: { ...CONFIGURED, ...fake.env }, input: [...CHOICES, '1'] });
+
+  assert.ok(r.stdout.includes([
+    'Server-side resources',
+    "  The Wizard created or enabled none. Your agent recorded these Sandbox IDs; I didn't verify them:",
+    '    straddle-integration-report.md: create customer 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b (created)',
+    `    straddle-test-evidence.md: charge ${CHARGE} (created)`,
+    '    straddle-test-evidence.md: customer 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d',
+    "  I left out 4 rows that don't look like a Sandbox resource record.",
+    'Checks',
+  ].join('\n')), r.stdout);
+  assert.doesNotMatch(r.stdout, /tok\.secret\.value|sk_test_leaked|whsec_|sk_live_label_leak|4a5e/);
+});
+
+test("the report never calls a record a Sandbox ID when the latest run's target was offline synthetic, or when the record is from an older run", async () => {
+  const id = '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b';
+  const resources = `### Server-side resources\n\n| Resource | ID | External ID | Acting account | Status | Executing tool | Replayed | Created, reused, or observed |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| charge | ${id} | ch-1 | platform | paid | SDK | no | created |\n`;
+  const head = (latest: string) => `# Straddle test evidence\n\nStatus: complete\nPlan: straddle-integration-plan.md\nPlan hash: ${PLAN_HASH}\nLatest run: ${latest}\nTest charge: none\n\n`;
+  const none = '  The Wizard created or enabled none. Your agent recorded no Sandbox IDs in straddle-integration-report.md or straddle-test-evidence.md.';
+  const cases = [
+    // Test step 06-evidence: an offline synthetic run lists its synthetic upstream records under Server-side resources.
+    [`${head('r1')}## Run r1, 2026-10-05\n\n- Status: passed\n- Target: offline synthetic localhost http://127.0.0.1:4010: offline synthetic proof, not live Straddle Sandbox proof\n\n${resources}`,
+      [none, "  straddle-test-evidence.md records an offline synthetic target, so I list none of its records as Sandbox IDs."]],
+    // The latest run recorded no resources table; the older run's resource isn't the latest run's.
+    [`${head('r2')}## Run r2, 2026-10-05\n\n- Status: blocked\n- Target: Straddle Sandbox\n\n## Run r1, 2026-10-04\n\n- Status: passed\n- Target: Straddle Sandbox\n\n${resources}`, [none]],
+    // A live run still lists its IDs.
+    [`${head('r1')}## Run r1, 2026-10-05\n\n- Status: passed\n- Target: Straddle Sandbox\n\n${resources}`,
+      ["  The Wizard created or enabled none. Your agent recorded these Sandbox IDs; I didn't verify them:", `    straddle-test-evidence.md: charge ${id} (created)`]],
+  ] as const;
+  for (const [evidence, lines] of cases) {
+    const repo = nextRepo();
+    writeFiles(repo, { 'straddle-setup.md': SETUP_FILE, 'straddle-test-evidence.md': evidence });
+
+    const r = await runWizard(['setup', '--client', 'cursor', '--mode', 'manual'], { cwd: repo, env: { ...CONFIGURED, ...fakeClients('✓ Logged in as dev@example.com').env }, input: [...CHOICES, '1'] });
+
+    assert.ok(r.stdout.includes(['Server-side resources', ...lines, 'Checks'].join('\n')), r.stdout);
+  }
 });
 
 // The journey in this process on a fake 100-column terminal, through the Prompter it takes as an option, with NO_COLOR
