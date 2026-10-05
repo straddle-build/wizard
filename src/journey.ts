@@ -13,7 +13,7 @@ import { straddleConfiguration } from './configuration.ts';
 import { changedFiles, discover, readRepoFile, snapshot, type RepoFacts } from './discovery.ts';
 import { appendEvents, readObservedEvents, transcriptAssistantText, verifyChecklist } from './events.ts';
 import { offerLog } from './log.ts';
-import { CONTRACT_FILES, SKILLS, programFor, programSkills, stepTitles, type ProgramName, type SkillName } from './programs.ts';
+import { CONTRACT_FILES, INTEGRATION_PLAN, SKILLS, programFor, programSkills, stepTitles, type ProgramName, type SkillName } from './programs.ts';
 import { goLiveSkippable, header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
 import { SESSION_ID, WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Mode, type Receipt, type RunState, type SessionRun } from './receipt.ts';
 import { card, markdown, paint, sanitize, table } from './tui.ts';
@@ -76,10 +76,34 @@ function answerText(answer: Answer, evidence: string[]): string {
   return evidence.length ? `${answer.value} (detected: ${evidence.join(', ')})` : answer.value;
 }
 
+const CHOICE_LABELS: Record<keyof Choices, string> = { products: 'products', integrationType: 'integration type', sdk: 'SDK', notificationPath: 'notification path' };
+const CHOICE_KEYS = Object.keys(CHOICE_LABELS) as (keyof Choices)[];
+// The plan also settles the bank connection, which the Wizard only detects.
+const PLAN_LABELS = { ...CHOICE_LABELS, bankConnection: 'bank connection' };
+type PlanDecisions = Partial<Record<keyof typeof PLAN_LABELS, string>>;
+
+// What the integration plan's Decisions table settles. The plan is the developer's latest word: a plan revised and
+// re-approved after the Wizard asked supersedes what the Wizard saved or detected. Template placeholders (`a / b`)
+// and open questions settle nothing.
+function planDecisions(receipt: Receipt): PlanDecisions {
+  const plan = readRepoFile(receipt.repo, INTEGRATION_PLAN, receipt.exclude);
+  if (plan.kind !== 'read') return {};
+  const settled: PlanDecisions = {};
+  for (const row of tableRows(section(plan.text, 'Decisions'))) {
+    const key = (Object.keys(PLAN_LABELS) as (keyof typeof PLAN_LABELS)[]).find((k) => PLAN_LABELS[k].toLowerCase() === row.Decision?.toLowerCase());
+    const answer = sanitize(row.Answer ?? '');
+    if (key && answer && !answer.includes(' / ') && !answer.startsWith('open (')) settled[key] = answer;
+  }
+  return settled;
+}
+
 function choicesText(receipt: Receipt): string {
   const c = receipt.context.choices;
-  if (c) return [c.products, c.integrationType, c.sdk, c.notificationPath].join(', ');
-  return programFor(receipt.program).asksChoices ? "not answered yet; I'll ask before your agent starts" : 'not asked for this program';
+  if (!c) return programFor(receipt.program).asksChoices ? "not answered yet; I'll ask before your agent starts" : 'not asked for this program';
+  const plan = planDecisions(receipt);
+  const decided = CHOICE_KEYS.filter((k) => plan[k]);
+  const values = CHOICE_KEYS.map((k) => plan[k] ?? c[k]).join(', ');
+  return decided.length ? `${values} (${titleList(decided.map((k) => CHOICE_LABELS[k]))} from ${INTEGRATION_PLAN}, which supersedes the choices saved here)` : values;
 }
 
 const LANGUAGES = ['TypeScript', 'JavaScript', 'Python', 'Ruby', 'C#', 'Go', 'Other'] as const;
@@ -442,12 +466,26 @@ const FILE_LEGEND = "✓ means the file says the step is done. I read each file 
 
 // ---------- Session ----------
 
+// The first section whose heading starts with `heading`, at any level from `##`, so a revised plan's
+// `## Future Sandbox writes (revised)` or a run's `### Server-side resources` still matches. It ends at the next heading
+// of the same or a higher level.
 function section(textContent: string, heading: string): string[] {
   const lines = textContent.split('\n');
-  const start = lines.findIndex((l) => l.trim() === `## ${heading}`);
+  const name = heading.toLowerCase();
+  const start = lines.findIndex((l) => /^#{2,6} /.test(l.trim()) && l.trim().replace(/^#+ +/, '').toLowerCase().startsWith(name));
   if (start < 0) return [];
-  const end = lines.findIndex((l, i) => i > start && l.startsWith('## '));
+  const level = /^#+/.exec(lines[start]!.trim())![0].length;
+  const end = lines.findIndex((l, i) => i > start && new RegExp(`^#{1,${level}} `).test(l));
   return lines.slice(start + 1, end < 0 ? undefined : end).filter((l) => l.trim());
+}
+
+// A section's Markdown table as rows keyed by its header cells.
+function tableRows(lines: readonly string[]): Record<string, string>[] {
+  const cells = (l: string) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+  const table = lines.filter((l) => l.trim().startsWith('|'));
+  if (table.length < 2) return [];
+  const head = cells(table[0]!);
+  return table.slice(2).map((l) => Object.fromEntries(cells(l).map((c, i) => [head[i] ?? '', c])));
 }
 
 // Integrate and Test apply the same approval rule to the plan (skills straddle-integrate and straddle-test, step 01-begin).
@@ -493,12 +531,17 @@ function contextForAgent(receipt: Receipt): string {
   const { language, framework, choices: c } = receipt.context;
   const origin = (a: Answer) => (a.source === 'developer' ? 'corrected by the developer' : 'detected');
   const link = receipt.context.bankLink;
-  const bank = link ? ` Bank connection already in the repo: Plaid Link${link.processorTokens ? ' with processor tokens' : ''} (detected; a Plan decision, not part of a migration).` : '';
+  const plan = planDecisions(receipt);
+  // A bank connection the plan settled supersedes the detected one, so the agent isn't told both.
+  const bank = link && !plan.bankConnection ? ` Bank connection already in the repo: Plaid Link${link.processorTokens ? ' with processor tokens' : ''} (detected; a Plan decision, not part of a migration).` : '';
   const context = `Repository context confirmed in the Straddle Wizard: language ${language.value} (${origin(language)}); framework ${framework.value} (${origin(framework)}).${bank}`;
-  if (!c) return context;
-  const decided = ([['products', c.products], ['integration type', c.integrationType], ['SDK', c.sdk], ['notification path', c.notificationPath]] as const)
-    .map(([k, v]) => `${k} ${v}`);
-  return `${context} Developer choices from the Straddle Wizard: ${decided.join('; ')}.`;
+  const saved = c ? CHOICE_KEYS.filter((k) => !plan[k]).map((k) => `${CHOICE_LABELS[k]} ${c[k]}`) : [];
+  const decided = (Object.keys(PLAN_LABELS) as (keyof typeof PLAN_LABELS)[]).filter((k) => plan[k] && (c || k === 'bankConnection')).map((k) => `${PLAN_LABELS[k]} ${plan[k]}`);
+  return [
+    context,
+    ...saved.length ? [`Developer choices from the Straddle Wizard: ${saved.join('; ')}.`] : [],
+    ...decided.length ? [`Decided in ${INTEGRATION_PLAN}, which supersedes the Wizard's saved choices: ${decided.join('; ')}.`] : [],
+  ].join(' ');
 }
 
 // Said to a reopened session, whose earlier previews and yeses are back in its context (wizard-program.md).
@@ -787,6 +830,35 @@ function finishWithoutGoLive(io: Prompter, receipt: Receipt, planHash: string): 
 
 const FINISH_HERE = 'Finish here (skip Go Live)';
 
+// Where the skills record the Sandbox resources the agent created: the file, its section, and the column naming each
+// row (skills straddle-integrate step 07-handoff and straddle-test step 06-evidence, whose latest run comes first).
+const RECORDED_IDS = [
+  ['straddle-integration-report.md', 'Sandbox writes run', 'Operation', 'Created or reused'],
+  ['straddle-test-evidence.md', 'Server-side resources', 'Resource', 'Created, reused, or observed'],
+] as const;
+
+// Straddle resource IDs are UUIDs. A row with any other ID cell (a key, a token, free text), or whose label isn't plain
+// words, is counted and never printed. Only a known origin is shown.
+const SANDBOX_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ROW_LABEL = /^[a-z][a-z ]{0,40}$/i;
+const ORIGIN = /^(created|reused|observed)$/i;
+
+function recordedSandboxIds(receipt: Receipt): { ids: string[]; leftOut: number } {
+  const ids: string[] = [];
+  let leftOut = 0;
+  for (const [file, heading, name, origin] of RECORDED_IDS) {
+    const recorded = readRepoFile(receipt.repo, file, receipt.exclude);
+    if (recorded.kind !== 'read') continue;
+    for (const row of tableRows(section(recorded.text, heading))) {
+      const id = row.ID ?? '';
+      if (!id || /^(none|-|n\/a)$/i.test(id)) continue;
+      if (!SANDBOX_ID.test(id) || !ROW_LABEL.test(row[name] ?? '')) { leftOut++; continue; }
+      ids.push(`${file}: ${row[name]} ${id}${ORIGIN.test(row[origin] ?? '') ? ` (${row[origin]!.toLowerCase()})` : ''}`);
+    }
+  }
+  return { ids, leftOut };
+}
+
 async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle: Bundle | null): Promise<number> {
   const title = `Straddle Wizard report: ${receipt.program} program, ${receipt.state}`;
   const rows: [string, string][] = [
@@ -815,7 +887,14 @@ async function printReport(io: Prompter, receipt: Receipt, now: Progress, bundle
   for (const limit of new Set(receipt.sessions.flatMap((s) => s.evidenceLimits))) io.say(`  Not a complete list: ${limit}`);
   io.say();
   io.say(io.bold('Server-side resources'));
-  io.say("  I created or enabled none. What your agent reports creating is in its handoffs and evidence files; I didn't verify it.");
+  const { ids, leftOut } = recordedSandboxIds(receipt);
+  if (ids.length) {
+    io.say("  The Wizard created or enabled none. Your agent recorded these Sandbox IDs; I didn't verify them:");
+    for (const id of ids) io.say(`    ${id}`);
+  } else {
+    io.say(`  The Wizard created or enabled none. Your agent recorded no Sandbox IDs in ${RECORDED_IDS.map(([file]) => file).join(' or ')}.`);
+  }
+  if (leftOut) io.say(`  I left out ${leftOut === 1 ? "1 row that doesn't" : `${leftOut} rows that don't`} look like a Sandbox resource record.`);
   io.say(io.bold('Checks'));
   io.say('  I sent no Straddle request and ran no test. The checks your agent reports running are its own.');
   io.say();
