@@ -1,6 +1,6 @@
 {
   "name": "@straddlecom/wizard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Guided terminal setup that hands a Straddle integration to your local coding agent through the versioned Straddle skills.",
   "license": "Apache-2.0",
   "repository": {
@@ -28,5 +28,8 @@
   },
   "dependencies": {
     "expressive-code": "^0.44.2"
+  },
+  "optionalDependencies": {
+    "@straddlecom/cli": "^1.0.3"
   }
 }

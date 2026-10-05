@@ -96,7 +96,8 @@ export function fakeClients(status: string): { env: { HOME: string; PATH: string
 
 export interface RunResult { code: number | null; stdout: string; stderr: string }
 
-export function runWizard(args: string[], opts: { cwd: string; input?: string[]; env?: Record<string, string>; claude?: FakeClaude }): Promise<RunResult> {
+// `cli`: the Wizard to run, by default this checkout's.
+export function runWizard(args: string[], opts: { cwd: string; input?: string[]; env?: Record<string, string>; claude?: FakeClaude; cli?: string }): Promise<RunResult> {
   const path = [opts.claude?.bin, dirname(process.execPath), '/usr/bin', '/bin'].filter(Boolean).join(':');
   const env: Record<string, string> = {
     PATH: path,
@@ -109,7 +110,7 @@ export function runWizard(args: string[], opts: { cwd: string; input?: string[];
     ...opts.env,
   };
   const { promise, resolve } = Promise.withResolvers<RunResult>();
-  const child = spawn(process.execPath, [CLI, ...args], { cwd: opts.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [opts.cli ?? CLI, ...args], { cwd: opts.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (d) => { stdout += d; });

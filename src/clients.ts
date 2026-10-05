@@ -333,12 +333,21 @@ export interface Handoff {
   steps: string[];
 }
 
-export function manualHandoff(req: Pick<LaunchRequest, 'client' | 'skill' | 'repo' | 'context'>): Handoff {
+// The command that puts a directory first on PATH, in the shell the developer has: PowerShell on Windows (a
+// single-quoted literal, so nothing in the path expands), a POSIX shell elsewhere.
+function prependPath(dir: string, platform: NodeJS.Platform): string {
+  return platform === 'win32' ? `$env:Path = '${dir.replace(/'/g, "''")};' + $env:Path` : `export PATH=${shellQuote(dir)}:$PATH`;
+}
+
+// `cliDir`: the bundled Straddle CLI's directory, which the developer puts first on PATH themselves, since I start nothing.
+export function manualHandoff(req: Pick<LaunchRequest, 'client' | 'skill' | 'repo' | 'context'> & { cliDir: string | null; platform: NodeJS.Platform }): Handoff {
   const label = CLIENT_LABEL[req.client];
+  const shell = req.platform === 'win32' ? 'PowerShell' : 'a shell';
+  const path = req.cliDir ? ` Start it from ${shell} where you ran \`${prependPath(req.cliDir, req.platform)}\`, so the skills' \`straddle\` commands use the Wizard's Straddle CLI.` : '';
   return {
     prompt: startPrompt(req.client, req.skill, req.context),
     steps: [
-      `Open ${req.repo} in ${label} with the Straddle plugin installed${req.client === 'cursor' ? ' from its team marketplace' : ''}.`,
+      `Open ${req.repo} in ${label} with the Straddle plugin installed${req.client === 'cursor' ? ' from its team marketplace' : ''}.${path}`,
       `Paste this as your message to the ${label} agent:`,
       `Answer its questions there, and approve or deny each change and each Sandbox request. Nothing here counts as approval.`,
       "When it stops, run `wizard resume`: I read the files the skills wrote and tell you what to paste next.",
