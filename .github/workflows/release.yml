@@ -2,7 +2,8 @@ name: Release
 
 # Publishes @straddlecom/wizard to npm with provenance when a GitHub release is published.
 # Authenticates with npm trusted publishing (OIDC through id-token: write), configured on npmjs.com for this
-# repository and workflow, so there is no token secret. Trusted publishing needs npm 11.5.1 or later, hence Node 24.
+# repository and workflow, so there is no token secret. Trusted publishing needs npm 11.5.1 or later, which the
+# publish job installs rather than relying on the npm bundled with Node.
 # npm provenance also needs this repository to be public.
 on:
   release:
@@ -34,4 +35,5 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      - run: npm install -g npm@^11.5.1
       - run: npm publish --provenance --access public
