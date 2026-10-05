@@ -727,7 +727,7 @@ function cursorChat(env: NodeJS.ProcessEnv, repo: string, resumed: string | null
 
 function handoffFor(receipt: Receipt, run: readonly SkillName[]): Handoff {
   const cli = bundledCli();
-  return manualHandoff({ client: receipt.client!, skill: run[0]!, repo: receipt.repo, context: programPrompt(run, receipt, false), cliDir: cli.kind === 'bundled' ? cli.dir : null });
+  return manualHandoff({ client: receipt.client!, skill: run[0]!, repo: receipt.repo, context: programPrompt(run, receipt, false), cliDir: cli.kind === 'bundled' ? cli.dir : null, platform: process.platform });
 }
 
 // Manual: the developer runs the program in their own agent and the files decide. I start no process.

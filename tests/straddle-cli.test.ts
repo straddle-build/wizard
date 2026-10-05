@@ -11,8 +11,9 @@ const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENV
 const AUTO_START = ['1', '1', '3', '', '1', '1', '1'];
 const SETUP_SESSION = { 'straddle-setup': { steps: ['01-begin'], text: 'STRADDLE_HANDOFF {"skill":"straddle-setup","status":"ready","report":"ready"}' } };
 
-// A copy of this Wizard installed with `--ignore-scripts`: @straddlecom/cli without the binary its postinstall downloads.
-function wizardWithoutCliBinary(): { cli: string; root: string } {
+// A copy of this Wizard as npm leaves it when the CLI's binary download didn't happen: installed with
+// `--ignore-scripts` (@straddlecom/cli without vendor/), or after the download failed (npm drops the optional package).
+function wizardInstall(layout: 'no binary' | 'no package'): { cli: string; root: string } {
   const root = realpathSync(tempDir('install'));
   cpSync(join(ROOT, 'package.json'), join(root, 'package.json'));
   cpSync(join(ROOT, 'src'), join(root, 'src'), { recursive: true });
@@ -21,7 +22,7 @@ function wizardWithoutCliBinary(): { cli: string; root: string } {
     if (entry !== '@straddlecom') symlinkSync(join(ROOT, 'node_modules', entry), join(root, 'node_modules', entry));
   }
   const cli = join(ROOT, 'node_modules', '@straddlecom', 'cli');
-  cpSync(cli, join(root, 'node_modules', '@straddlecom', 'cli'), { recursive: true, filter: (src) => src !== join(cli, 'vendor') });
+  if (layout === 'no binary') cpSync(cli, join(root, 'node_modules', '@straddlecom', 'cli'), { recursive: true, filter: (src) => src !== join(cli, 'vendor') });
   return { cli: join(root, 'src', 'cli.ts'), root };
 }
 
@@ -40,19 +41,23 @@ test('a launched Claude Code session runs `straddle` from the Wizard\'s own inst
   assert.ok(status.stdout.includes(`  Straddle CLI   straddle 1.0.3 at ${bundled}, first on PATH in the agent session\n`), status.stdout);
 });
 
-test('without the CLI binary, readiness and status say so with the fix, and the session still runs, with no `straddle` added to its PATH', async () => {
-  const { cli, root } = wizardWithoutCliBinary();
-  const repo = nextRepo();
-  const claude = fakeClaude();
-  claude.sessions(SETUP_SESSION);
-  const missing = `not available: its binary was never downloaded (install scripts off, or the download failed): no ${root}/node_modules/@straddlecom/cli/vendor/straddle. To fix it, run \`npm rebuild @straddlecom/cli\` in ${root}, or install the Straddle CLI. Until then the skills use a \`straddle\` on your PATH, or the Straddle SDK\n`;
+for (const layout of ['no binary', 'no package'] as const) {
+  test(`${layout}: readiness and status say the CLI is missing with the fix, and the session still runs, with no \`straddle\` added to its PATH`, async () => {
+    const { cli, root } = wizardInstall(layout);
+    const repo = nextRepo();
+    const claude = fakeClaude();
+    claude.sessions(SETUP_SESSION);
+    const missing = layout === 'no binary'
+      ? `not available: its binary was never downloaded (install scripts off, or the download failed): no ${root}/node_modules/@straddlecom/cli/vendor/straddle. To fix it, run \`npm rebuild @straddlecom/cli\` in ${root}, or install the Straddle CLI. Until then the skills use a \`straddle\` on your PATH, or the Straddle SDK\n`
+      : "not available: @straddlecom/cli isn't installed with the Wizard (npm leaves it out when its binary download fails). To fix it, reinstall the Wizard, or install the Straddle CLI. Until then the skills use a `straddle` on your PATH, or the Straddle SDK\n";
 
-  const r = await runWizard(['setup', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: AUTO_START, cli });
-  const status = await runWizard(['status'], { cwd: repo, env: CONFIGURED, cli });
+    const r = await runWizard(['setup', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: AUTO_START, cli });
+    const status = await runWizard(['status'], { cwd: repo, env: CONFIGURED, cli });
 
-  assert.ok(r.stdout.includes(`Straddle CLI      ${missing}`), r.stdout + r.stderr);
-  assert.match(r.stdout, /Session ended \(Claude Code exited with code 0\)/);
-  assert.equal(readFileSync(join(claude.state, 'straddle.txt'), 'utf8'), '');
-  assert.equal(status.code, 0);
-  assert.ok(status.stdout.includes(`  Straddle CLI   ${missing}`), status.stdout);
-});
+    assert.ok(r.stdout.includes(`Straddle CLI      ${missing}`), r.stdout + r.stderr);
+    assert.match(r.stdout, /Session ended \(Claude Code exited with code 0\)/);
+    assert.equal(readFileSync(join(claude.state, 'straddle.txt'), 'utf8'), '');
+    assert.equal(status.code, 0);
+    assert.ok(status.stdout.includes(`  Straddle CLI   ${missing}`), status.stdout);
+  });
+}

@@ -27,7 +27,9 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@straddlecom/cli": "^1.0.3",
     "expressive-code": "^0.44.2"
+  },
+  "optionalDependencies": {
+    "@straddlecom/cli": "^1.0.3"
   }
 }

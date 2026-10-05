@@ -13,7 +13,7 @@ Local Straddle Developer Kit installer and agent orchestrator.
 
 - Node.js 22.18 or later.
 - For Auto: Claude Code, Codex or `cursor-agent` (Cursor's CLI) on `PATH` and logged in. Manual works with any of them, including the Cursor app, and needs nothing on `PATH`.
-- The Straddle CLI comes with the Wizard. `@straddlecom/cli` is a dependency, and its install script downloads the `straddle` binary for your platform from the CLI's GitHub releases. With install scripts off (`--ignore-scripts`) or a failed download, the Wizard says so, names the fix (`npm rebuild @straddlecom/cli` in the Wizard's install, or install the Straddle CLI yourself) and carries on; the skills then use a `straddle` on your `PATH`, or the Straddle SDK.
+- The Straddle CLI comes with the Wizard. `@straddlecom/cli` is an optional dependency, and its install script downloads the `straddle` binary for your platform from the CLI's GitHub releases. When that download fails, npm leaves the package out and still installs the Wizard; with install scripts off (`--ignore-scripts`) the package is there without its binary. Either way the Wizard says so, names the fix (reinstall the Wizard, `npm rebuild @straddlecom/cli` in the Wizard's install, or install the Straddle CLI yourself) and carries on; the skills then use a `straddle` on your `PATH`, or the Straddle SDK.
 
 ## Skills bundle
 

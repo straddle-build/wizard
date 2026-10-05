@@ -333,10 +333,17 @@ export interface Handoff {
   steps: string[];
 }
 
+// The command that puts a directory first on PATH, in the shell the developer has: PowerShell on Windows (a
+// single-quoted literal, so nothing in the path expands), a POSIX shell elsewhere.
+function prependPath(dir: string, platform: NodeJS.Platform): string {
+  return platform === 'win32' ? `$env:Path = '${dir.replace(/'/g, "''")};' + $env:Path` : `export PATH=${shellQuote(dir)}:$PATH`;
+}
+
 // `cliDir`: the bundled Straddle CLI's directory, which the developer puts first on PATH themselves, since I start nothing.
-export function manualHandoff(req: Pick<LaunchRequest, 'client' | 'skill' | 'repo' | 'context'> & { cliDir: string | null }): Handoff {
+export function manualHandoff(req: Pick<LaunchRequest, 'client' | 'skill' | 'repo' | 'context'> & { cliDir: string | null; platform: NodeJS.Platform }): Handoff {
   const label = CLIENT_LABEL[req.client];
-  const path = req.cliDir ? ` Start it from a shell where you ran \`export PATH=${shellQuote(req.cliDir)}:$PATH\`, so the skills' \`straddle\` commands use the Wizard's Straddle CLI.` : '';
+  const shell = req.platform === 'win32' ? 'PowerShell' : 'a shell';
+  const path = req.cliDir ? ` Start it from ${shell} where you ran \`${prependPath(req.cliDir, req.platform)}\`, so the skills' \`straddle\` commands use the Wizard's Straddle CLI.` : '';
   return {
     prompt: startPrompt(req.client, req.skill, req.context),
     steps: [
