@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, posix, win32 } from 'node:path';
-import { field, parseJson, text } from './json.ts';
+import { dirname, posix, win32 } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// The Straddle CLI installed with the Wizard (@straddlecom/cli, an optional dependency), never one from the
-// developer's PATH. npm drops the package when its postinstall, which downloads the platform binary, fails.
+// The Straddle CLI installed with the Wizard, never one from the developer's PATH. @straddlecom/cli, an optional
+// dependency, runs no install script: npm installs the binary as whichever of its optional platform packages
+// (@straddlecom/cli-<platform>-<arch>) matches this machine, and the package's resolver finds it without downloading.
 export type StraddleCli =
   | { kind: 'bundled'; dir: string; path: string; version: string }
   | { kind: 'missing'; reason: string; fix: string };
@@ -13,27 +13,22 @@ export type StraddleCli =
 const VERSION_TIMEOUT_MS = 10_000;
 
 export function bundledCli(): StraddleCli {
-  let manifest: string;
+  // npx installs into <npm cache>/_npx/<hash> and reuses that tree on every later run, so reinstalling means deleting it.
+  const npx = /^(.*[\\/]_npx[\\/][^\\/]+)[\\/]/.exec(fileURLToPath(import.meta.url))?.[1];
+  const fix = `${npx ? `delete ${npx} (npx's cached install of the Wizard) and run it with npx again` : 'reinstall the Wizard'} without \`--omit=optional\`, or install the Straddle CLI`;
+  let binaryPath: () => string | null;
   try {
-    manifest = createRequire(import.meta.url).resolve('@straddlecom/cli/package.json');
+    ({ binaryPath } = createRequire(import.meta.url)('@straddlecom/cli/resolve') as { binaryPath: () => string | null });
   } catch {
-    return { kind: 'missing', reason: "@straddlecom/cli isn't installed with the Wizard (npm leaves it out when its binary download fails)", fix: 'reinstall the Wizard, or install the Straddle CLI' };
+    return { kind: 'missing', reason: "@straddlecom/cli 1.0.4 or later isn't installed with the Wizard", fix };
   }
-  const pkgDir = dirname(manifest);
-  // <install>/node_modules/@straddlecom/cli: rebuilding there reruns the binary download.
-  const fix = `run \`npm rebuild @straddlecom/cli\` in ${dirname(dirname(dirname(pkgDir)))}, or install the Straddle CLI`;
-  const bin = text(field(field(parseJson(readFileSync(manifest, 'utf8')), 'bin'), 'straddle'));
-  if (!bin || !existsSync(join(pkgDir, bin))) return { kind: 'missing', reason: `@straddlecom/cli in ${pkgDir} declares no \`straddle\` bin that exists`, fix };
-  // The declared bin, bin/straddle.js, is a Node launcher for ../vendor/straddle(.exe), which the postinstall
-  // downloads; the launcher downloads it itself when missing. A session's PATH needs a file named `straddle`, and this
-  // check must not download, so both use the native binary beside the launcher.
-  const dir = join(dirname(join(pkgDir, bin)), '..', 'vendor');
-  const path = join(dir, process.platform === 'win32' ? 'straddle.exe' : 'straddle');
-  if (!existsSync(path)) return { kind: 'missing', reason: `its binary was never downloaded (install scripts off, or the download failed): no ${path}`, fix };
+  const path = binaryPath();
+  const target = `${process.platform}-${process.arch}`;
+  if (!path) return { kind: 'missing', reason: `the Straddle CLI binary for ${target} isn't installed (npm skipped the optional platform package @straddlecom/cli-${target})`, fix };
   const r = spawnSync(path, ['--version'], { encoding: 'utf8', timeout: VERSION_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] });
   const version = r.status === 0 ? r.stdout.trim().split(/\s+/).at(-1) : undefined;
   if (!version) return { kind: 'missing', reason: `\`${path} --version\` failed: ${(r.error?.message ?? `${r.stdout}${r.stderr}`.trim()) || `exit ${r.status}`}`, fix };
-  return { kind: 'bundled', dir, path, version };
+  return { kind: 'bundled', dir: dirname(path), path, version };
 }
 
 // An agent session's environment: the bundled CLI first on PATH, so the skills' `straddle` calls use it. Windows
