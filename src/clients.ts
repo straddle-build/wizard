@@ -333,12 +333,14 @@ export interface Handoff {
   steps: string[];
 }
 
-export function manualHandoff(req: Pick<LaunchRequest, 'client' | 'skill' | 'repo' | 'context'>): Handoff {
+// `cliDir`: the bundled Straddle CLI's directory, which the developer puts first on PATH themselves, since I start nothing.
+export function manualHandoff(req: Pick<LaunchRequest, 'client' | 'skill' | 'repo' | 'context'> & { cliDir: string | null }): Handoff {
   const label = CLIENT_LABEL[req.client];
+  const path = req.cliDir ? ` Start it from a shell where you ran \`export PATH=${shellQuote(req.cliDir)}:$PATH\`, so the skills' \`straddle\` commands use the Wizard's Straddle CLI.` : '';
   return {
     prompt: startPrompt(req.client, req.skill, req.context),
     steps: [
-      `Open ${req.repo} in ${label} with the Straddle plugin installed${req.client === 'cursor' ? ' from its team marketplace' : ''}.`,
+      `Open ${req.repo} in ${label} with the Straddle plugin installed${req.client === 'cursor' ? ' from its team marketplace' : ''}.${path}`,
       `Paste this as your message to the ${label} agent:`,
       `Answer its questions there, and approve or deny each change and each Sandbox request. Nothing here counts as approval.`,
       "When it stops, run `wizard resume`: I read the files the skills wrote and tell you what to paste next.",

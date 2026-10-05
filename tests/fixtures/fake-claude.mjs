@@ -67,6 +67,8 @@ const sessionId = args.includes('--resume') ? args[args.indexOf('--resume') + 1]
 const transcript = join(stateDir, `transcript-${sessionId}.jsonl`);
 mkdirSync(stateDir, { recursive: true });
 if (!existsSync(transcript)) writeFileSync(transcript, '');
+// The `straddle` a skill's shell command would run in this session, and its version.
+writeFileSync(join(stateDir, 'straddle.txt'), spawnSync('sh', ['-c', 'command -v straddle && straddle --version'], { encoding: 'utf8' }).stdout);
 
 function hook(event, payload) {
   for (const group of settings.hooks[event] ?? []) {

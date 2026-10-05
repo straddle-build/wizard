@@ -13,6 +13,7 @@ import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
 import { openFile, writeLog } from './log.ts';
 import { WIZARD_DIR, loadReceipt, type Mode } from './receipt.ts';
 import { Prompter } from './ui.ts';
+import { bundledCli, cliSummary } from './straddle-cli.ts';
 import { WIZARD_VERSION } from './version.ts';
 
 const USAGE = `Straddle Wizard ${WIZARD_VERSION}
@@ -144,6 +145,7 @@ function status(): number {
   const check = findBundle({ override: bundlePath, env });
   const clients = CLIENT_NAMES.map((name) => inspectClient(name, env, check.ok ? check.bundle : null));
   const config = straddleConfiguration(env);
+  const cli = bundledCli();
   const handoff = loaded.kind === 'found' ? savedHandoff(loaded.receipt, env) : null;
   const run = loaded.kind === 'found'
     ? { program: loaded.receipt.program, state: loaded.receipt.state, reason: loaded.receipt.stateReason, updatedAt: loaded.receipt.updatedAt, client: loaded.receipt.client, mode: loaded.receipt.mode, ...savedStatus(loaded.receipt), paste: handoff?.prompt ?? null }
@@ -155,6 +157,7 @@ function status(): number {
       ? { kind: check.bundle.kind, pluginVersion: check.bundle.pluginVersion, contentSha256: check.bundle.contentSha256, path: check.bundle.path, skills: Object.fromEntries(Object.entries(check.bundle.skills).map(([k, v]) => [k, v.version])) }
       : { error: check.reason },
     clients: clients.map((c) => ({ name: c.name, label: c.label, version: c.version, loggedIn: c.loggedIn, plugin: c.plugin, apiMcp: c.apiMcp, eventSurface: EVENT_SURFACE[c.name] })),
+    straddleCli: cli,
     credentials: { STRADDLE_API_KEY: config.key },
     environment: config.environment,
     configurationErrors: config.errors,
@@ -168,6 +171,7 @@ function status(): number {
     const plugin = c.plugin.state === 'installed' ? `plugin ${c.plugin.version}${c.plugin.verified ? '' : " (differs from the Wizard's bundle)"}` : `plugin ${c.plugin.state}`;
     say(`  ${c.label.padEnd(15)}${c.version ?? 'not found'}${c.version ? `, ${plugin}, API MCP ${c.apiMcp}, progress ${EVENT_SURFACE[c.name]}` : ''}`);
   }
+  say(`  Straddle CLI   ${cliSummary(cli)}`);
   say(`  Straddle key   STRADDLE_API_KEY ${config.key === 'present' ? "is set (I didn't read the value)" : 'is not set'}`);
   say(`  Environment    ${config.environment}`);
   if (config.errors.length) say(`  Configuration error for Straddle requests: ${config.errors.join('; ')}`);

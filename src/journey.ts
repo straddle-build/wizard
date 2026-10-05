@@ -18,6 +18,7 @@ import { goLiveSkippable, header, nextStep, progress, statusLine, type StepProgr
 import { SESSION_ID, WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Mode, type Receipt, type RunState, type SessionRun } from './receipt.ts';
 import { card, markdown, paint, sanitize, table } from './tui.ts';
 import type { Prompter } from './ui.ts';
+import { bundledCli, cliSummary, sessionEnv } from './straddle-cli.ts';
 import { WIZARD_VERSION } from './version.ts';
 
 export interface JourneyOptions {
@@ -285,6 +286,7 @@ function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: 
   row(io, 'Skill bundle', bundleLabel(bundle));
   row(io, 'Agent', client.version ? `${client.label} ${client.version}` : `${client.label}: not found`);
   if (client.loggedIn !== null) row(io, 'Agent login', client.loggedIn ? 'logged in' : 'not logged in');
+  row(io, 'Straddle CLI', cliSummary(bundledCli()));
   const installed = client.plugin.state === 'installed'
     ? `installed ${client.plugin.version ?? ''}, ${client.plugin.verified ? "matches the Wizard's bundle" : "differs from the Wizard's bundle"}`
     : client.plugin.state === 'missing' ? 'not installed' : "unverified (I can't inspect this client)";
@@ -646,7 +648,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const follower = client === 'codex' ? followCodex(opts.env, repo, eventsFile, Date.now() - 1000, previous?.sessionId ?? null) : null;
   const chatsBefore = client === 'cursor' ? cursorTranscripts(opts.env, repo) : null;
   const command = launchCommand({ client, skill: begin, repo, context: programPrompt(run, receipt, previous !== undefined), settingsPath, pluginDir: ready.bundle.path, resume: previous?.sessionId ?? null });
-  const exit = await runInteractive(command, repo, opts.env);
+  const exit = await runInteractive(command, repo, sessionEnv(opts.env, bundledCli()));
   const rollout = follower?.stop();
   page?.close();
 
@@ -724,7 +726,8 @@ function cursorChat(env: NodeJS.ProcessEnv, repo: string, resumed: string | null
 }
 
 function handoffFor(receipt: Receipt, run: readonly SkillName[]): Handoff {
-  return manualHandoff({ client: receipt.client!, skill: run[0]!, repo: receipt.repo, context: programPrompt(run, receipt, false) });
+  const cli = bundledCli();
+  return manualHandoff({ client: receipt.client!, skill: run[0]!, repo: receipt.repo, context: programPrompt(run, receipt, false), cliDir: cli.kind === 'bundled' ? cli.dir : null });
 }
 
 // Manual: the developer runs the program in their own agent and the files decide. I start no process.

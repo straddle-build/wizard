@@ -27,13 +27,14 @@ test('Manual: the paste text is what Auto sends, and its program line begins a l
   const contract = readFileSync(join(SKILLS_SOURCE, 'skills', 'straddle-best-practices', 'references', 'wizard-program.md'), 'utf8');
   assert.match(contract, /a line beginning `Straddle Wizard program:`/);
   for (const client of CLIENT_NAMES) {
-    const { prompt, steps } = manualHandoff({ client, skill: 'straddle-plan', repo: '/repo', context: CONTEXT });
+    const { prompt, steps } = manualHandoff({ client, skill: 'straddle-plan', repo: '/repo', context: CONTEXT, cliDir: '/opt/wizard cli/vendor' });
     assert.equal(prompt, launchCommand({ ...LAUNCH, client, resume: null }).args.at(-1), client);
     const lines = prompt.split('\n');
     assert.equal(lines[0], client === 'claude' ? '/straddle:straddle-plan' : 'Use the straddle-plan skill.');
     assert.equal(lines[1], PROGRAM_LINE);
     assert.equal(lines.filter((l) => l.includes('Straddle Wizard program:')).length, 1);
     assert.match(steps.join('\n'), /Open \/repo in .+ with the Straddle plugin installed/);
+    assert.match(steps[0]!, / Start it from a shell where you ran `export PATH='\/opt\/wizard cli\/vendor':\$PATH`, so the skills' `straddle` commands use the Wizard's Straddle CLI\.$/);
     assert.match(steps.at(-1)!, /`wizard resume`/);
   }
 });
@@ -43,7 +44,7 @@ test('Manual never starts a client process', () => {
   const saved = process.env.PATH;
   process.env.PATH = fake.env.PATH;
   try {
-    for (const client of CLIENT_NAMES) manualHandoff({ client, skill: 'straddle-setup', repo: '/repo', context: CONTEXT });
+    for (const client of CLIENT_NAMES) manualHandoff({ client, skill: 'straddle-setup', repo: '/repo', context: CONTEXT, cliDir: null });
   } finally {
     process.env.PATH = saved;
   }
