@@ -372,7 +372,6 @@ export function codexMcpOff(repo: string, env: NodeJS.ProcessEnv): { ok: true; c
   return { ok: true, config };
 }
 
-// The review process's Claude Code settings file. `hooks` are the Wizard's progress hooks, as in a program session.
 export function reviewSettings(hooks: Record<string, unknown>): Record<string, unknown> {
   return {
     permissions: {

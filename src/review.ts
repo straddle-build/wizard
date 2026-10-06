@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Bundle } from './bundle.ts';
+import { globPattern } from './discovery.ts';
 import { field, parseJson, text } from './json.ts';
 import { WIZARD_DIR } from './receipt.ts';
 
@@ -17,6 +18,7 @@ const REPORT_LIMIT = 64 * 1024;
 export const hasReview = (bundle: Bundle | null): boolean => bundle !== null && Object.hasOwn(bundle.skills, REVIEW_SKILL);
 
 const script = (bundle: Bundle) => join(bundle.path, 'skills', REVIEW_SKILL, 'scripts', 'session-state');
+const EXCLUDE_FILE = 'payment-review-exclude';
 // Raw Git: no fsmonitor, pager or hook runs (`update-ref` runs the reference-transaction hook otherwise).
 const git = (repo: string, args: string[]) => execFileSync('git', ['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 // session-state calls `git commit-tree`, which needs an identity the repository may not configure.
@@ -29,6 +31,34 @@ const failure = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error);
   return (stderr || message).replace(/^session-state: /, '');
 };
+
+// The developer's `--exclude` globs, as the patterns discovery matches, for the session-state script to apply with the
+// same sensitive-name rules discovery uses. Written before every snapshot and compare, so the script never reads
+// excluded bytes and a resume with new globs drops them from both sides of the comparison. Like `saveReport`, it
+// never writes through a symlink.
+function writeExcludes(repo: string, exclude: readonly string[]): string | null {
+  if (exclude.some((g) => /[\r\n]/.test(g))) return 'an --exclude path holds a line break';
+  const dir = join(repo, WIZARD_DIR);
+  mkdirSync(dir, { recursive: true });
+  if (!lstatSync(dir).isDirectory()) return `${WIZARD_DIR} isn't a directory`;
+  const dest = join(dir, EXCLUDE_FILE);
+  const tmp = `${dest}.${process.pid}.tmp`;
+  try {
+    const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try { writeFileSync(fd, exclude.map((g) => `${globPattern(g)}\n`).join('')); } finally { closeSync(fd); }
+    renameSync(tmp, dest);
+    return null;
+  } catch (error) {
+    rmSync(tmp, { force: true });
+    return failure(error);
+  }
+}
+
+function sessionState(repo: string, bundle: Bundle, args: string[], env: NodeJS.ProcessEnv, exclude: readonly string[]): string {
+  const problem = writeExcludes(repo, exclude);
+  if (problem) throw new Error(problem);
+  return execFileSync('bash', [script(bundle), ...args], { cwd: repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
 
 export interface Baseline { head: string | null; snapshot: string; startedAt: string }
 export type BaselineResult = { ok: true; baseline: Baseline; created: boolean } | { ok: false; reason: string };
@@ -52,7 +82,7 @@ function readBaseline(repo: string): Baseline | null {
 // run's ref and keeps the baseline as it is; when that check fails it fails closed and changes nothing. Only the run's
 // first session (`fresh`) may remove another run's baseline, when its own snapshot can't be taken, so no review scopes
 // a new run against an earlier run's start.
-export function ensureBaseline(repo: string, runId: string, bundle: Bundle, env: NodeJS.ProcessEnv, fresh: boolean): BaselineResult {
+export function ensureBaseline(repo: string, runId: string, bundle: Bundle, env: NodeJS.ProcessEnv, exclude: readonly string[], fresh: boolean): BaselineResult {
   const path = join(repo, WIZARD_DIR, BASELINE);
   const ref = runRef(runId);
   let kept: string | null = null;
@@ -65,7 +95,7 @@ export function ensureBaseline(repo: string, runId: string, bundle: Bundle, env:
   try {
     const head = (() => { try { return git(repo, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']); } catch { return null; } })();
     const startedAt = new Date().toISOString();
-    const out = execFileSync('bash', [script(bundle), 'snapshot'], { cwd: repo, env: { ...env, ...IDENTITY }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const out = sessionState(repo, bundle, ['snapshot'], { ...env, ...IDENTITY }, exclude).trim();
     if (!/^[0-9a-f]{40,64}$/.test(out)) return { ok: false, reason: 'the snapshot script printed no commit' };
     // An empty old value: the ref must not exist yet, so a run's baseline is never moved.
     git(repo, ['update-ref', '-m', 'straddle wizard session baseline', ref, out, '']);
@@ -85,9 +115,9 @@ export function currentBaseline(repo: string, runId: string): Baseline | null {
 
 // The code hash of the files on disk against the run's snapshot, by the skill's own script, or the reason it can't be
 // computed (a nested repository, an unsupported path, an unreadable file).
-export function codeHash(repo: string, bundle: Bundle, snapshot: string, env: NodeJS.ProcessEnv): { ok: true; hash: string } | { ok: false; reason: string } {
+export function codeHash(repo: string, bundle: Bundle, snapshot: string, env: NodeJS.ProcessEnv, exclude: readonly string[]): { ok: true; hash: string } | { ok: false; reason: string } {
   try {
-    const first = execFileSync('bash', [script(bundle), 'compare', snapshot], { cwd: repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n')[0] ?? '';
+    const first = sessionState(repo, bundle, ['compare', snapshot], env, exclude).split('\n')[0] ?? '';
     const m = /^code-hash ([0-9a-f]{64})$/.exec(first);
     return m ? { ok: true, hash: m[1]! } : { ok: false, reason: 'the compare script printed no code hash' };
   } catch (error) {
@@ -95,12 +125,11 @@ export function codeHash(repo: string, bundle: Bundle, snapshot: string, env: No
   }
 }
 
-// The review's scope, computed here so the reviewer needs no shell: `changes.txt` is the compare script's output,
-// `plan-hash.txt` the integration plan's approval hash (or `none`), and `start/<path>` holds each modified or deleted file's start bytes, read raw from the snapshot (`git cat-file blob` runs
-// no filter or textconv). The directory sits under `.straddle-wizard/`, which the code hash leaves out.
-export function writeReviewScope(repo: string, bundle: Bundle, snapshot: string, planHash: string, env: NodeJS.ProcessEnv, dir: string): { ok: true; hash: string } | { ok: false; reason: string } {
+// Computed here so the reviewer needs no shell. `git cat-file blob` reads the start bytes raw, with no filter or
+// textconv, and the directory sits under `.straddle-wizard/`, which the code hash leaves out.
+export function writeReviewScope(repo: string, bundle: Bundle, snapshot: string, planHash: string, env: NodeJS.ProcessEnv, exclude: readonly string[], dir: string): { ok: true; hash: string } | { ok: false; reason: string } {
   try {
-    const out = execFileSync('bash', [script(bundle), 'compare', snapshot], { cwd: repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = sessionState(repo, bundle, ['compare', snapshot], env, exclude);
     const [first = '', ...changes] = out.split('\n');
     const m = /^code-hash ([0-9a-f]{64})$/.exec(first);
     if (!m) return { ok: false, reason: 'the compare script printed no code hash' };

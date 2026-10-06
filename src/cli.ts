@@ -12,6 +12,7 @@ import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, savedHan
 import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
 import { openFile, writeLog } from './log.ts';
 import { WIZARD_DIR, loadReceipt, type Mode } from './receipt.ts';
+import { REVIEW_SKILL } from './review.ts';
 import { Prompter } from './ui.ts';
 import { bundledCli, cliSummary } from './straddle-cli.ts';
 import { WIZARD_VERSION } from './version.ts';
@@ -192,7 +193,7 @@ async function skillList(): Promise<number> {
   say(`Skills in the ${bundleLabel(bundle)}:`);
   for (const s of skills) {
     const summary = s.description.split('. ')[0] ?? '';
-    say(`  ${s.name.padEnd(26)}${s.version.padEnd(8)}${s.runnable ? `wizard skill run ${s.name}` : 'shared rules the other skills read'}`);
+    say(`  ${s.name.padEnd(26)}${s.version.padEnd(8)}${s.runnable ? `wizard skill run ${s.name}` : s.name === REVIEW_SKILL ? 'the Wizard starts it after Test' : 'shared rules the other skills read'}`);
     say(`  ${''.padEnd(34)}${summary}`);
   }
   return 0;

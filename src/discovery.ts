@@ -34,16 +34,22 @@ function sensitiveReason(name: string): ExclusionReason | null {
   return null;
 }
 
-function globToRegExp(glob: string): RegExp {
+// The pattern is also a valid POSIX extended regular expression, so the payment review's session-state script matches
+// the same `--exclude` globs (`writeExcludes` in review.ts).
+export function globPattern(glob: string): string {
   const body = glob
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
     .replace(/\*\*\//g, '\u0000')
     .replace(/\*\*/g, '\u0001')
     .replace(/\*/g, '[^/]*')
     .replace(/\?/g, '[^/]')
-    .replace(/\u0000/g, '(?:.*/)?')
+    .replace(/\u0000/g, '(.*/)?')
     .replace(/\u0001/g, '.*');
-  return new RegExp(`^${body}$`);
+  return `^${body}$`;
+}
+
+function globToRegExp(glob: string): RegExp {
+  return new RegExp(globPattern(glob));
 }
 
 // `hidden`: excluded directories, and symlinks that may lead to one or to source, whose contents the walk never saw.

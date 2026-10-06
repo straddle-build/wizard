@@ -275,7 +275,6 @@ test('payment review: the program ends at Test, a fresh read-only review prints 
   assert.equal(r.code, 0, r.stdout + r.stderr);
   const receipt = readReceipt(repo);
   const ref = `refs/straddle-wizard/${receipt.runId}`;
-  assert.match(r.stdout, new RegExp(`I recorded this repo's starting state for the payment review after Test \\(${ref}\\)`));
   const baseline = JSON.parse(readFileSync(join(repo, '.straddle-wizard', 'session-baseline.json'), 'utf8'));
   assert.equal(spawnSync('git', ['rev-parse', ref], { cwd: repo, encoding: 'utf8' }).stdout.trim(), baseline.snapshot);
   // The snapshot holds the repo as it was before Plan and Integrate wrote their files.

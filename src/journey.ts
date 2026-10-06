@@ -355,7 +355,7 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
   // can still keep it out of Claude Code.
   receipt.pluginLoad = !manual && name !== 'codex' ? 'session' : null;
   let repaired = false;
-  for (; ;) {
+  for (;;) {
     const client = inspectClient(name, opts.env, bundle);
     printReadiness(io, receipt, bundle, client, opts.env);
     // Manual into an agent I can't see or install into: the handoff steps say to install the plugin there.
@@ -649,21 +649,19 @@ function reviewApplies(receipt: Receipt, skills: readonly SkillName[], bundle: B
   return hasReview(bundle) && client && skills.includes('straddle-go-live') && (skills.includes('straddle-integrate') || skills.includes('straddle-migrate'));
 }
 
-// The run's start state, once, before its first session changes anything.
 function recordBaseline(io: Prompter, receipt: Receipt, skills: readonly SkillName[], bundle: Bundle, env: NodeJS.ProcessEnv): void {
   if (!hasReview(bundle) || !skills.includes('straddle-go-live') || !(skills.includes('straddle-integrate') || skills.includes('straddle-migrate'))) return;
-  const result = ensureBaseline(receipt.repo, receipt.runId, bundle, env, receipt.sessions.length === 0);
-  if (result.ok && result.created) io.say(`  I recorded this repo's starting state for the payment review after Test (${runRef(receipt.runId)}).`);
+  const result = ensureBaseline(receipt.repo, receipt.runId, bundle, env, receipt.exclude, receipt.sessions.length === 0);
+  if (result.ok && result.created) io.say(`  I recorded this repo's starting state (${runRef(receipt.runId)}) for ${reviewApplies(receipt, skills, bundle) ? 'the payment review after Test' : "Go Live's payment review row; no review runs in this client"}.`);
   else if (!result.ok) io.say(`  The payment review can't scope this repo: ${result.reason}. Go Live will list that as a warning.`);
 }
 
-// A saved review counts for Go Live only while its Plan hash and Code hash match the plan and the code now.
 function reviewCurrent(receipt: Receipt, bundle: Bundle, env: NodeJS.ProcessEnv): boolean {
   const baseline = currentBaseline(receipt.repo, receipt.runId);
   const report = readRepoFile(receipt.repo, REVIEW_REPORT, receipt.exclude);
   const plan = readRepoFile(receipt.repo, INTEGRATION_PLAN, receipt.exclude);
   if (!baseline || report.kind !== 'read' || plan.kind !== 'read') return false;
-  const now = codeHash(receipt.repo, bundle, baseline.snapshot, env);
+  const now = codeHash(receipt.repo, bundle, baseline.snapshot, env, receipt.exclude);
   const status = header(report.text, 'Status');
   return now.ok && (status === 'clean' || status === 'findings') && header(report.text, 'Code hash') === now.hash && header(report.text, 'Plan hash') === approvalHash(plan.text);
 }
@@ -681,7 +679,7 @@ async function runReview(io: Prompter, receipt: Receipt, ready: Ready, opts: Jou
   mkdirSync(runDir, { recursive: true });
   const scope = `${WIZARD_DIR}/runs/${receipt.runId}/review-scope`;
   const planFile = readRepoFile(repo, INTEGRATION_PLAN, receipt.exclude);
-  const before = writeReviewScope(repo, ready.bundle, baseline.snapshot, planFile.kind === 'read' ? approvalHash(planFile.text) : 'none', opts.env, join(repo, scope));
+  const before = writeReviewScope(repo, ready.bundle, baseline.snapshot, planFile.kind === 'read' ? approvalHash(planFile.text) : 'none', opts.env, receipt.exclude, join(repo, scope));
   if (!before.ok) return { ok: false, reason: before.reason };
   const eventsFile = eventsPath(repo);
   const settingsPath = join(runDir, `review-${receipt.sessions.length + 1}.settings.json`);
@@ -743,7 +741,7 @@ async function runReview(io: Prompter, receipt: Receipt, ready: Ready, opts: Jou
   const transcripts = [...new Set(events.flatMap((e) => (e.kind === 'session-start' && e.transcript ? [e.transcript] : [])))];
   const report = parseReport(rollout ? rollout.text.join('\n') : transcripts.map(transcriptAssistantText).join('\n'));
   if (!report.ok) return { ok: false, reason: report.reason };
-  const after = codeHash(repo, ready.bundle, baseline.snapshot, opts.env);
+  const after = codeHash(repo, ready.bundle, baseline.snapshot, opts.env, receipt.exclude);
   if (!after.ok || after.hash !== before.hash) return { ok: false, reason: 'the code changed while the payment review ran' };
   if (report.codeHash !== null ? report.codeHash !== before.hash : report.status !== 'incomplete') return { ok: false, reason: "the report's Code hash isn't the code's" };
   // The same plan binding Go Live and a saved report need: a review of another plan never counts.
@@ -789,7 +787,6 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
     }
     if (!review.ok) io.say(`  The payment review is incomplete: ${review.reason}. It's advisory, so Go Live runs and lists it as a warning.`);
   }
-  // With the review, the program's first session ends at Test; Go Live resumes it after the review.
   const split = reviewed && run.includes('straddle-go-live') && begin !== 'straddle-go-live';
   const leg = split ? run.filter((s) => s !== 'straddle-go-live') : run;
 
@@ -1333,7 +1330,7 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
     providers: facts.providers,
     bankLink: facts.bankLink,
   };
-  for (; ;) {
+  for (;;) {
     printWelcome(io, facts, context, program);
     const pick = await io.choose('Ready?', [
       { label: 'Continue', value: 'continue' as const },

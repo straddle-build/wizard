@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { findBundle } from '../src/journey.ts';
@@ -74,22 +74,54 @@ test('one baseline per Wizard run: taken once, kept under the run ref across res
   writeFileSync(join(repo, '.git', 'hooks', 'reference-transaction'), `#!/bin/sh\ntouch '${sentinel}'\n`);
   chmodSync(join(repo, '.git', 'hooks', 'reference-transaction'), 0o755);
   const run = '6f1c2a3b-0000-4000-8000-000000000001';
-  const first = ensureBaseline(repo, run, bundle, env, true);
+  const first = ensureBaseline(repo, run, bundle, env, [], true);
   assert.ok(first.ok && first.created, JSON.stringify(first));
   const saved = readFileSync(join(repo, '.straddle-wizard', 'session-baseline.json'), 'utf8');
   assert.equal(JSON.parse(saved).snapshot, execFileSync('git', ['rev-parse', runRef(run)], { cwd: repo, encoding: 'utf8' }).trim());
   assert.equal(JSON.parse(saved).head, null);
   assert.equal(existsSync(sentinel), false, 'the repository hook ran');
-  const start = codeHash(repo, bundle, first.baseline.snapshot, env);
+  const start = codeHash(repo, bundle, first.baseline.snapshot, env, []);
   // A session edit after the baseline: the resume keeps the start, so the edit stays attributed to the session.
   writeFileSync(join(repo, 'src', 'app.ts'), 'export const app = 2;\n');
-  const again = ensureBaseline(repo, run, bundle, env, false);
+  const again = ensureBaseline(repo, run, bundle, env, [], false);
   assert.deepEqual(again, { ok: true, baseline: first.baseline, created: false });
   assert.equal(readFileSync(join(repo, '.straddle-wizard', 'session-baseline.json'), 'utf8'), saved);
-  const now = codeHash(repo, bundle, first.baseline.snapshot, env);
+  const now = codeHash(repo, bundle, first.baseline.snapshot, env, []);
   assert.ok(start.ok && now.ok && start.hash !== now.hash);
-  const next = ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000002', bundle, env, true);
+  const next = ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000002', bundle, env, [], true);
   assert.ok(next.ok && next.created && next.baseline.snapshot !== first.baseline.snapshot);
+});
+
+test('sensitive and --exclude paths never enter the snapshot or the review scope, at start or after a resume adds a glob', () => {
+  const check = findBundle({ override: SKILLS_SOURCE, env: process.env });
+  assert.ok(check.ok, check.ok ? '' : check.reason);
+  const { repo, env } = gitRepo('review-exclusions');
+  const marker = 'zqsentinel-not-a-secret';
+  const sensitive = ['.npmrc', 'id_rsa', 'certs/certificate.CRT', 'deploy/.ssh/config', 'app/Secrets.json', 'infra/prod.tfvars'];
+  const globbed = ['fixtures/[draft].ts', 'notes/a.md', 'deep/x/notes/b.md'];
+  const later = 'src/legacy.ts';
+  for (const rel of [...sensitive, ...globbed, later]) {
+    mkdirSync(join(repo, rel, '..'), { recursive: true });
+    writeFileSync(join(repo, rel), `${marker}\n`);
+  }
+  // `*` stays within one directory, `**/` matches zero or more, and brackets are literal.
+  const exclude = ['fixtures/[draft].ts', '**/notes/*.md'];
+  const run = '6f1c2a3b-0000-4000-8000-000000000007';
+  const first = ensureBaseline(repo, run, check.bundle, env, exclude, true);
+  assert.ok(first.ok, JSON.stringify(first));
+  const stored = execFileSync('git', ['ls-tree', '-r', '--name-only', first.baseline.snapshot], { cwd: repo, encoding: 'utf8' }).trim().split('\n');
+  assert.deepEqual(stored.sort(), ['src/app.ts', later].sort());
+  for (const rel of [...sensitive, ...globbed, later, 'src/app.ts']) writeFileSync(join(repo, rel), `${marker} changed\n`);
+  // A resume adds a glob for a file already in the snapshot: its old bytes never reach the scope.
+  const resumed = [...exclude, 'src/legacy.ts'];
+  const dir = join(repo, '.straddle-wizard', 'runs', run, 'review-scope');
+  const scope = writeReviewScope(repo, check.bundle, first.baseline.snapshot, 'none', env, resumed, dir);
+  assert.ok(scope.ok, JSON.stringify(scope));
+  assert.deepEqual(readFileSync(join(dir, 'changes.txt'), 'utf8').split('\n').slice(1), ['modified src/app.ts', '']);
+  assert.deepEqual(readdirSync(join(dir, 'start'), { recursive: true }).sort(), ['src', 'src/app.ts']);
+  const now = codeHash(repo, check.bundle, first.baseline.snapshot, env, resumed);
+  assert.ok(now.ok && scope.ok && now.hash === scope.hash);
+  assert.deepEqual(writeReviewScope(repo, check.bundle, first.baseline.snapshot, 'none', env, ['a\nb'], dir), { ok: false, reason: 'an --exclude path holds a line break' });
 });
 
 test('the review scope is written before launch from raw bytes: a configured clean filter, textconv and hook never run', () => {
@@ -97,7 +129,7 @@ test('the review scope is written before launch from raw bytes: a configured cle
   assert.ok(check.ok, check.ok ? '' : check.reason);
   const { repo, env } = gitRepo('review-scope');
   const run = '6f1c2a3b-0000-4000-8000-000000000003';
-  const first = ensureBaseline(repo, run, check.bundle, env, true);
+  const first = ensureBaseline(repo, run, check.bundle, env, [], true);
   assert.ok(first.ok);
   writeFileSync(join(repo, '.gitattributes'), '*.ts filter=trap diff=trap\n');
   for (const [key, value] of [['filter.trap.clean', 'touch ran-clean; cat'], ['filter.trap.smudge', 'touch ran-smudge; cat'], ['diff.trap.textconv', 'touch ran-textconv; cat'], ['core.hooksPath', join(repo, '.git', 'trap-hooks')]] as const) execFileSync('git', ['config', key, value], { cwd: repo });
@@ -106,8 +138,8 @@ test('the review scope is written before launch from raw bytes: a configured cle
   chmodSync(join(repo, '.git', 'trap-hooks', 'post-index-change'), 0o755);
   writeFileSync(join(repo, 'src', 'app.ts'), 'export const app = 2;\n');
   const dir = join(repo, '.straddle-wizard', 'runs', run, 'review-scope');
-  const scope = writeReviewScope(repo, check.bundle, first.baseline.snapshot, 'none', env, dir);
-  const now = codeHash(repo, check.bundle, first.baseline.snapshot, env);
+  const scope = writeReviewScope(repo, check.bundle, first.baseline.snapshot, 'none', env, [], dir);
+  const now = codeHash(repo, check.bundle, first.baseline.snapshot, env, []);
   assert.ok(scope.ok && now.ok && scope.hash === now.hash, JSON.stringify(scope));
   assert.deepEqual(readFileSync(join(dir, 'changes.txt'), 'utf8').split('\n').slice(1), ['added .gitattributes', 'modified src/app.ts', '']);
   assert.equal(readFileSync(join(dir, 'start', 'src', 'app.ts'), 'utf8'), 'export const app = 1;\n');
@@ -124,17 +156,17 @@ test('a resume never erases scope: a missing or mismatched baseline file, or a r
   const { repo, env } = gitRepo('review-resume');
   const path = join(repo, '.straddle-wizard', 'session-baseline.json');
   const run = '6f1c2a3b-0000-4000-8000-000000000005';
-  const first = ensureBaseline(repo, run, check.bundle, env, true);
+  const first = ensureBaseline(repo, run, check.bundle, env, [], true);
   assert.ok(first.ok);
   const saved = readFileSync(path, 'utf8');
   // The run's file was replaced by hand: the resume refuses and leaves both the file and the run's ref.
   writeFileSync(path, saved.replace(first.baseline.snapshot, 'f'.repeat(40)));
-  assert.deepEqual(ensureBaseline(repo, run, check.bundle, env, false), { ok: false, reason: `the baseline file no longer matches refs/straddle-wizard/${run}` });
+  assert.deepEqual(ensureBaseline(repo, run, check.bundle, env, [], false), { ok: false, reason: `the baseline file no longer matches refs/straddle-wizard/${run}` });
   assert.equal(readFileSync(path, 'utf8'), saved.replace(first.baseline.snapshot, 'f'.repeat(40)));
   assert.equal(execFileSync('git', ['rev-parse', `refs/straddle-wizard/${run}`], { cwd: repo, encoding: 'utf8' }).trim(), first.baseline.snapshot);
   writeFileSync(path, saved);
   // A resumed run that never got a baseline takes none now (its code already changed) and keeps the file it found.
-  assert.deepEqual(ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000006', check.bundle, env, false), { ok: false, reason: 'this run has no baseline from its first session' });
+  assert.deepEqual(ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000006', check.bundle, env, [], false), { ok: false, reason: 'this run has no baseline from its first session' });
   assert.equal(readFileSync(path, 'utf8'), saved);
 });
 
@@ -142,12 +174,12 @@ test('a new run in a repository the review cannot scope gets no baseline, and th
   const check = findBundle({ override: SKILLS_SOURCE, env: process.env });
   assert.ok(check.ok);
   const { repo, env } = gitRepo('review-nested');
-  assert.ok(ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000003', check.bundle, env, true).ok);
+  assert.ok(ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000003', check.bundle, env, [], true).ok);
   execFileSync('git', ['init', '-q', join(repo, 'vendor', 'pay')], { env });
   writeFileSync(join(repo, 'vendor', 'pay', 'x.ts'), 'x\n');
   // The earlier run, resumed, keeps its baseline: its ref answers without a new snapshot.
-  assert.ok(ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000003', check.bundle, env, false).ok);
-  const r = ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000004', check.bundle, env, true);
+  assert.ok(ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000003', check.bundle, env, [], false).ok);
+  const r = ensureBaseline(repo, '6f1c2a3b-0000-4000-8000-000000000004', check.bundle, env, [], true);
   assert.deepEqual(r, { ok: false, reason: "submodule or nested repository at vendor/pay/ isn't supported" });
   assert.equal(existsSync(join(repo, '.straddle-wizard', 'session-baseline.json')), false);
   assert.equal(execFileSync('git', ['for-each-ref', '--format=%(refname)', 'refs/straddle-wizard/'], { cwd: repo, encoding: 'utf8' }).trim(), 'refs/straddle-wizard/6f1c2a3b-0000-4000-8000-000000000003');

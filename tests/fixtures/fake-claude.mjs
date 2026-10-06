@@ -83,7 +83,6 @@ function hook(event, payload) {
 
 // What Claude Code shows in its status line: the settings' command, given the session JSON on stdin.
 function statusLine() {
-  // The payment review's settings carry no status line.
   if (!settings.statusLine) return;
   const r = spawnSync('/bin/sh', ['-c', settings.statusLine.command], { input: JSON.stringify({ session_id: sessionId, transcript_path: transcript, cwd: process.cwd() }), encoding: 'utf8' });
   appendFileSync(join(stateDir, 'statusline.log'), r.stdout);
