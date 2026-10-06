@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadLocalBundle } from '../src/bundle.ts';
-import { CLIENT_NAMES, inspectClient, launchCommand, manualHandoff } from '../src/clients.ts';
-import { SKILLS_SOURCE, fakeClients } from './helpers.ts';
+import { CLIENT_NAMES, codexMcpOff, inspectClient, launchCommand, manualHandoff, reviewCommand } from '../src/clients.ts';
+import { SKILLS_SOURCE, fakeClients, tempDir } from './helpers.ts';
 
 const PROGRAM_LINE = 'Straddle Wizard program: straddle-plan → straddle-integrate. Start at straddle-plan.';
 const CONTEXT = `${PROGRAM_LINE}\nRepository context confirmed in the Straddle Wizard: language TypeScript (detected); framework Next.js (detected).`;
@@ -79,4 +80,27 @@ test('Cursor: login from `cursor-agent status`, a local plugin copy checked agai
   assert.deepEqual(bare.plugin, { state: 'unverified', version: null, verified: false });
   // An empty Cursor home: cursor-agent being installed is no evidence of a Straddle server.
   assert.match(bare.apiMcp, /^not detected: no straddle-api/);
+});
+
+// Codex's own config reader decides which MCP servers a session starts, so this runs the installed Codex against a
+// throwaway CODEX_HOME. Without Codex here there is nothing native to check.
+const codexHere = spawnSync('codex', ['--version'], { encoding: 'utf8' }).status === 0;
+test('the Codex review turns off every configured MCP server for its process only, as Codex itself reports, and leaves the config file as it was', { skip: !codexHere && 'codex is not installed' }, () => {
+  const home = tempDir('codex-home');
+  const repo = tempDir('codex-repo');
+  const config = '[mcp_servers.review_sentinel]\ncommand = "/usr/bin/false"\nenabled = true\n\n[mcp_servers."dotted.name"]\nurl = "https://example.invalid/mcp"\n';
+  writeFileSync(join(home, 'config.toml'), config);
+  const env = { ...process.env, CODEX_HOME: home };
+  const listed = (args: string[]) => (JSON.parse(spawnSync('codex', [...args, 'mcp', 'list', '--json'], { cwd: repo, env, encoding: 'utf8' }).stdout) as Array<{ name: string; enabled: boolean }>).map((s) => [s.name, s.enabled]);
+  // The negative control: an empty override is merged and turns nothing off.
+  assert.deepEqual(listed(['-c', 'mcp_servers={}']), [['dotted.name', true], ['review_sentinel', true]]);
+  const off = codexMcpOff(repo, env);
+  assert.ok(off.ok, off.ok ? '' : off.reason);
+  assert.deepEqual(listed(off.config), [['dotted.name', false], ['review_sentinel', false]]);
+  const launch = reviewCommand({ client: 'codex', repo, settingsPath: '', pluginDir: '', line: 'x', codexConfig: off.config });
+  assert.deepEqual(launch?.args.slice(0, -3), ['--sandbox', 'read-only', '--ask-for-approval', 'never', '-c', 'web_search="disabled"', '--disable', 'apps', '--disable', 'hooks', ...off.config]);
+  assert.equal(readFileSync(join(home, 'config.toml'), 'utf8'), config);
+  // A config Codex can't read means no review rather than a review with servers on.
+  writeFileSync(join(home, 'config.toml'), '[mcp_servers.broken]\nenabled = true\n');
+  assert.deepEqual(codexMcpOff(repo, env), { ok: false, reason: "Codex couldn't list its MCP servers, so I can't turn them off for the review" });
 });

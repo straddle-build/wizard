@@ -21,7 +21,7 @@ test('downloads the newest release in the compatible range, skipping prereleases
   const r = await skillList([{ tag: 'v0.1.0' }, { tag: 'v0.2.0' }, { tag: 'v0.1.5', prerelease: true }, { tag: 'v0.1.2' }, { tag: 'v0.1.9-rc.1' }]);
 
   assert.equal(r.code, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /Skills in the plugin release v0\.1\.2 of straddle-build\/skills \(9 skills, verified against its published SHA256SUMS\):/);
+  assert.match(r.stdout, /Skills in the plugin release v0\.1\.2 of straddle-build\/skills \(\d+ skills, verified against its published SHA256SUMS\):/);
   assert.deepEqual(r.requests.filter((path) => path.endsWith('.zip')), ['/v0.1.2/straddle-plugin-0.1.2.zip']);
   const record = JSON.parse(readFileSync(join(r.cache, 'straddle-wizard', 'release.json'), 'utf8'));
   assert.equal(record.version, '0.1.2');

@@ -1,7 +1,7 @@
 // Guided journey through the real CLI, with Claude Code replaced by a scripted process (tests/fixtures/fake-claude.mjs).
 // This is simulated-adapter evidence. Native client proof is recorded separately.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -10,7 +10,7 @@ import { CLIENT_LABEL, launchCommand } from '../src/clients.ts';
 import { start, type JourneyOptions } from '../src/journey.ts';
 import { approvalHash } from '../src/progress.ts';
 import { Prompter } from '../src/ui.ts';
-import { CURSOR_CHAT, ROOT, SKILLS_SOURCE, fakeClaude, fakeClients, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
+import { BUNDLE_WITHOUT_REVIEW, CURSOR_CHAT, ROOT, SKILLS_SOURCE, fakeClaude, fakeClients, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
 
 const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENVIRONMENT: 'sandbox' };
 const PLAN = '# Straddle integration plan\n\n## Status\n\n- Plan state: Draft\n- Approval: none\n\n## File changes\n\n| File | Change |\n| --- | --- |\n| src/straddle.ts | add client |\n\n## Future Sandbox writes\n\n| Write | Tool |\n| --- | --- |\n| create customer | SDK |\n\n## Verification\n';
@@ -151,7 +151,7 @@ test('first run downloads the newest release after confirmation, verifies it, an
   assert.equal(first.code, 0, first.stdout + first.stderr);
   const release = join(cache, 'straddle-wizard', 'plugin');
   assert.equal(readReceipt(repo).bundle?.path, release);
-  assert.match(first.stdout, /Skill bundle\s+plugin release v0\.1\.0 of straddle-build\/skills \(9 skills, verified against its published SHA256SUMS\)/);
+  assert.match(first.stdout, /Skill bundle\s+plugin release v0\.1\.0 of straddle-build\/skills \(\d+ skills, verified against its published SHA256SUMS\)/);
   assert.equal(JSON.parse(status.stdout).bundle.path, release);
   assert.equal(list.code, 0, list.stdout);
   assert.doesNotMatch(list.stdout, /Download/);
@@ -210,7 +210,7 @@ test('default journey: one agent session walks the whole program, with a live ch
   assert.equal(settings.statusLine?.type, 'command');
   assert.deepEqual(Object.keys(settings.hooks), ['SessionStart', 'SessionEnd', 'Stop', 'PreToolUse', 'PostToolUse']);
   assert.ok(!launch!.includes('--setting-sources'), `the developer's settings load: ${launch}`);
-  assert.equal(launch![launch!.indexOf('--plugin-dir') + 1], SKILLS_SOURCE);
+  assert.equal(launch![launch!.indexOf('--plugin-dir') + 1], BUNDLE_WITHOUT_REVIEW);
 
   // The status line Claude Code showed at the start and after each step.
   assert.deepEqual(statusLines(claude), [
@@ -226,7 +226,7 @@ test('default journey: one agent session walks the whole program, with a live ch
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'completed');
   assert.equal(receipt.client, 'claude');
-  assert.deepEqual([receipt.bundle?.kind, receipt.bundle?.pluginVersion, receipt.bundle?.path], ['local', '0.1.0', SKILLS_SOURCE]);
+  assert.deepEqual([receipt.bundle?.kind, receipt.bundle?.pluginVersion, receipt.bundle?.path], ['local', '0.1.0', BUNDLE_WITHOUT_REVIEW]);
   assert.equal(receipt.sessions.length, 1);
   assert.match(receipt.sessions[0]!.sessionId ?? '', /^[0-9a-f-]{36}$/);
   const events = readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8');
@@ -256,6 +256,169 @@ for (const [name, req, expected] of [
     assert.deepEqual(launchCommand(req), expected);
   });
 }
+
+// The payment review (skills wizard-program.md, Payment review, at the frozen contract the test bundle carries):
+// the run's start state is taken once before any session edit; the program's session ends at Test; a fresh read-only
+// review session prints its report, which the Wizard checks and saves; Go Live then resumes the original session.
+const REVIEW_BEGIN = 'STRADDLE_REPORT_BEGIN {"skill":"straddle-payment-review","file":"straddle-payment-review.md"}';
+const REVIEW_END = 'STRADDLE_REPORT_END {"skill":"straddle-payment-review"}';
+const REVIEW_REPORT = `# Straddle payment review\n\nStatus: clean\nPlan hash: ${PLAN_HASH}\nCode hash: {{CODE_HASH}}\nSnapshot: s, started t\nSession files reviewed: 2\n\n## Findings\n\nNone.`;
+const REVIEWED = { ...DEFAULT_SESSIONS, 'straddle-payment-review': { steps: ['01-scope', '02-review', '03-report'], text: `${REVIEW_BEGIN}\n${REVIEW_REPORT}\n${REVIEW_END}\nSTRADDLE_HANDOFF {"skill":"straddle-payment-review","status":"clean","report":"straddle-payment-review.md: clean"}` } };
+const WITH_REVIEW = { ...CONFIGURED, STRADDLE_WIZARD_BUNDLE: SKILLS_SOURCE };
+
+test('payment review: the program ends at Test, a fresh read-only review prints the report the Wizard saves, and Go Live resumes the original session', async () => {
+  const repo = realpathSync(nextRepo());
+  spawnSync('git', ['init', '-q'], { cwd: repo });
+  const claude = fakeClaude();
+  claude.sessions(REVIEWED);
+  const r = await runWizard([], { cwd: repo, claude, env: WITH_REVIEW, input: [...CHOOSE_CONTEXT, '1', '1', '1'] });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const receipt = readReceipt(repo);
+  const ref = `refs/straddle-wizard/${receipt.runId}`;
+  assert.match(r.stdout, new RegExp(`I recorded this repo's starting state for the payment review after Test \\(${ref}\\)`));
+  const baseline = JSON.parse(readFileSync(join(repo, '.straddle-wizard', 'session-baseline.json'), 'utf8'));
+  assert.equal(spawnSync('git', ['rev-parse', ref], { cwd: repo, encoding: 'utf8' }).stdout.trim(), baseline.snapshot);
+  // The snapshot holds the repo as it was before Plan and Integrate wrote their files.
+  assert.deepEqual(spawnSync('git', ['ls-tree', '-r', '--name-only', baseline.snapshot], { cwd: repo, encoding: 'utf8' }).stdout.trim().split('\n'), ['package.json', 'src/app/page.tsx', 'tsconfig.json']);
+
+  const [program, review, goLive, ...more] = launches(claude);
+  assert.equal(more.length, 0);
+  assert.match(program!.at(-1)!, /Straddle Wizard program: straddle-setup → straddle-plan → straddle-integrate → straddle-test\. Start at straddle-setup\./);
+  assert.ok(!review!.includes('--resume'), 'the review reopened a session');
+  const scope = `.straddle-wizard/runs/${receipt.runId}/review-scope`;
+  assert.equal(review!.at(-1), `/straddle:straddle-payment-review\nStraddle Wizard review: print the report; don't write files.\nStraddle Wizard review scope: ${scope}`);
+  assert.deepEqual(review!.slice(0, 6), ['--restricted', '--strict-mcp-config', '--tools', 'Read,Glob,Grep,Skill', '--add-dir', review![review!.indexOf('--plugin-dir') + 1]]);
+  assert.equal(readFileSync(join(repo, scope, 'plan-hash.txt'), 'utf8'), `${PLAN_HASH}\n`);
+  const settings = JSON.parse(readFileSync(review![review!.indexOf('--settings') + 1]!, 'utf8'));
+  assert.deepEqual(['Bash', 'Write', 'Edit', 'WebFetch'].filter((t) => settings.permissions.deny.includes(t)), ['Bash', 'Write', 'Edit', 'WebFetch']);
+  assert.equal(goLive![goLive!.indexOf('--resume') + 1], receipt.sessions[0]!.sessionId);
+  assert.match(goLive!.at(-1)!, /Straddle Wizard program: straddle-go-live\. Start at straddle-go-live\./);
+
+  const code = spawnSync('bash', [join(SKILLS_SOURCE, 'skills', 'straddle-payment-review', 'scripts', 'session-state'), 'compare', baseline.snapshot], { cwd: repo, encoding: 'utf8' }).stdout.split('\n')[0]!.slice('code-hash '.length);
+  assert.equal(readFileSync(join(repo, 'straddle-payment-review.md'), 'utf8'), `${REVIEW_REPORT.replace('{{CODE_HASH}}', code)}\n`);
+  assert.deepEqual(receipt.sessions.map((s) => [s.role ?? 'program', s.skills.at(-1) ?? null]), [['program', 'straddle-test'], ['review', null], ['program', 'straddle-go-live']]);
+  assert.equal(receipt.state, 'completed');
+});
+
+test('payment review: one Ctrl-C ends the reviewer and its child, saves no report, keeps the original session and start state; resume reviews again and finishes', async () => {
+  const repo = realpathSync(nextRepo());
+  spawnSync('git', ['init', '-q'], { cwd: repo });
+  const claude = fakeClaude();
+  const marker = `zqreview${process.pid}`;
+  claude.sessions({ ...REVIEWED, 'straddle-payment-review': { ...REVIEWED['straddle-payment-review'], hang: marker } });
+  const env = { PATH: [claude.bin, dirname(process.execPath), '/usr/bin', '/bin'].join(':'), HOME: repo, NO_COLOR: '1', STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases', FAKE_CLAUDE_STATE: claude.state, ...WITH_REVIEW };
+  const child = spawn(process.execPath, [join(ROOT, 'src', 'cli.ts')], { cwd: repo, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stdout = '';
+  // The reviewer is working (it printed so, and its marked child runs) when the developer presses Ctrl-C once.
+  const working = Promise.withResolvers<void>();
+  child.stdout.on('data', (d) => { stdout += d; if (stdout.includes('fake agent working')) working.resolve(); });
+  child.stdin.end([...CHOOSE_CONTEXT, '1', '1'].join('\n') + '\n');
+  const closed = Promise.withResolvers<number | null>();
+  child.on('close', (code) => { working.resolve(); closed.resolve(code); });
+  await working.promise;
+  assert.equal(spawnSync('pgrep', ['-f', marker]).status, 0, `the review never started:\n${stdout}`);
+  const baseline = readFileSync(join(repo, '.straddle-wizard', 'session-baseline.json'), 'utf8');
+  child.kill('SIGINT');
+  assert.equal(await closed.promise, 1, stdout);
+  assert.match(stdout, /You cancelled the payment review\. I didn't start Go Live\. Run `wizard resume` to review again\./);
+  assert.notEqual(spawnSync('pgrep', ['-f', marker]).status, 0, 'the reviewer\'s child is still running');
+  assert.equal(existsSync(join(repo, 'straddle-payment-review.md')), false);
+  assert.equal(readFileSync(join(repo, '.straddle-wizard', 'session-baseline.json'), 'utf8'), baseline);
+  const cancelled = readReceipt(repo);
+  assert.deepEqual([cancelled.state, cancelled.sessions.map((s) => s.role ?? 'program')], ['blocked', ['program', 'review']]);
+  // Nothing of the review's restrictions reached the developer's own settings.
+  assert.equal(existsSync(join(repo, '.claude')), false);
+
+  claude.sessions(REVIEWED);
+  const resumed = await runWizard(['resume'], { cwd: repo, claude, env: WITH_REVIEW, input: ['1', '1', '1'] });
+  assert.equal(resumed.code, 0, resumed.stdout + resumed.stderr);
+  const all = launches(claude);
+  // A new review session (not the cancelled one), then Go Live on the original program session.
+  assert.equal(all.length, 4);
+  assert.ok(!all[2]!.includes('--resume'));
+  assert.equal(all[3]![all[3]!.indexOf('--resume') + 1], cancelled.sessions[0]!.sessionId);
+  assert.equal(readFileSync(join(repo, '.straddle-wizard', 'session-baseline.json'), 'utf8'), baseline);
+  assert.match(readFileSync(join(repo, 'straddle-payment-review.md'), 'utf8'), /^# Straddle payment review\n\nStatus: clean\n/);
+  assert.equal(readReceipt(repo).state, 'completed');
+});
+
+test('payment review: a printed report that fails its checks is never saved; it is advisory, so Go Live still runs and reports ready', async () => {
+  const repo = realpathSync(nextRepo());
+  spawnSync('git', ['init', '-q'], { cwd: repo });
+  const claude = fakeClaude();
+  // The report claims a code hash that isn't the code's.
+  claude.sessions({ ...REVIEWED, 'straddle-payment-review': { ...REVIEWED['straddle-payment-review'], text: REVIEWED['straddle-payment-review'].text.replace('{{CODE_HASH}}', 'b'.repeat(64)) } });
+  const r = await runWizard([], { cwd: repo, claude, env: WITH_REVIEW, input: [...CHOOSE_CONTEXT, '1', '1', '1'] });
+  assert.match(r.stdout, /The payment review is incomplete: the report's Code hash isn't the code's\. It's advisory, so Go Live runs and lists it as a warning\./);
+  assert.equal(existsSync(join(repo, 'straddle-payment-review.md')), false);
+  assert.equal(launches(claude).length, 3);
+  assert.equal(readReceipt(repo).state, 'completed');
+});
+
+test('payment review: a report for another plan (stale Plan hash) is never saved; Go Live still runs', async () => {
+  const repo = realpathSync(nextRepo());
+  spawnSync('git', ['init', '-q'], { cwd: repo });
+  const claude = fakeClaude();
+  claude.sessions({ ...REVIEWED, 'straddle-payment-review': { ...REVIEWED['straddle-payment-review'], text: REVIEWED['straddle-payment-review'].text.replace(`Plan hash: ${PLAN_HASH}`, `Plan hash: ${'0'.repeat(64)}`) } });
+  const r = await runWizard([], { cwd: repo, claude, env: WITH_REVIEW, input: [...CHOOSE_CONTEXT, '1', '1', '1'] });
+  assert.match(r.stdout, /The payment review is incomplete: the report's Plan hash isn't the current plan's\. It's advisory, so Go Live runs/);
+  assert.equal(existsSync(join(repo, 'straddle-payment-review.md')), false);
+  assert.equal(launches(claude).length, 3);
+  assert.equal(readReceipt(repo).state, 'completed');
+});
+
+test('payment review, Manual with Claude Code: three handoffs, the program through Test, a printed read-only review command whose own transcript is read, then Go Live in the earlier session', async () => {
+  const repo = realpathSync(nextRepo());
+  spawnSync('git', ['init', '-q'], { cwd: repo });
+  const claude = fakeClaude();
+  claude.sessions(REVIEWED);
+  const env = { ...WITH_REVIEW };
+  // Handoff 1: the program through Test; the developer stops here and runs it in their own agent.
+  // The choices, Manual, install the plugin, then stop at "I'm back".
+  const first = await runWizard(['--client', 'claude'], { cwd: repo, claude, env, input: [...CHOICES, '2', '1', '2'] });
+  assert.match(first.stdout, /Straddle Wizard program: straddle-setup → straddle-plan → straddle-integrate → straddle-test\. Start at straddle-setup\./);
+  assert.doesNotMatch(first.stdout, /straddle-go-live/);
+  for (const skill of ['straddle-setup', 'straddle-plan', 'straddle-integrate', 'straddle-test'] as const) for (const w of DEFAULT_SESSIONS[skill].writes) writeFiles(repo, { [w.path]: w.content });
+
+  // Handoff 2: `wizard resume` prints the reviewer's own command; the developer runs it, then comes back.
+  const child = spawn(process.execPath, [join(ROOT, 'src', 'cli.ts'), 'resume'], { cwd: repo, env: { PATH: [claude.bin, dirname(process.execPath), '/usr/bin', '/bin'].join(':'), HOME: repo, NO_COLOR: '1', STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases', FAKE_CLAUDE_STATE: claude.state, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stdout = '';
+  const printed = Promise.withResolvers<void>();
+  child.stdout.on('data', (d) => { stdout += d; if (stdout.includes("I'm back: read the review")) printed.resolve(); });
+  const closed = Promise.withResolvers<number | null>();
+  child.on('close', (code) => { printed.resolve(); closed.resolve(code); });
+  child.stdin.write('1\n');
+  await printed.promise;
+  const settings = readdirSync(join(repo, '.straddle-wizard', 'runs', readReceipt(repo).runId)).find((f) => f.startsWith('review-'));
+  const settingsPath = join(repo, '.straddle-wizard', 'runs', readReceipt(repo).runId, settings!);
+  const prompt = "/straddle:straddle-payment-review\nStraddle Wizard review: print the report; don't write files.";
+  const reviewFlags = ['--restricted', '--strict-mcp-config', '--tools', 'Read,Glob,Grep,Skill', '--add-dir', SKILLS_SOURCE];
+  assert.ok(stdout.includes(`claude ${reviewFlags.join(' ')} --settings ${settingsPath} --plugin-dir ${SKILLS_SOURCE} '`), stdout);
+  spawnSync(join(claude.bin, 'claude'), [...reviewFlags, '--settings', settingsPath, '--plugin-dir', SKILLS_SOURCE, prompt], { cwd: repo, env: { ...process.env, FAKE_CLAUDE_STATE: claude.state } });
+  child.stdin.end('1\n2\n');
+  assert.equal(await closed.promise, 0, stdout);
+
+  // Handoff 3: Go Live, to paste into the earlier session.
+  assert.match(stdout, /Payment review: clean\. I saved it to straddle-payment-review\.md\./);
+  assert.match(stdout, /Paste it into your earlier Claude Code session, the one that ran Test, not the review session\./);
+  assert.match(stdout, /Straddle Wizard program: straddle-go-live\. Start at straddle-go-live\./);
+  assert.match(readFileSync(join(repo, 'straddle-payment-review.md'), 'utf8'), /^# Straddle payment review\n\nStatus: clean\n/);
+  // The Wizard started no agent itself.
+  assert.equal(launches(claude).length, 1);
+});
+
+test('a bundle without the payment review keeps the one-session program: no baseline, no ref, no review', async () => {
+  const old = realpathSync(nextRepo());
+  spawnSync('git', ['init', '-q'], { cwd: old });
+  const oldClaude = fakeClaude();
+  oldClaude.sessions(DEFAULT_SESSIONS);
+  const o = await runWizard([], { cwd: old, claude: oldClaude, env: CONFIGURED, input: [...CHOOSE_CONTEXT, '1'] });
+  assert.equal(o.code, 0, o.stdout + o.stderr);
+  assert.doesNotMatch(o.stdout, /payment review/);
+  assert.equal(launches(oldClaude).length, 1);
+  assert.equal(existsSync(join(old, '.straddle-wizard', 'session-baseline.json')), false);
+  assert.equal(spawnSync('git', ['for-each-ref', 'refs/straddle-wizard/'], { cwd: old, encoding: 'utf8' }).stdout, '');
+});
 
 test('interrupted mid-program: resume reopens the same session at the first unfinished step, from the files', async () => {
   const repo = nextRepo();
@@ -694,10 +857,12 @@ test('an edit the developer denies in the agent is not reported as a change, and
   writeFiles(repo, { 'straddle-integration-plan.md': PLAN });
   const claude = fakeClaude();
   claude.setState({ marketplace: '/b', installed: true });
-  claude.sessions({ 'straddle-integrate': {
-    steps: ['01-begin', '02-sources', '03-code'], denied: ['03-code', 'src/straddle.ts'],
-    writes: [{ path: 'src/straddle.ts', content: 'export {}' }], text: handoff('straddle-integrate', 'blocked'),
-  } });
+  claude.sessions({
+    'straddle-integrate': {
+      steps: ['01-begin', '02-sources', '03-code'], denied: ['03-code', 'src/straddle.ts'],
+      writes: [{ path: 'src/straddle.ts', content: 'export {}' }], text: handoff('straddle-integrate', 'blocked'),
+    }
+  });
 
   const r = await runWizard(['integrate'], { cwd: repo, claude, env: CONFIGURED, input: ['1', '1', '1', '1'] });
 
@@ -849,11 +1014,13 @@ test('resume finishes cancelled upfront choices, applies new exclusions before i
   const repo = nextRepo();
   writeFiles(repo, { 'src/private-data.txt': 'before' });
   const claude = fakeClaude();
-  claude.sessions({ 'straddle-plan': {
-    steps: ['01-decisions'],
-    writes: [{ path: 'straddle-integration-plan.md', content: PLAN }, { path: 'src/private-data.txt', content: 'after' }],
-    text: handoff('straddle-plan', 'draft'),
-  } });
+  claude.sessions({
+    'straddle-plan': {
+      steps: ['01-decisions'],
+      writes: [{ path: 'straddle-integration-plan.md', content: PLAN }, { path: 'src/private-data.txt', content: 'after' }],
+      text: handoff('straddle-plan', 'draft'),
+    }
+  });
 
   // Change > Framework > CUSTOM_FRAMEWORK, Continue, then Cancel at the first product question.
   const first = await runWizard(['plan', '--client', 'claude'], { cwd: repo, claude, env: CONFIGURED, input: ['2', '2', 'CUSTOM_FRAMEWORK', '1', '5'] });
@@ -876,7 +1043,7 @@ test('resume finishes cancelled upfront choices, applies new exclusions before i
     // N2: the skills run only the listed steps (wizard-program.md), so the prompt says "the next listed step".
     "Run the listed steps in order in this one session: after each step's STRADDLE_HANDOFF, continue with the next listed step without waiting for the Wizard; stop and ask whenever a step needs the developer (plan approval, each Sandbox write).",
     'Repository context confirmed in the Straddle Wizard: language TypeScript (detected); framework CUSTOM_FRAMEWORK (corrected by the developer). '
-      + 'Developer choices from the Straddle Wizard: products charges; integration type marketplace; SDK TypeScript; notification path webhook endpoint.',
+    + 'Developer choices from the Straddle Wizard: products charges; integration type marketplace; SDK TypeScript; notification path webhook endpoint.',
   ].join('\n'));
   const receipt = readReceipt(repo);
   assert.deepEqual(receipt.exclude, ['src/private-data.txt']);
@@ -1386,12 +1553,12 @@ test("the report never calls a record a Sandbox ID when the latest run's target 
   const cases = [
     // Test step 06-evidence: an offline synthetic run lists its synthetic upstream records under Server-side resources.
     [`${head('r1')}## Run r1, 2026-10-05\n\n- Status: passed\n- Target: offline synthetic localhost http://127.0.0.1:4010: offline synthetic proof, not live Straddle Sandbox proof\n\n${resources}`,
-      [none, "  straddle-test-evidence.md records an offline synthetic target, so I list none of its records as Sandbox IDs."]],
+    [none, "  straddle-test-evidence.md records an offline synthetic target, so I list none of its records as Sandbox IDs."]],
     // The latest run recorded no resources table; the older run's resource isn't the latest run's.
     [`${head('r2')}## Run r2, 2026-10-05\n\n- Status: blocked\n- Target: Straddle Sandbox\n\n## Run r1, 2026-10-04\n\n- Status: passed\n- Target: Straddle Sandbox\n\n${resources}`, [none]],
     // A live run still lists its IDs.
     [`${head('r1')}## Run r1, 2026-10-05\n\n- Status: passed\n- Target: Straddle Sandbox\n\n${resources}`,
-      ["  The Wizard created or enabled none. Your agent recorded these Sandbox IDs; I didn't verify them:", `    straddle-test-evidence.md: charge ${id} (created)`]],
+    ["  The Wizard created or enabled none. Your agent recorded these Sandbox IDs; I didn't verify them:", `    straddle-test-evidence.md: charge ${id} (created)`]],
   ] as const;
   for (const [evidence, lines] of cases) {
     const repo = nextRepo();
@@ -1458,7 +1625,7 @@ test('Go Live not ready: a terminal shows its report once, without repeating the
   claude.sessions(sessions);
   const repo = nextRepo();
   const env = { ...CONFIGURED, PATH: [claude.bin, dirname(process.execPath), '/usr/bin', '/bin'].join(':'), HOME: repo, FAKE_CLAUDE_STATE: claude.state, STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases' };
-  const screen = await inTerminal((opts) => start('integration', opts), { repo, env, bundlePath: SKILLS_SOURCE, client: undefined, mode: undefined, exclude: [] }, [...CHOOSE_CONTEXT, '1']);
+  const screen = await inTerminal((opts) => start('integration', opts), { repo, env, bundlePath: BUNDLE_WITHOUT_REVIEW, client: undefined, mode: undefined, exclude: [] }, [...CHOOSE_CONTEXT, '1']);
   const piped = nextRepo();
   const pipeClaude = fakeClaude();
   pipeClaude.sessions(sessions);

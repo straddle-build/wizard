@@ -326,6 +326,56 @@ export function launchCommand(req: LaunchRequest): Command {
   return { bin: 'codex', args: [...(req.resume ? ['resume'] : []), '-C', req.repo, ...(req.resume ? [req.resume] : []), prompt] };
 }
 
+// The payment review is the one exception to the rule above, and only for the fresh review process: a new session (no
+// resume) with the review skill alone, read-only through that process's own flags or settings file. The developer's
+// settings files and the original integration session are never touched (skills wizard-program.md, Payment review).
+// Claude Code: `--restricted` ignores the developer's user, project and local settings files (so none of their hooks,
+// allow rules or tools apply) and `--strict-mcp-config` every MCP server; `--tools` leaves only Read, Glob, Grep and
+// Skill, so there is no shell to write or reach the network with (its sandbox still left a temp directory writable);
+// `--add-dir` lets those read tools open the skill's own files in the bundle.
+// The Wizard computes the scope and hashes beforehand (`writeReviewScope`). The model's own provider connection is the
+// client's, not a tool, so it still works. Codex: the read-only sandbox (no writes, no network for commands), which a
+// `--sandbox` flag applies over any profile in the developer's config, with no approval prompt, web search, apps and
+// hooks off, and every MCP server the developer configured disabled for this process only (`codexMcpOff`).
+// Cursor isn't supported: null, so the review stays incomplete.
+export function reviewCommand(req: { client: ClientName; repo: string; settingsPath: string; pluginDir: string; line: string; codexConfig: readonly string[] }): Command | null {
+  const prompt = startPrompt(req.client, 'straddle-payment-review', req.line);
+  if (req.client === 'claude') return { bin: 'claude', args: ['--restricted', '--strict-mcp-config', '--tools', 'Read,Glob,Grep,Skill', '--add-dir', req.pluginDir, '--settings', req.settingsPath, '--plugin-dir', req.pluginDir, prompt] };
+  if (req.client === 'codex') return { bin: 'codex', args: ['--sandbox', 'read-only', '--ask-for-approval', 'never', '-c', 'web_search="disabled"', '--disable', 'apps', '--disable', 'hooks', ...req.codexConfig, '-C', req.repo, prompt] };
+  return null;
+}
+
+// Codex merges a `-c mcp_servers=...` override into the configured servers, so an empty table disables nothing. This
+// asks Codex itself which servers it would start here, sets each one `enabled = false` in one process-only override
+// (an inline table, since a dotted `-c` path can't name a server whose name holds a dot), and asks again with it: any
+// server still enabled, or a listing that fails, means no review. The developer's config files are only read.
+export function codexMcpOff(repo: string, env: NodeJS.ProcessEnv): { ok: true; config: string[] } | { ok: false; reason: string } {
+  const list = (config: string[]) => {
+    const r = spawnSync('codex', [...config, 'mcp', 'list', '--json'], { cwd: repo, env, encoding: 'utf8', timeout: 30_000 });
+    const servers = r.status === 0 ? parseJson(r.stdout) : undefined;
+    return Array.isArray(servers) ? servers.map((s) => ({ name: text(field(s, 'name')), enabled: field(s, 'enabled') })) : null;
+  };
+  const servers = list([]);
+  if (!servers || servers.some((s) => s.name === undefined)) return { ok: false, reason: "Codex couldn't list its MCP servers, so I can't turn them off for the review" };
+  if (!servers.length) return { ok: true, config: [] };
+  const config = ['-c', `mcp_servers={${servers.map((s) => `${JSON.stringify(s.name)}={enabled=false}`).join(',')}}`];
+  const after = list(config);
+  const left = after ? after.filter((s) => s.enabled !== false).map((s) => s.name) : null;
+  if (!left || left.length) return { ok: false, reason: `Codex would still start MCP server${left?.length === 1 ? '' : 's'} ${left?.join(', ') ?? '(unlisted)'} in the review` };
+  return { ok: true, config };
+}
+
+// The review process's Claude Code settings file. `hooks` are the Wizard's progress hooks, as in a program session.
+export function reviewSettings(hooks: Record<string, unknown>): Record<string, unknown> {
+  return {
+    permissions: {
+      deny: ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'mcp__*', 'Agent'],
+      disableBypassPermissionsMode: 'disable',
+    },
+    hooks,
+  };
+}
+
 // Manual mode: what the developer pastes into their own agent and the few steps around it. The Wizard starts no process.
 export interface Handoff {
   // Exactly what Auto would send as the first message.

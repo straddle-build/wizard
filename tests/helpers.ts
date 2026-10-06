@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -96,6 +96,16 @@ export function fakeClients(status: string): { env: { HOME: string; PATH: string
 
 export interface RunResult { code: number | null; stdout: string; stderr: string }
 
+// The program's journeys as they run without the payment review: the skills source minus straddle-payment-review,
+// so they test the same flow whatever skills release the source is. Review journeys pass
+// STRADDLE_WIZARD_BUNDLE: SKILLS_SOURCE, which must carry the review.
+export const BUNDLE_WITHOUT_REVIEW = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'wizard-bundle-no-review-'));
+  cpSync(SKILLS_SOURCE, dir, { recursive: true, filter: (src) => !src.includes('/.git') && !src.includes('/node_modules') });
+  rmSync(join(dir, 'skills', 'straddle-payment-review'), { recursive: true, force: true });
+  return realpathSync(dir);
+})();
+
 // `cli`: the Wizard to run, by default this checkout's.
 export function runWizard(args: string[], opts: { cwd: string; input?: string[]; env?: Record<string, string>; claude?: FakeClaude; cli?: string }): Promise<RunResult> {
   const path = [opts.claude?.bin, dirname(process.execPath), '/usr/bin', '/bin'].filter(Boolean).join(':');
@@ -103,7 +113,7 @@ export function runWizard(args: string[], opts: { cwd: string; input?: string[];
     PATH: path,
     HOME: opts.cwd,
     NO_COLOR: '1',
-    STRADDLE_WIZARD_BUNDLE: SKILLS_SOURCE,
+    STRADDLE_WIZARD_BUNDLE: BUNDLE_WITHOUT_REVIEW,
     // Nothing listens here, so a test that forgets its fixture release server never reaches GitHub.
     STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases',
     ...(opts.claude ? { FAKE_CLAUDE_STATE: opts.claude.state } : {}),

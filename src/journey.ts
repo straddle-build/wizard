@@ -1,20 +1,21 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PLUGIN_RELEASES, bundleLabel, downloadRelease, listReleases, loadCachedRelease, loadLocalBundle, pickRelease, releaseDir, type Bundle, type BundleCheck } from './bundle.ts';
 import {
-  CLIENT_LABEL, CLIENT_NAMES, EVENT_SURFACE, EVENT_SURFACE_NOTE, displayCommand, inspectClient, installPlan, launchCommand, manualHandoff, runCommands, updatePlan,
+  CLIENT_LABEL, CLIENT_NAMES, EVENT_SURFACE, EVENT_SURFACE_NOTE, codexMcpOff, displayCommand, inspectClient, installPlan, launchCommand, manualHandoff, reviewCommand, reviewSettings, runCommands, updatePlan,
   type ClientName, type ClientState, type Command, type CommandResult, type ConfigPlan, type Handoff,
 } from './clients.ts';
 import { checklistPage, followCodex } from './codex.ts';
 import { straddleConfiguration } from './configuration.ts';
 import { changedFiles, discover, readRepoFile, snapshot, type RepoFacts } from './discovery.ts';
-import { appendEvents, readObservedEvents, transcriptAssistantText, verifyChecklist } from './events.ts';
+import { appendEvents, readObservedEvents, transcriptAssistantText, verifyChecklist, type Rollout } from './events.ts';
 import { offerLog } from './log.ts';
+import { REVIEW_LINE, REVIEW_REPORT, REVIEW_SCOPE_LINE, codeHash, currentBaseline, ensureBaseline, hasReview, parseReport, runRef, saveReport, writeReviewScope } from './review.ts';
 import { CONTRACT_FILES, INTEGRATION_PLAN, SKILLS, programFor, programSkills, stepTitles, type ProgramName, type SkillName } from './programs.ts';
-import { goLiveSkippable, header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
+import { approvalHash, goLiveSkippable, header, nextStep, progress, statusLine, type StepProgress } from './progress.ts';
 import { SESSION_ID, WIZARD_DIR, loadReceipt, newReceipt, receiptPath, saveReceipt, type Answer, type Choices, type LoadedReceipt, type Mode, type Receipt, type RunState, type SessionRun } from './receipt.ts';
 import { card, markdown, paint, sanitize, table } from './tui.ts';
 import type { Prompter } from './ui.ts';
@@ -43,9 +44,15 @@ const DASHBOARD = 'https://dashboard.straddle.com';
 // The receipt a Ctrl-C at a Wizard prompt must mark as aborted. While an agent client runs, it owns Ctrl-C. Once a
 // session's report is out, its outcome is saved and `settled` holds its exit code: a Ctrl-C at a later optional
 // question leaves both alone.
-const active: { receipt: Receipt | null; clientRunning: boolean; settled: number | null } = { receipt: null, clientRunning: false, settled: null };
+// While the payment review runs, the first Ctrl-C ends the reviewer and its processes and nothing else (`reviewing`).
+const active: { receipt: Receipt | null; clientRunning: boolean; settled: number | null; reviewing: boolean; reviewer: ChildProcess | null; reviewCancelled: boolean } = { receipt: null, clientRunning: false, settled: null, reviewing: false, reviewer: null, reviewCancelled: false };
 
 export function handleInterrupt(io: Prompter): void {
+  if (active.reviewing) {
+    if (!active.reviewCancelled && active.reviewer?.pid) for (const pid of processTree(active.reviewer.pid)) { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
+    active.reviewCancelled = true;
+    return;
+  }
   if (active.clientRunning) return;
   if (active.settled !== null) {
     io.say();
@@ -348,7 +355,7 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
   // can still keep it out of Claude Code.
   receipt.pluginLoad = !manual && name !== 'codex' ? 'session' : null;
   let repaired = false;
-  for (;;) {
+  for (; ;) {
     const client = inspectClient(name, opts.env, bundle);
     printReadiness(io, receipt, bundle, client, opts.env);
     // Manual into an agent I can't see or install into: the handoff steps say to install the plugin there.
@@ -578,11 +585,27 @@ function printConfigurationError(io: Prompter, errors: string[], env: NodeJS.Pro
 
 interface ClientExit { code: number | null; signal: string | null; error: string | null }
 
-function runInteractive(command: Command, cwd: string, env: NodeJS.ProcessEnv): Promise<ClientExit> {
+// The process and its descendants, read before any of them is signalled so none is reparented away first. A
+// descendant that already left the tree (a double-forked daemon) isn't found. Without `ps`, the process alone.
+function processTree(root: number): number[] {
+  let out = '';
+  try { out = execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' }); } catch { return [root]; }
+  const children = new Map<number, number[]>();
+  for (const line of out.trim().split('\n')) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (pid && ppid !== undefined) children.set(ppid, [...(children.get(ppid) ?? []), pid]);
+  }
+  const tree: number[] = [];
+  for (const stack = [root]; stack.length;) { const pid = stack.pop()!; tree.push(pid); stack.push(...(children.get(pid) ?? [])); }
+  return tree;
+}
+
+function runInteractive(command: Command, cwd: string, env: NodeJS.ProcessEnv, onChild?: (child: ChildProcess) => void): Promise<ClientExit> {
   const { promise, resolve } = Promise.withResolvers<ClientExit>();
   const forward = (signal: NodeJS.Signals) => child.kill(signal);
   active.clientRunning = true;
   const child = spawn(command.bin, command.args, { cwd, env, stdio: 'inherit' });
+  onChild?.(child);
   process.on('SIGTERM', forward);
   process.on('SIGHUP', forward);
   const done = (exit: ClientExit) => {
@@ -616,6 +639,122 @@ function sessionSteps(repo: string, items: readonly StepProgress[], start: Skill
   return { run, config, setupLeft, sends, missing, runnable: sends > 0 ? run.slice(0, sends) : run };
 }
 
+// The payment review (skills wizard-program.md, Payment review) applies to a program that writes code (Integrate or
+// Migrate) and reaches Go Live, with a bundle that carries the review: in Auto with Claude Code or Codex, and in Manual
+// with Claude Code, whose printed review command carries the Wizard's hooks so its transcript is known. A Manual Codex
+// review has no such binding yet (a rollout can't be tied to the printed command), so there, in Cursor, and anywhere
+// else the program runs as it did, and Go Live itself warns that no current review ran. The review never blocks.
+function reviewApplies(receipt: Receipt, skills: readonly SkillName[], bundle: Bundle): boolean {
+  const client = receipt.mode === 'manual' ? receipt.client === 'claude' : receipt.client !== 'cursor';
+  return hasReview(bundle) && client && skills.includes('straddle-go-live') && (skills.includes('straddle-integrate') || skills.includes('straddle-migrate'));
+}
+
+// The run's start state, once, before its first session changes anything.
+function recordBaseline(io: Prompter, receipt: Receipt, skills: readonly SkillName[], bundle: Bundle, env: NodeJS.ProcessEnv): void {
+  if (!hasReview(bundle) || !skills.includes('straddle-go-live') || !(skills.includes('straddle-integrate') || skills.includes('straddle-migrate'))) return;
+  const result = ensureBaseline(receipt.repo, receipt.runId, bundle, env, receipt.sessions.length === 0);
+  if (result.ok && result.created) io.say(`  I recorded this repo's starting state for the payment review after Test (${runRef(receipt.runId)}).`);
+  else if (!result.ok) io.say(`  The payment review can't scope this repo: ${result.reason}. Go Live will list that as a warning.`);
+}
+
+// A saved review counts for Go Live only while its Plan hash and Code hash match the plan and the code now.
+function reviewCurrent(receipt: Receipt, bundle: Bundle, env: NodeJS.ProcessEnv): boolean {
+  const baseline = currentBaseline(receipt.repo, receipt.runId);
+  const report = readRepoFile(receipt.repo, REVIEW_REPORT, receipt.exclude);
+  const plan = readRepoFile(receipt.repo, INTEGRATION_PLAN, receipt.exclude);
+  if (!baseline || report.kind !== 'read' || plan.kind !== 'read') return false;
+  const now = codeHash(receipt.repo, bundle, baseline.snapshot, env);
+  const status = header(report.text, 'Status');
+  return now.ok && (status === 'clean' || status === 'findings') && header(report.text, 'Code hash') === now.hash && header(report.text, 'Plan hash') === approvalHash(plan.text);
+}
+
+// The fresh, read-only review session after Test. It writes nothing; the Wizard saves the report it prints, only when
+// the printed block passes the contract's checks and the code hash before the review, after it and in the report
+// match. A cancelled review saves nothing, and an earlier report stays as it was.
+async function runReview(io: Prompter, receipt: Receipt, ready: Ready, opts: JourneyOptions): Promise<{ ok: true } | { ok: false; reason: string; stopped?: true }> {
+  const { repo } = receipt;
+  const client = receipt.client!;
+  const label = CLIENT_LABEL[client];
+  const baseline = currentBaseline(repo, receipt.runId);
+  if (!baseline) return { ok: false, reason: "this run has no baseline from its first session, so the review can't tell its changes apart" };
+  const runDir = join(repo, WIZARD_DIR, 'runs', receipt.runId);
+  mkdirSync(runDir, { recursive: true });
+  const scope = `${WIZARD_DIR}/runs/${receipt.runId}/review-scope`;
+  const planFile = readRepoFile(repo, INTEGRATION_PLAN, receipt.exclude);
+  const before = writeReviewScope(repo, ready.bundle, baseline.snapshot, planFile.kind === 'read' ? approvalHash(planFile.text) : 'none', opts.env, join(repo, scope));
+  if (!before.ok) return { ok: false, reason: before.reason };
+  const eventsFile = eventsPath(repo);
+  const settingsPath = join(runDir, `review-${receipt.sessions.length + 1}.settings.json`);
+  const mcp = client === 'codex' ? codexMcpOff(repo, opts.env) : { ok: true as const, config: [] };
+  if (!mcp.ok) return { ok: false, reason: mcp.reason };
+  const command = reviewCommand({ client, repo, settingsPath, pluginDir: ready.bundle.path, line: `${REVIEW_LINE}\n${REVIEW_SCOPE_LINE}${scope}`, codexConfig: mcp.config });
+  if (!command) return { ok: false, reason: `the payment review runs in Claude Code or Codex, not ${label}` };
+  const manual = receipt.mode === 'manual';
+  const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const hook = [{ type: 'command', command: [process.execPath, HOOK_SCRIPT, '--events', eventsFile, '--repo', repo, '--gate', ''].map(quote).join(' ') }];
+  const writeSettings = () => { if (client === 'claude') writeFileSync(settingsPath, JSON.stringify(reviewSettings({ SessionStart: [{ hooks: hook }], SessionEnd: [{ hooks: hook }], Stop: [{ hooks: hook }], PostToolUse: [{ hooks: hook }] }), null, 2)); };
+  const session: SessionRun = { client, sessionId: null, skills: [], role: 'review', startedAt: new Date().toISOString(), endedAt: null, exit: null, changedFiles: [], evidenceLimits: [], checklist: [] };
+  io.say(io.bold(`Payment review in ${label}`));
+  let exit: ClientExit = { code: 0, signal: null, error: null };
+  let rollout: Rollout | undefined;
+  let cancelled = false;
+  if (manual) {
+    // Manual: the developer starts the reviewer, a new session with this review's own read-only settings file. Only
+    // that file carries the Wizard's hooks, so the session that started from it after this point is the review's.
+    writeSettings();
+    io.say(`  Test is done. Run this in a new terminal in ${repo}. It starts a new ${label} session, not your earlier one, that reviews the code this run changed. It can't edit files, reach the network or change your settings, and it prints a report I save to ${REVIEW_REPORT}:`);
+    io.say(`    ${displayCommand(command)}`);
+    io.say('  Come back here when it ends.');
+    receipt.sessions.push(session);
+    saveReceipt(receipt);
+    const back = await io.choose('Next', [{ label: "I'm back: read the review", value: true }, { label: 'Stop here (resume later with `wizard resume`)', value: false }], 0);
+    io.say();
+    if (!back) return { ok: false, reason: 'you stopped before the payment review', stopped: true };
+  } else {
+    io.say(`  Test is done. ${label} opens once more, in a fresh read-only session, to review the code this run changed. It can't edit files, reach the network or change your settings; I save the report it prints to ${REVIEW_REPORT}.`);
+    io.say('  Press Ctrl-C once to cancel it. Your original session and the run\'s starting state stay as they are.');
+    const go = await io.choose('Next', [{ label: 'Start the payment review', value: true }, { label: 'Stop here (resume later with `wizard resume`)', value: false }], 0);
+    io.say();
+    if (!go) return { ok: false, reason: 'you stopped before the payment review', stopped: true };
+    writeSettings();
+    session.startedAt = new Date().toISOString();
+    receipt.sessions.push(session);
+    receipt.state = 'running';
+    receipt.stateReason = `payment review running in ${label}`;
+    saveReceipt(receipt);
+    const follower = client === 'codex' ? followCodex(opts.env, repo, eventsFile, Date.now() - 1000, null) : null;
+    active.reviewing = true;
+    active.reviewCancelled = false;
+    exit = await runInteractive(command, repo, opts.env, (child) => { active.reviewer = child; });
+    rollout = follower?.stop();
+    active.reviewer = null;
+    cancelled = active.reviewCancelled;
+    active.reviewing = false;
+  }
+  session.endedAt = new Date().toISOString();
+  session.exit = { code: exit.code, signal: exit.signal };
+  const events = readObservedEvents(eventsFile).events.filter((e) => e.at >= session.startedAt);
+  const started = events.findLast((e) => e.kind === 'session-start' && e.session);
+  session.sessionId = rollout?.session ?? (started?.kind === 'session-start' ? started.session ?? null : null);
+  saveReceipt(receipt);
+  if (manual && !started) return { ok: false, reason: 'no review session started from the printed command' };
+  if (cancelled) return { ok: false, reason: 'you cancelled the payment review', stopped: true };
+  if (exit.error) return { ok: false, reason: `${label} couldn't start: ${exit.error}` };
+  const transcripts = [...new Set(events.flatMap((e) => (e.kind === 'session-start' && e.transcript ? [e.transcript] : [])))];
+  const report = parseReport(rollout ? rollout.text.join('\n') : transcripts.map(transcriptAssistantText).join('\n'));
+  if (!report.ok) return { ok: false, reason: report.reason };
+  const after = codeHash(repo, ready.bundle, baseline.snapshot, opts.env);
+  if (!after.ok || after.hash !== before.hash) return { ok: false, reason: 'the code changed while the payment review ran' };
+  if (report.codeHash !== null ? report.codeHash !== before.hash : report.status !== 'incomplete') return { ok: false, reason: "the report's Code hash isn't the code's" };
+  // The same plan binding Go Live and a saved report need: a review of another plan never counts.
+  const plan = readRepoFile(repo, INTEGRATION_PLAN, receipt.exclude);
+  if (report.status !== 'incomplete' && (plan.kind !== 'read' || report.planHash !== approvalHash(plan.text))) return { ok: false, reason: "the report's Plan hash isn't the current plan's" };
+  const saved = saveReport(repo, report.payload);
+  if (!saved.ok) return { ok: false, reason: saved.reason };
+  io.say(`  Payment review: ${report.statusLine}. I saved it to ${REVIEW_REPORT}.`);
+  return report.status === 'incomplete' ? { ok: false, reason: `the review reported ${report.statusLine}` } : { ok: true };
+}
+
 async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: SkillName, ready: Ready, opts: JourneyOptions): Promise<number> {
   const { repo } = receipt;
   const client = receipt.client!;
@@ -637,7 +776,24 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
     if (sends === 0) return finish(receipt, 'blocked', `configuration error: ${config.errors.join('; ')}`);
   }
 
-  const previous = receipt.sessions.findLast((s) => s.client === client && s.sessionId);
+  // Go Live runs after a current review: the one just run, or a saved one whose hashes still match. The review is
+  // advisory, so a failed or incomplete one only warns; only the developer stopping or cancelling it waits for resume.
+  const reviewed = reviewApplies(receipt, skills, ready.bundle);
+  if (reviewed && begin === 'straddle-go-live' && !reviewCurrent(receipt, ready.bundle, opts.env)) {
+    const review = await runReview(io, receipt, ready, opts);
+    if (!review.ok && review.stopped) {
+      io.say(`  ${review.reason[0]!.toUpperCase()}${review.reason.slice(1)}. I didn't start Go Live. Run \`wizard resume\` to review again.`);
+      finish(receipt, 'blocked', `payment review not run: ${review.reason}`);
+      io.say();
+      return printReport(io, receipt, currentProgress(receipt, steps), ready.bundle);
+    }
+    if (!review.ok) io.say(`  The payment review is incomplete: ${review.reason}. It's advisory, so Go Live runs and lists it as a warning.`);
+  }
+  // With the review, the program's first session ends at Test; Go Live resumes it after the review.
+  const split = reviewed && run.includes('straddle-go-live') && begin !== 'straddle-go-live';
+  const leg = split ? run.filter((s) => s !== 'straddle-go-live') : run;
+
+  const previous = receipt.sessions.findLast((s) => s.client === client && s.sessionId && s.role !== 'review');
   const done = atStart.filter((p) => p.finished).map((p) => SKILLS[p.skill].title);
   const render = () => {
     const now = currentProgress(receipt, steps);
@@ -647,7 +803,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const page = client === 'codex' && !manual ? await checklistPage(render) : null;
   io.say(io.bold(`Your session in ${label}: ${stepTitles(run)}`));
   if (done.length) io.say(`  ${titleList(done)} ${done.length === 1 ? 'is' : 'are'} done; I read that from ${done.length === 1 ? 'its file' : 'their files'}. I'll start at ${first.title}.`);
-  if (manual) return manualSession(io, receipt, steps, run, ready.bundle);
+  if (manual) { recordBaseline(io, receipt, skills, ready.bundle, opts.env); return manualSession(io, receipt, steps, leg, ready.bundle, reviewed && begin === 'straddle-go-live'); }
   const watch = page ? `Follow the checklist at ${page.url}` : client === 'claude' ? 'Its status line shows the checklist as it goes' : "I can't watch Cursor's progress; when it stops I read the files the skills wrote";
   io.say(`  ${label} opens here and runs ${run.length === 1 ? 'the step' : 'these steps'} in one session. ${watch}.`);
   io.say('  Answer its questions there, and approve or deny each change and each Sandbox request. Starting isn\'t approval of anything.');
@@ -656,13 +812,14 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const go = await io.choose('Next', [{ label: 'Start', value: true }, { label: 'Stop here (resume later with `wizard resume`)', value: false }], 0);
   io.say();
   if (!go) { page?.close(); return finish(receipt, 'ready', `stopped before ${first.title}`); }
+  recordBaseline(io, receipt, skills, ready.bundle, opts.env);
 
   const runDir = join(repo, WIZARD_DIR, 'runs', receipt.runId);
   mkdirSync(runDir, { recursive: true });
   const eventsFile = eventsPath(repo);
   const settingsPath = join(runDir, `session-${receipt.sessions.length + 1}.settings.json`);
   const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-  const gate = [...new Set(run.flatMap((s) => SKILLS[s].editGate))];
+  const gate = [...new Set(leg.flatMap((s) => SKILLS[s].editGate))];
   const hook = [{ type: 'command', command: [process.execPath, HOOK_SCRIPT, '--events', eventsFile, '--repo', repo, '--gate', gate.join(',')].map(quote).join(' ') }];
   const statusCommand = [process.execPath, STATUSLINE_SCRIPT, '--repo', repo, '--steps', steps.map((s) => `${s.skill}:${s.total}`).join(','), '--start', begin, ...receipt.exclude.flatMap((e) => ['--exclude', e])];
   // The status line, progress hooks and the pre-plan edit hook; nothing else. Claude Code merges this file with the
@@ -679,16 +836,16 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
     },
   }, null, 2));
 
-  const session: SessionRun = { client, sessionId: null, skills: run, startedAt: new Date().toISOString(), endedAt: null, exit: null, changedFiles: [], evidenceLimits: [], checklist: [] };
+  const session: SessionRun = { client, sessionId: null, skills: leg, startedAt: new Date().toISOString(), endedAt: null, exit: null, changedFiles: [], evidenceLimits: [], checklist: [] };
   const before = snapshot(repo, receipt.exclude);
   receipt.sessions.push(session);
   receipt.state = 'running';
-  receipt.stateReason = `${stepTitles(run)} running in ${label}`;
+  receipt.stateReason = `${stepTitles(leg)} running in ${label}`;
   saveReceipt(receipt);
 
   const follower = client === 'codex' ? followCodex(opts.env, repo, eventsFile, Date.now() - 1000, previous?.sessionId ?? null) : null;
   const chatsBefore = client === 'cursor' ? cursorTranscripts(opts.env, repo) : null;
-  const command = launchCommand({ client, skill: begin, repo, context: programPrompt(run, receipt, previous !== undefined), settingsPath, pluginDir: ready.bundle.path, resume: previous?.sessionId ?? null });
+  const command = launchCommand({ client, skill: begin, repo, context: programPrompt(leg, receipt, previous !== undefined), settingsPath, pluginDir: ready.bundle.path, resume: previous?.sessionId ?? null });
   const exit = await runInteractive(command, repo, sessionEnv(opts.env, bundledCli(), process.platform));
   const rollout = follower?.stop();
   page?.close();
@@ -710,6 +867,7 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
   const ended = exit.error ? `${label} couldn't start: ${exit.error}` : exit.signal ? `${label} ended by signal ${exit.signal}` : `${label} exited with code ${exit.code}`;
   io.say(io.bold(`Session ended (${ended})`));
   for (const e of events) if (e.kind === 'edit-denied') io.say(`  Blocked an edit before the plan existed: ${e.path}`);
+  let advanced = false;
   if (next === null) finish(receipt, 'completed', 'every step is done and on file');
   else if (exit.error) finish(receipt, 'blocked', ended);
   else if (exit.signal) interrupted(io, receipt, session, `${ended} during ${SKILLS[next].title}`);
@@ -720,7 +878,11 @@ async function runSession(io: Prompter, receipt: Receipt, steps: Steps, start: S
     const said = at.reported;
     if (said?.kind === 'abort') interrupted(io, receipt, session, `your agent reported STRADDLE_ABORT for ${SKILLS[next].title}: ${said.reason ?? 'no reason given'}`);
     else if (said?.kind === 'handoff' && !SKILLS[next].advanceOn.includes(said.status ?? '')) finish(receipt, 'blocked', `${SKILLS[next].title} stopped at ${said.status ?? 'no status'}${at.record ? `; ${SKILLS[next].record!.file}: ${at.record.detail}` : ''}`);
-    else finish(receipt, 'ready', `next: ${SKILLS[next].title}`);
+    else { finish(receipt, 'ready', `next: ${SKILLS[next].title}`); advanced = true; }
+  }
+  if (split && next === 'straddle-go-live' && advanced) {
+    io.say();
+    return runSession(io, receipt, steps, 'straddle-go-live', ready, opts);
   }
   io.say();
   if (skills.includes('straddle-audit')) showAuditFindings(io, receipt);
@@ -772,10 +934,11 @@ function handoffFor(receipt: Receipt, run: readonly SkillName[]): Handoff {
 }
 
 // Manual: the developer runs the program in their own agent and the files decide. I start no process.
-async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[], bundle: Bundle): Promise<number> {
+async function manualSession(io: Prompter, receipt: Receipt, steps: Steps, run: readonly SkillName[], bundle: Bundle, afterReview = false): Promise<number> {
   const label = CLIENT_LABEL[receipt.client!];
   const { prompt, steps: todo } = handoffFor(receipt, run);
   io.say("  Manual: I start no agent. Here's the handoff:");
+  if (afterReview) io.say(`  Paste it into your earlier ${label} session, the one that ran Test, not the review session.`);
   todo.slice(0, 2).forEach((s, i) => io.say(`    ${i + 1}. ${s}`));
   for (const line of prompt.split('\n')) io.say(`         ${line}`);
   todo.slice(2).forEach((s, i) => io.say(`    ${i + 3}. ${s}`));
@@ -1170,7 +1333,7 @@ async function newRun(program: ProgramName, opts: JourneyOptions, loaded: Loaded
     providers: facts.providers,
     bankLink: facts.bankLink,
   };
-  for (;;) {
+  for (; ;) {
     printWelcome(io, facts, context, program);
     const pick = await io.choose('Ready?', [
       { label: 'Continue', value: 'continue' as const },
