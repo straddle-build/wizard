@@ -348,17 +348,24 @@ export function reviewCommand(req: { client: ClientName; repo: string; settingsP
 // Codex merges a `-c mcp_servers=...` override into the configured servers, so an empty table disables nothing. This
 // asks Codex itself which servers it would start here, sets each one `enabled = false` in one process-only override
 // (an inline table, since a dotted `-c` path can't name a server whose name holds a dot), and asks again with it: any
-// server still enabled, or a listing that fails, means no review. The developer's config files are only read.
+// server still enabled, or a listing that fails, means no review. A server a plugin provides (the Straddle plugin's
+// straddle-api and straddle-docs) has no config entry to merge into, and Codex rejects an override without a transport,
+// so each entry restates the listed `url` or `command`. The developer's config files are only read.
 export function codexMcpOff(repo: string, env: NodeJS.ProcessEnv): { ok: true; config: string[] } | { ok: false; reason: string } {
   const list = (config: string[]) => {
     const r = spawnSync('codex', [...config, 'mcp', 'list', '--json'], { cwd: repo, env, encoding: 'utf8', timeout: 30_000 });
     const servers = r.status === 0 ? parseJson(r.stdout) : undefined;
-    return Array.isArray(servers) ? servers.map((s) => ({ name: text(field(s, 'name')), enabled: field(s, 'enabled') })) : null;
+    return Array.isArray(servers) ? servers.map((s) => {
+      const transport = field(s, 'transport');
+      const url = text(field(transport, 'url'));
+      const command = text(field(transport, 'command'));
+      return { name: text(field(s, 'name')), enabled: field(s, 'enabled'), transport: url !== undefined ? `url=${JSON.stringify(url)}` : command !== undefined ? `command=${JSON.stringify(command)}` : undefined };
+    }) : null;
   };
   const servers = list([]);
-  if (!servers || servers.some((s) => s.name === undefined)) return { ok: false, reason: "Codex couldn't list its MCP servers, so I can't turn them off for the review" };
+  if (!servers || servers.some((s) => s.name === undefined || s.transport === undefined)) return { ok: false, reason: "Codex couldn't list its MCP servers, so I can't turn them off for the review" };
   if (!servers.length) return { ok: true, config: [] };
-  const config = ['-c', `mcp_servers={${servers.map((s) => `${JSON.stringify(s.name)}={enabled=false}`).join(',')}}`];
+  const config = ['-c', `mcp_servers={${servers.map((s) => `${JSON.stringify(s.name)}={${s.transport},enabled=false}`).join(',')}}`];
   const after = list(config);
   const left = after ? after.filter((s) => s.enabled !== false).map((s) => s.name) : null;
   if (!left || left.length) return { ok: false, reason: `Codex would still start MCP server${left?.length === 1 ? '' : 's'} ${left?.join(', ') ?? '(unlisted)'} in the review` };
