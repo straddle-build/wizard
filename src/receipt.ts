@@ -32,6 +32,8 @@ export interface SessionRun {
   sessionId: string | null;
   // The program steps this session was asked to run, in order.
   skills: SkillName[];
+  // `review`: the fresh, read-only payment review session (no program steps). Absent for a program session.
+  role?: 'review';
   startedAt: string;
   endedAt: string | null;
   exit: { code: number | null; signal: string | null } | null;
@@ -152,6 +154,8 @@ function receiptProblem(r: unknown): string | null {
     if (id !== null && !(typeof id === 'string' && SESSION_ID.test(id))) return 'invalid session id';
     const skills = field(session, 'skills');
     if (!Array.isArray(skills) || !skills.every((s) => typeof s === 'string' && isRunnableSkill(s))) return 'unknown session skill';
+    const role = field(session, 'role');
+    if (role !== undefined && role !== 'review') return 'unknown session role';
     for (const key of ['changedFiles', 'evidenceLimits', 'checklist']) {
       const list = field(session, key);
       if (!Array.isArray(list) || !list.every((s) => typeof s === 'string')) return `invalid session ${key}`;

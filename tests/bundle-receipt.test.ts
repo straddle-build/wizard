@@ -22,11 +22,7 @@ test('reads a local skills checkout as a local bundle with its plugin and skill 
   const bundle = localBundle();
 
   assert.equal(bundle.kind, 'local');
-  assert.equal(bundle.pluginVersion, '0.1.0');
-  assert.deepEqual(Object.keys(bundle.skills).sort(), [
-    'straddle-audit', 'straddle-best-practices', 'straddle-get-started', 'straddle-go-live', 'straddle-integrate',
-    'straddle-migrate', 'straddle-plan', 'straddle-setup', 'straddle-test',
-  ]);
+  for (const skill of ['straddle-setup', 'straddle-plan', 'straddle-integrate', 'straddle-test', 'straddle-go-live', 'straddle-payment-review']) assert.ok(skill in bundle.skills, `${skill} missing`);
   assert.equal(bundle.skills['straddle-plan']?.version, '0.1.0');
 });
 

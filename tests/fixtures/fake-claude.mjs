@@ -2,7 +2,7 @@
 // Simulated Claude Code at the process boundary. Journey tests use it; it is not native evidence.
 // State lives in FAKE_CLAUDE_STATE. Each program step is scripted per skill in FAKE_CLAUDE_STATE/sessions.json; one
 // session runs the prompt's `Straddle Wizard program:` steps from its `Start at` skill, like the skills do.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,7 +23,11 @@ const cmd = args.join(' ');
 if (cmd === '--version') { out('2.1.283 (Claude Code)'); process.exit(0); }
 if (cmd === 'auth status --json') { out(JSON.stringify({ loggedIn: state.loggedIn })); process.exit(state.loggedIn ? 0 : 1); }
 if (cmd === 'plugin list --json') {
-  out(JSON.stringify(state.installed ? [{ id: 'straddle@straddle', version: '0.1.0', enabled: true, installPath: state.marketplace, mcpServers: { 'straddle-api': {}, 'straddle-docs': {} } }] : []));
+  let version = '0.1.0';
+  if (state.marketplace) {
+    try { version = JSON.parse(readFileSync(join(state.marketplace, 'plugin.json'), 'utf8')).version ?? version; } catch {}
+  }
+  out(JSON.stringify(state.installed ? [{ id: 'straddle@straddle', version, enabled: true, installPath: state.marketplace, mcpServers: { 'straddle-api': {}, 'straddle-docs': {} } }] : []));
   process.exit(0);
 }
 if (cmd === 'plugin marketplace list --json') {
@@ -83,6 +87,7 @@ function hook(event, payload) {
 
 // What Claude Code shows in its status line: the settings' command, given the session JSON on stdin.
 function statusLine() {
+  if (!settings.statusLine) return;
   const r = spawnSync('/bin/sh', ['-c', settings.statusLine.command], { input: JSON.stringify({ session_id: sessionId, transcript_path: transcript, cwd: process.cwd() }), encoding: 'utf8' });
   appendFileSync(join(stateDir, 'statusline.log'), r.stdout);
 }
@@ -121,7 +126,21 @@ for (const skill of program.slice(program.indexOf(first))) {
     if (decision === 'allow') { writeFileSync(join(process.cwd(), w.path), w.content); hook('PostToolUse', call); }
     log(`write ${w.path} ${decision}`);
   }
-  assistant([{ type: 'text', text: script.text ?? '' }]);
+  // `{{CODE_HASH}}` in a printed payment review: the code hash the bundle's real session-state script prints for the
+  // run's baseline now, as the skill computes it.
+  const codeHash = () => {
+    const baseline = JSON.parse(readFileSync(join(process.cwd(), '.straddle-wizard', 'session-baseline.json'), 'utf8'));
+    const r = spawnSync('bash', [join(args[args.indexOf('--plugin-dir') + 1], 'skills', 'straddle-payment-review', 'scripts', 'session-state'), 'compare', baseline.snapshot], { encoding: 'utf8' });
+    return /^code-hash ([0-9a-f]{64})/.exec(r.stdout)?.[1] ?? 'none';
+  };
+  assistant([{ type: 'text', text: (script.text ?? '').replaceAll('{{CODE_HASH}}', codeHash) }]);
+  // `hang`: the agent is still working when the developer presses Ctrl-C (and leaves a marked child running).
+  if (script.hang) {
+    // `; :` keeps the shell from exec-ing sleep, so the marked process is the agent's child with a child of its own.
+    spawn('sh', ['-c', 'sleep 300; :', script.hang], { stdio: 'ignore' });
+    process.stdout.write('fake agent working\n');
+    await new Promise(() => {});
+  }
   hook('Stop', {});
   statusLine();
   // `stop`: the developer exits after this step; `exit` or `signal`: the session ends abnormally here.
