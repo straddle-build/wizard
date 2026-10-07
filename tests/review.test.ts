@@ -124,6 +124,32 @@ test('sensitive and --exclude paths never enter the snapshot or the review scope
   assert.deepEqual(writeReviewScope(repo, check.bundle, first.baseline.snapshot, 'none', env, ['a\nb'], dir), { ok: false, reason: 'an --exclude path holds a line break' });
 });
 
+test('a Wizard run on a subdirectory scopes and excludes paths from that directory, never another app in the repository', () => {
+  const check = findBundle({ override: SKILLS_SOURCE, env: process.env });
+  assert.ok(check.ok, check.ok ? '' : check.reason);
+  const { repo: root, env } = gitRepo('review-nested');
+  const shop = join(root, 'apps', 'shop');
+  for (const [rel, text] of [['apps/shop/checkout.ts', 'server amount\n'], ['apps/other/app.ts', 'other app\n']] as const) {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), text);
+  }
+  execFileSync('git', ['add', 'apps'], { cwd: root, env });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'start'], { cwd: root, env });
+  mkdirSync(join(shop, 'private'));
+  writeFileSync(join(shop, 'private', 'customer.txt'), 'zqsentinel before\n');
+  const run = '6f1c2a3b-0000-4000-8000-000000000008';
+  const first = ensureBaseline(shop, run, check.bundle, env, ['private/**'], true);
+  assert.ok(first.ok, JSON.stringify(first));
+  assert.deepEqual(execFileSync('git', ['ls-tree', '-r', '--full-tree', '--name-only', first.baseline.snapshot], { cwd: root, encoding: 'utf8' }).trim().split('\n'), ['checkout.ts']);
+  for (const rel of ['apps/shop/private/customer.txt', 'apps/shop/checkout.ts', 'apps/other/app.ts']) writeFileSync(join(root, rel), 'changed\n');
+  const dir = join(shop, '.straddle-wizard', 'runs', run, 'review-scope');
+  const scope = writeReviewScope(shop, check.bundle, first.baseline.snapshot, 'none', env, ['private/**'], dir);
+  assert.ok(scope.ok, JSON.stringify(scope));
+  assert.deepEqual(readFileSync(join(dir, 'changes.txt'), 'utf8').split('\n').slice(1), ['modified checkout.ts', '']);
+  assert.deepEqual(readdirSync(join(dir, 'start'), { recursive: true }), ['checkout.ts']);
+  assert.equal(readFileSync(join(dir, 'start', 'checkout.ts'), 'utf8'), 'server amount\n');
+});
+
 test('the review scope is written before launch from raw bytes: a configured clean filter, textconv and hook never run', () => {
   const check = findBundle({ override: SKILLS_SOURCE, env: process.env });
   assert.ok(check.ok, check.ok ? '' : check.reason);
