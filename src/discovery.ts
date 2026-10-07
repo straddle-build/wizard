@@ -34,8 +34,8 @@ function sensitiveReason(name: string): ExclusionReason | null {
   return null;
 }
 
-// The pattern is also a valid POSIX extended regular expression, so the payment review's session-state script matches
-// the same `--exclude` globs (`writeExcludes` in review.ts).
+// The regular expression pattern discovery and the payment review's session-state script (`writeExcludes` in review.ts)
+// use to match the same `--exclude` globs.
 export function globPattern(glob: string): string {
   const body = glob
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
