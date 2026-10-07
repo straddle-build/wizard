@@ -10,7 +10,7 @@ import { CLIENT_LABEL, launchCommand } from '../src/clients.ts';
 import { start, type JourneyOptions } from '../src/journey.ts';
 import { approvalHash } from '../src/progress.ts';
 import { Prompter } from '../src/ui.ts';
-import { BUNDLE_WITHOUT_REVIEW, CURSOR_CHAT, ROOT, SKILLS_SOURCE, fakeClaude, fakeClients, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
+import { BUNDLE_WITHOUT_REVIEW, CURSOR_CHAT, ROOT, SKILLS_PLUGIN_VERSION, SKILLS_SOURCE, fakeClaude, fakeClients, nextRepo, readReceipt, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type ReleaseServer } from './helpers.ts';
 
 const CONFIGURED = { STRADDLE_API_KEY: 'sk_test_value_in_test_env', STRADDLE_ENVIRONMENT: 'sandbox' };
 const PLAN = '# Straddle integration plan\n\n## Status\n\n- Plan state: Draft\n- Approval: none\n\n## File changes\n\n| File | Change |\n| --- | --- |\n| src/straddle.ts | add client |\n\n## Future Sandbox writes\n\n| Write | Tool |\n| --- | --- |\n| create customer | SDK |\n\n## Verification\n';
@@ -226,7 +226,7 @@ test('default journey: one agent session walks the whole program, with a live ch
   const receipt = readReceipt(repo);
   assert.equal(receipt.state, 'completed');
   assert.equal(receipt.client, 'claude');
-  assert.deepEqual([receipt.bundle?.kind, receipt.bundle?.pluginVersion, receipt.bundle?.path], ['local', '0.1.0', BUNDLE_WITHOUT_REVIEW]);
+  assert.deepEqual([receipt.bundle?.kind, receipt.bundle?.pluginVersion, receipt.bundle?.path], ['local', SKILLS_PLUGIN_VERSION, BUNDLE_WITHOUT_REVIEW]);
   assert.equal(receipt.sessions.length, 1);
   assert.match(receipt.sessions[0]!.sessionId ?? '', /^[0-9a-f-]{36}$/);
   const events = readFileSync(join(repo, '.straddle-wizard', 'events.jsonl'), 'utf8');
@@ -1180,12 +1180,12 @@ test('install, status, update and remove use native plugin commands and report d
   assert.equal(install.code, 0, install.stdout + install.stderr);
   assert.match(install.stdout, /ok\s+claude plugin install straddle@straddle/);
   const parsed = JSON.parse(status.stdout);
-  assert.deepEqual([parsed.bundle.kind, parsed.bundle.pluginVersion], ['local', '0.1.0']);
-  assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'claude').plugin, { state: 'installed', version: '0.1.0', verified: true });
+  assert.deepEqual([parsed.bundle.kind, parsed.bundle.pluginVersion], ['local', SKILLS_PLUGIN_VERSION]);
+  assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'claude').plugin, { state: 'installed', version: SKILLS_PLUGIN_VERSION, verified: true });
   assert.deepEqual(parsed.clients.find((c: { name: string }) => c.name === 'cursor').plugin, { state: 'unverified', version: null, verified: false });
   assert.equal(parsed.credentials.STRADDLE_API_KEY, 'missing');
   assert.equal(update.code, 0, update.stdout);
-  assert.match(update.stdout, /ok\s+claude plugin uninstall straddle@straddle\nok\s+claude plugin install straddle@straddle\nStraddle plugin in Claude Code: installed 0\.1\.0, matches the Wizard's bundle/);
+  assert.match(update.stdout, new RegExp(`ok\\s+claude plugin uninstall straddle@straddle\\nok\\s+claude plugin install straddle@straddle\\nStraddle plugin in Claude Code: installed ${SKILLS_PLUGIN_VERSION}, matches the Wizard's bundle`));
   assert.equal(remove.code, 0);
   assert.equal(JSON.parse(after.stdout).clients.find((c: { name: string }) => c.name === 'claude').plugin.state, 'missing');
 });
@@ -1451,7 +1451,7 @@ test('receipt removal is configuration loss the next run reports as a fresh star
 const PLAN_TEMPLATE = readFileSync(join(SKILLS_SOURCE, 'skills', 'straddle-plan', 'references', 'plan-template.md'), 'utf8');
 const revisedPlan = (sandboxHeading = '## Future Sandbox writes') => PLAN_TEMPLATE
   .replace('| | Products | charges / payouts / both | | |', '| 1 | Products | charges | developer | |')
-  .replace('| | Bank connection | Bridge widget / Plaid / Quiltt / bank details | | |', '| 3 | Bank connection | Bridge widget | developer | |')
+  .replace(/\| \| Bank connection \| (?:Bridge widget \/ Plaid \/ Quiltt \/ bank details|one or more of Bridge widget [^|]+) \| \| \|/, '| 3 | Bank connection | Bridge widget | developer | |')
   .replace('| | Notification path | webhook endpoint / FIFO endpoint / polling endpoint | | |', '| 5 | Notification path | polling endpoint | developer | changed course from webhooks |')
   .replace('## Future Sandbox writes', sandboxHeading)
   .replace('| | | SDK method / CLI command / permitted MCP operation | | | |', '| 1 | create customer | SDK | platform | cust-1 | external ID |');

@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, cpSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { SKILLS_SOURCE, nextRepo, runWizard, tempDir } from './helpers.ts';
+import { SKILLS_PLUGIN_VERSION, SKILLS_SOURCE, nextRepo, runWizard, tempDir } from './helpers.ts';
 
 function binDir(name: string): string | null {
   const r = spawnSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' });
@@ -50,16 +50,16 @@ test('Codex: a same-version installed copy that differs from the bundle is repor
   const local = { ...env, STRADDLE_WIZARD_BUNDLE: market };
 
   const install = await runWizard(['install', '--client', 'codex', '--yes'], { cwd: repo, env: local });
-  appendFileSync(join(env.CODEX_HOME, 'plugins', 'cache', 'straddle', 'straddle', '0.1.0', 'skills', 'straddle-plan', 'SKILL.md'), '\nEdit code before the plan.\n');
+  appendFileSync(join(env.CODEX_HOME, 'plugins', 'cache', 'straddle', 'straddle', SKILLS_PLUGIN_VERSION, 'skills', 'straddle-plan', 'SKILL.md'), '\nEdit code before the plan.\n');
   const tampered = JSON.parse((await runWizard(['status', '--json'], { cwd: repo, env: local })).stdout);
   const repaired = await runWizard(['update', '--client', 'codex', '--yes'], { cwd: repo, env: local });
   // The helper's default bundle is the other local copy, SKILLS_SOURCE; the registered marketplace is `market`.
   const foreign = await runWizard(['update', '--client', 'codex', '--yes'], { cwd: repo, env });
 
   assert.equal(install.code, 0, install.stdout + install.stderr);
-  assert.deepEqual(tampered.clients.find((c: { name: string }) => c.name === 'codex').plugin, { state: 'installed', version: '0.1.0', verified: false });
+  assert.deepEqual(tampered.clients.find((c: { name: string }) => c.name === 'codex').plugin, { state: 'installed', version: SKILLS_PLUGIN_VERSION, verified: false });
   assert.equal(repaired.code, 0, repaired.stdout);
-  assert.match(repaired.stdout, /Straddle plugin in Codex: installed 0\.1\.0, matches the Wizard's bundle/);
+  assert.match(repaired.stdout, new RegExp(`Straddle plugin in Codex: installed ${SKILLS_PLUGIN_VERSION}, matches the Wizard's bundle`));
   assert.equal(foreign.code, 1, foreign.stdout);
   assert.match(foreign.stdout, /Codex already has a marketplace named "straddle" at .*, not the verified .*\. I won't replace it\./);
 });
@@ -78,7 +78,7 @@ test('Claude Code: install, update and removal keep unrelated MCP servers', { sk
 
   assert.equal(install.code, 0, install.stdout + install.stderr);
   assert.equal(installed[0].id, 'straddle@straddle');
-  assert.equal(installed[0].version, '0.1.0');
+  assert.equal(installed[0].version, SKILLS_PLUGIN_VERSION);
   assert.equal(update.code, 0, update.stdout);
   assert.equal(remove.code, 0, remove.stdout);
   assert.doesNotMatch(settings, /straddle/);

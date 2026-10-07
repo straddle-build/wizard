@@ -23,7 +23,11 @@ const cmd = args.join(' ');
 if (cmd === '--version') { out('2.1.283 (Claude Code)'); process.exit(0); }
 if (cmd === 'auth status --json') { out(JSON.stringify({ loggedIn: state.loggedIn })); process.exit(state.loggedIn ? 0 : 1); }
 if (cmd === 'plugin list --json') {
-  out(JSON.stringify(state.installed ? [{ id: 'straddle@straddle', version: '0.1.0', enabled: true, installPath: state.marketplace, mcpServers: { 'straddle-api': {}, 'straddle-docs': {} } }] : []));
+  let version = '0.1.0';
+  if (state.marketplace) {
+    try { version = JSON.parse(readFileSync(join(state.marketplace, 'plugin.json'), 'utf8')).version ?? version; } catch {}
+  }
+  out(JSON.stringify(state.installed ? [{ id: 'straddle@straddle', version, enabled: true, installPath: state.marketplace, mcpServers: { 'straddle-api': {}, 'straddle-docs': {} } }] : []));
   process.exit(0);
 }
 if (cmd === 'plugin marketplace list --json') {

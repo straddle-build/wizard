@@ -18,6 +18,7 @@ export const SKILLS_SOURCE = process.env.STRADDLE_SKILLS_SOURCE ?? join(ROOT, '.
 if (!existsSync(join(SKILLS_SOURCE, 'plugin.json'))) {
   throw new Error('Set STRADDLE_SKILLS_SOURCE to a straddle-build/skills checkout with plugin 0.1.x');
 }
+export const SKILLS_PLUGIN_VERSION = JSON.parse(readFileSync(join(SKILLS_SOURCE, 'plugin.json'), 'utf8')).version as string;
 
 export function tempDir(label: string): string {
   return mkdtempSync(join(tmpdir(), `wizard-${label}-`));
