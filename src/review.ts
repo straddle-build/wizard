@@ -57,7 +57,8 @@ function writeExcludes(repo: string, exclude: readonly string[]): string | null 
 function sessionState(repo: string, bundle: Bundle, args: string[], env: NodeJS.ProcessEnv, exclude: readonly string[]): string {
   const problem = writeExcludes(repo, exclude);
   if (problem) throw new Error(problem);
-  return execFileSync('bash', [script(bundle), ...args], { cwd: repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  // The script applies `exclude` with JavaScript (the skill's exclude-match.mjs); this Node runs it.
+  return execFileSync('bash', [script(bundle), ...args], { cwd: repo, env: { ...env, STRADDLE_NODE: process.execPath }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 export interface Baseline { head: string | null; snapshot: string; startedAt: string }

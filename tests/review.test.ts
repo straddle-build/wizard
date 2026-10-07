@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { discover } from '../src/discovery.ts';
 import { findBundle } from '../src/journey.ts';
 import { codeHash, ensureBaseline, parseReport, runRef, saveReport, writeReviewScope } from '../src/review.ts';
 import { followCodex } from '../src/codex.ts';
@@ -148,6 +149,61 @@ test('a Wizard run on a subdirectory scopes and excludes paths from that directo
   assert.deepEqual(readFileSync(join(dir, 'changes.txt'), 'utf8').split('\n').slice(1), ['modified checkout.ts', '']);
   assert.deepEqual(readdirSync(join(dir, 'start'), { recursive: true }), ['checkout.ts']);
   assert.equal(readFileSync(join(dir, 'start', 'checkout.ts'), 'utf8'), 'server amount\n');
+});
+
+test('the snapshot and the review scope exclude exactly the --exclude paths discovery excludes, Unicode included', () => {
+  const check = findBundle({ override: SKILLS_SOURCE, env: process.env });
+  assert.ok(check.ok, check.ok ? '' : check.reason);
+  const { repo, env } = gitRepo('review-unicode');
+  const paths = ['private/a.txt', 'private/猫.txt', 'private/😀.txt', 'private/ab.txt', 'emoji/😀.txt', 'emoji/猫猫.txt', 'emoji/猫.txt',
+    'deep/x/notes/b.md', 'notes/猫.md', 'notes/sub/c.md', 'fixtures/[draft].ts', 'fixtures/d.ts', 'docs/猫/readme.md', 'docs/a/readme.md'];
+  const exclude = ['private/?.txt', 'emoji/??.txt', '**/notes/*.md', 'fixtures/[draft].ts', 'docs/猫'];
+  for (const rel of paths) {
+    mkdirSync(join(repo, rel, '..'), { recursive: true });
+    writeFileSync(join(repo, rel), 'zqsentinel before\n');
+  }
+  const hidden = discover(repo, exclude).excluded.filter((e) => e.reason === 'configured sensitive path').map((e) => e.path);
+  const expected = ['src/app.ts', ...paths.filter((p) => !hidden.some((h) => p === h || p.startsWith(`${h}/`)))].sort();
+  assert.deepEqual(expected, ['docs/a/readme.md', 'emoji/猫.txt', 'fixtures/d.ts', 'notes/sub/c.md', 'private/ab.txt', 'private/😀.txt', 'src/app.ts'].sort());
+  const run = '6f1c2a3b-0000-4000-8000-000000000009';
+  const first = ensureBaseline(repo, run, check.bundle, env, exclude, true);
+  assert.ok(first.ok, JSON.stringify(first));
+  const stored = execFileSync('git', ['-c', 'core.quotePath=false', 'ls-tree', '-r', '--name-only', first.baseline.snapshot], { cwd: repo, encoding: 'utf8' }).trim().split('\n').sort();
+  assert.deepEqual(stored, expected);
+  for (const rel of paths) writeFileSync(join(repo, rel), 'zqsentinel after\n');
+  const dir = join(repo, '.straddle-wizard', 'runs', run, 'review-scope');
+  const scope = writeReviewScope(repo, check.bundle, first.baseline.snapshot, 'none', env, exclude, dir);
+  assert.ok(scope.ok, JSON.stringify(scope));
+  assert.deepEqual(readFileSync(join(dir, 'changes.txt'), 'utf8').trim().split('\n').slice(1).sort(), expected.filter((p) => p !== 'src/app.ts').map((p) => `modified ${p}`).sort());
+});
+
+test('a file under a symlinked parent directory is never read: its target bytes reach neither the snapshot nor the review scope', () => {
+  const check = findBundle({ override: SKILLS_SOURCE, env: process.env });
+  assert.ok(check.ok, check.ok ? '' : check.reason);
+  for (const where of ['outside', 'sensitive'] as const) {
+    const { repo, env } = gitRepo(`review-symlink-${where}`);
+    mkdirSync(join(repo, 'lib'));
+    writeFileSync(join(repo, 'lib', 'pay.ts'), 'tracked public bytes\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo, env });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'start'], { cwd: repo, env });
+    const target = where === 'outside' ? realpathSync(tempDir('review-symlink-target')) : join(repo, '.secrets');
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, 'pay.ts'), `zqsentinel private ${where}\n`);
+    const privateBlob = execFileSync('git', ['hash-object', '--no-filters', join(target, 'pay.ts')], { cwd: repo, encoding: 'utf8' }).trim();
+    execFileSync('rm', ['-r', join(repo, 'lib')]);
+    symlinkSync(target, join(repo, 'lib'));
+    const run = `6f1c2a3b-0000-4000-8000-00000000001${where === 'outside' ? 0 : 1}`;
+    const first = ensureBaseline(repo, run, check.bundle, env, [], true);
+    assert.ok(first.ok, JSON.stringify(first));
+    assert.equal(execFileSync('git', ['cat-file', '-t', `${first.baseline.snapshot}:lib`], { cwd: repo, encoding: 'utf8' }).trim(), 'blob');
+    writeFileSync(join(target, 'pay.ts'), 'zqsentinel private changed\n');
+    writeFileSync(join(repo, 'src', 'app.ts'), 'export const app = 2;\n');
+    const dir = join(repo, '.straddle-wizard', 'runs', run, 'review-scope');
+    const scope = writeReviewScope(repo, check.bundle, first.baseline.snapshot, 'none', env, [], dir);
+    assert.ok(scope.ok, JSON.stringify(scope));
+    assert.deepEqual(readFileSync(join(dir, 'changes.txt'), 'utf8').trim().split('\n').slice(1), ['modified src/app.ts']);
+    assert.notEqual(spawnSync('git', ['cat-file', '-e', privateBlob], { cwd: repo }).status, 0, `${where} target bytes were stored`);
+  }
 });
 
 test('the review scope is written before launch from raw bytes: a configured clean filter, textconv and hook never run', () => {
