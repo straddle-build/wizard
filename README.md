@@ -1,146 +1,116 @@
-# wizard
+# Straddle Wizard
 
-Local Straddle Developer Kit installer and agent orchestrator.
+Set up a Straddle integration in your project with Claude Code, Codex, or Cursor. Straddle Wizard checks your project and tools, then guides your coding agent through setup, planning, implementation, sandbox testing, and production readiness.
 
-`@straddlecom/wizard` is a guided terminal setup. Run it in your project, confirm what it detected, answer four questions, and choose Auto or Manual. In Auto it opens your local coding agent (Claude Code, Codex, or Cursor's `cursor-agent`) once for the whole program; in Manual it starts nothing and tells you what to paste into your own agent. Either way the program runs through the versioned [Straddle skills](https://github.com/straddle-build/skills): Setup, Plan, Migrate when you already use another payment provider, Integrate, Test, and Go Live readiness. Every integration instruction lives in those skills. The Wizard detects, asks, checks readiness, starts the program, shows a live checklist where the agent allows it, and resumes from the files the skills write.
+The integration instructions come from the versioned [Straddle plugin](https://github.com/straddle-build/skills). Wizard selects a compatible plugin release and resumes work from the plans and reports saved in your project.
 
-## Status
+## Install
 
-- The Wizard runs Straddle plugin releases: GitHub releases of `straddle-build/skills` in its `0.1.x` range. None is published yet, so until the first one exists, run it with `--bundle <skills checkout>`.
+Use Node.js 22.18 or later, which includes npm and npx. Check the available commands without starting an integration:
 
-## Requirements
+```sh
+npx @straddlecom/wizard@latest --help
+```
 
-- Node.js 22.18 or later.
-- For Auto: Claude Code, Codex or `cursor-agent` (Cursor's CLI) on `PATH` and logged in. Manual works with any of them, including the Cursor app, and needs nothing on `PATH`.
-- The Straddle CLI comes with the Wizard, with no install script to run. `@straddlecom/cli` is an optional dependency, and its own optional dependencies are one package per platform (`@straddlecom/cli-<platform>-<arch>` for macOS, Linux and Windows on arm64 and x64), each holding only the `straddle` binary. npm installs the one that matches your machine, so the CLI arrives even when install scripts are blocked or off (`--ignore-scripts`). npm leaves it out with `--omit=optional`, when a lockfile written on another OS doesn't list it, or on any other platform. The Wizard then says so, names the fix (reinstall the Wizard without `--omit=optional`; for npx, delete the Wizard's cached copy, whose `_npx` directory it names, and run it again; or install the Straddle CLI yourself) and carries on; the skills then use a `straddle` on your `PATH`, or the Straddle SDK.
+The output starts with `Straddle Wizard` and lists the guided run, individual tasks, and options. To install the `wizard` command globally:
 
-## Skills bundle
+```sh
+npm install -g @straddlecom/wizard
+wizard --version
+```
 
-The Wizard runs a Straddle plugin release, or a local skills directory you pass with `--bundle`. It doesn't pin a skills commit, so a skills fix reaches you with the next plugin release, without a new Wizard.
+Wizard includes the Straddle CLI on supported macOS, Linux, and Windows systems through npm's optional platform packages. Keep optional dependencies enabled. See [CLI installation and recovery](docs/usage.md#use-the-bundled-cli) if Wizard reports a missing binary.
 
-**Where releases come from.** GitHub releases of `straddle-build/skills`, read from `https://api.github.com/repos/straddle-build/skills/releases`. Each release is tagged `v<version>` and carries `straddle-plugin-<version>.zip` and `SHA256SUMS`, built by the skills repository's release cut (its `docs/packaging.md`, Plugin releases). This Wizard accepts plugin versions `0.1.x` (`PLUGIN_RELEASES` in `src/bundle.ts`). It uses the newest `vX.Y.Z` release in that range, and skips drafts, prereleases and newer releases outside it. A `0.2.0` plugin needs a Wizard release that accepts it. `STRADDLE_WIZARD_RELEASES` points the Wizard at another URL that serves the same JSON, such as a mirror.
+## Start an integration
 
-**Verification.** The Wizard refuses a release, and keeps nothing from it, when:
-
-- the zip's SHA-256 differs from its line in the release's `SHA256SUMS`;
-- the release is outside the range;
-- its `plugin.json` version isn't the tag's;
-- the zip holds anything but stored regular files with safe paths;
-- the unpacked top level holds anything a client could load besides the plugin's runtime files (`plugin.json`, `mcp.json`, the three client manifests, `assets/`, `skills/`, `references/`, `third_party/`, `LICENSE`, `README.md`). Examples are `hooks/`, `commands/`, `agents/` and `.mcp.json`.
-
-A verified release is kept at `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/plugin`, a stable path, so a client marketplace registered from it survives updates. The Wizard records its content digest in `straddle-wizard/release.json` and re-hashes the directory against that record on every use, so an edited copy is refused.
-
-**Order.**
-
-1. `--bundle <path>` or `STRADDLE_WIZARD_BUNDLE`, when you pass one. This is for local testing: a skills checkout whose plugin version is in range and whose top level holds only plugin files, the checkout's own non-plugin files (`docs/`, `evals/`, `fixtures/`, `scripts/`, `tests/`, `kit/`, `.github/`, `.gitignore`, `.markdownlint-cli2.jsonc`, `.git`) and Claude Code's cache bookkeeping (`.in_use/`, `.orphaned_at`). It is labelled "local bundle, not a release" and isn't compared with any release.
-2. Otherwise the Wizard lists the releases. If the newest in range is already cached and intact, it uses that copy. If not, it shows the release and the two asset URLs, and downloads them only after you choose Download (or pass `--yes` to `install`, `update` or `skill list`).
-3. If the release list can't be read, for example offline, it uses the verified release already on this machine and says so.
-
-`wizard status` never touches the network. It reports the cached release.
-
-## Guided run
+Open a terminal in the project where you want to add Straddle:
 
 ```sh
 cd your-project
-npx @straddlecom/wizard
+npx @straddlecom/wizard@latest
 ```
 
-1. **Context.** The Wizard shows the directory, detected language, framework, any Straddle SDK and other payment providers, and the program it will run. Choose Continue, Change detected context, Privacy and data, or Cancel. Detected values are suggestions; corrected values are marked "(you)". When the repo already uses another payment provider, the program adds Migrate after Plan and says why. A declared Plaid stays a provider when the app's code calls Plaid Transfer (`transferCreate`, `transferIntentCreate`, `transferRecurringCreate`, `bankTransferCreate`, and their `/transfer/…` endpoints) or Identity Verification (`identityVerificationCreate`, `…Get`, `…List`, `…Retry`, or a Link token whose products include `identity_verification`). When the code calls only Plaid Link (`linkTokenCreate`, `itemPublicTokenExchange`, `processorTokenCreate`), Plaid is a bank connection, not a migration: the screen says "Plaid Link found" and the agent is told, so Plan asks whether to keep Plaid tokens or move to Straddle Bridge. Tests, mocks, fixtures and installed packages (`site-packages`) don't count. A Transfer or Identity Verification call named in a comment counts; a Link call in a comment (including a Python docstring or Ruby `=begin` block) doesn't. Plaid stays a provider when the search finds no Plaid call, or can't see every source file: one it couldn't read, an excluded, sensitive-named or unreadable directory, or a symlink to a directory, a source file or a target it can't inspect. The run records its providers and bank connection when it starts, so `wizard resume` and `wizard status` keep Migrate while Migrate replaces the Plaid calls; a run saved before the Wizard recorded them keeps Migrate for a declared Plaid, as it started. A new run detects them again.
-2. **Choices.** It asks what you want to build (charges, payouts, or both), direct, SaaS, or marketplace, which SDK, and which notification path (webhook, FIFO, or polling endpoint). It never infers these from the framework. "Not decided yet" leaves the question to the skill.
-3. **Agent.** Pick an agent, or pass `--client`. The menu lists Claude Code, Codex and Cursor whether or not each is installed here, and says how you'll see progress: Claude Code shows a live checklist in its status line, Codex on a local page, and Cursor has none (the Wizard reads the files the skills write when it stops).
-4. **Auto or Manual.** The Wizard asks how to run it:
-   - **Auto**: the Wizard starts your agent here, in this terminal, and it works through the steps. This is the default when the agent you chose is installed and logged in.
-   - **Manual**: the Wizard never starts your agent. It still runs its readiness checks (the agent's own version, login and plugin status commands, when the agent is installed here) and any install or update command you approve, then prints the exact message to paste into your own agent and the steps around it. When your agent stops, `wizard resume` (or `wizard status`) reads the files the skills wrote and tells you what to paste next. This is the default otherwise.
+The guided run takes you through the following steps:
 
-   The answer is saved in the run. `wizard resume` asks it when the saved run has none, and `--mode auto|manual` changes it.
-5. **Readiness.** The Wizard finds or downloads the skills bundle, then checks the agent binary and login, the Straddle CLI installed with the Wizard (`straddle --version` on its platform package's binary; the check never downloads one), the Straddle plugin, the API MCP credential route, `STRADDLE_API_KEY` (presence only), and the declared environment. Auto Claude Code and Cursor sessions load that bundle with `--plugin-dir`, so nothing needs installing. Codex, and every agent in Manual, loads its own installed copy, so the Wizard checks that copy's content against the bundle, not just its version; when it differs or is missing, the Wizard prints the exact native install or update commands and runs them only when you choose to. In Manual, when the Wizard can't see the agent's plugins (Cursor, or an agent not on `PATH`), the steps say to install the plugin there. Manual doesn't check the agent's login. Every agent session the Wizard starts gets the Straddle CLI's directory first on `PATH`, so the skills' `straddle` commands run the Wizard's copy; in Manual the handoff gives the export line (PowerShell on Windows) to run before you start your agent. A missing CLI binary is reported with its fix and never stops the run.
-6. **One session.** In Auto, the Wizard opens your agent once, in the same terminal; in Manual, you paste the same first message into your agent. The first line of its prompt invokes the first skill, `/straddle:<skill>` (Codex and Cursor: `Use the <skill> skill.`). The next line begins `Straddle Wizard program:`, lists the steps and says where to start; then come the instruction to continue with the next listed step after each handoff, and the language, framework (marked detected or corrected) and choices you confirmed. When `straddle-integration-plan.md` settles a choice in its Decisions table, the prompt, `wizard status` (for Manual runs) and `wizard resume` take that answer instead of the one saved in the Wizard and say the plan supersedes it, so a plan you revised after the Wizard asked is never contradicted. The line lists only the step it starts at and the unfinished steps after it, so a finished step is never run again. The skills walk the listed steps in order in that session and stop whenever they need you: plan approval, and a preview and approval for every Sandbox write. Choosing Start in the Wizard isn't approval of anything. Integrate and Test run only an approved plan: an approval recorded in `straddle-integration-plan.md` (or, for Test, `straddle-migration-plan.md`) that matches the current plan, or your approval of the current plan in the session. The skill records your approval in the plan file, so it carries over until the plan is edited. When the session starts at Integrate or Test, the Wizard shows the plan and this rule first.
-7. **Live checklist.** While the agent works, Claude Code's status line shows the program, for example `Straddle: Setup ✓ · Plan ▶ 2/6 · Integrate · Test · Go Live`. The Wizard supplies that status line command in the session's `--settings`, and its hooks record step-file reads, completed file edits, and the `STRADDLE_PROGRESS`, `STRADDLE_HANDOFF` and `STRADDLE_ABORT` markers the agent printed, into `.straddle-wizard/events.jsonl`. The markers are swept from the session transcript after each completed tool call, at every turn end (a `Stop` hook), and at session end, and each is recorded once. Codex has no status line command (its `tui.status_line` takes only built-in items), so for Codex the Wizard follows the session's rollout log (`~/.codex/sessions/.../rollout-*.jsonl`) for the same step reads and markers and serves the checklist on a local page (`http://127.0.0.1:<port>/`, refreshed every two seconds) whose address it prints before the session. It finds a new session's log by the start time Codex records in it, not by which log changed last, so another Codex session in the same repo isn't mistaken for this one. `▶ n/m` counts the step files the client showed the agent opening. In Claude Code and Codex Auto runs, a step ticks only when two sources agree: its state file, which the Wizard reads itself (see Resume), and the agent's reported handoff (the later of a handoff and an abort counts). Only a successful handoff agrees: `passed` for Test and `ready` for Go Live, so a failed, partial or not-ready run never shows a tick, even when an earlier successful file is still on disk. A reported handoff alone never ticks a step. A line in `events.jsonl` that isn't a well-formed event is skipped, and the Wizard says how many it skipped; the state files still decide where you resume. Cursor and Manual runs have no live checklist: the Wizard reads the state files when the session ends or you come back, and with no handoff to compare, a step ticks when its state file says it's done (a report still counts only for the current approved plan). The same file-only ticks show in `wizard status` (and `run.progress` in `--json`) for those runs, and on the steps `wizard` shows when it finds Straddle files with no saved run.
-8. **Report and finish.** When the agent exits (Manual: when you choose "I'm back"), the Wizard shows each step's state file, reported handoff and observed step entries side by side, the changed files (from its own before-and-after file hashes, and it says when that list is incomplete; Manual compares none), and the "Verify before merging" checklist your agent last printed. When it saw none printed, as always in Manual, it shows the skill's own checklist for the last step of the run whose state file says it's done, or that ran and writes no state file (Audit, Get started), and none until then. It states that the Wizard sent no Straddle request and created no server-side resource, then lists the Sandbox IDs your agent recorded in `straddle-integration-report.md` (Sandbox writes run) and `straddle-test-evidence.md` (the Server-side resources of the run `Latest run:` names, never an older run's), unverified. Only a UUID under a plain-words label is printed; any other row, such as one holding a key or a token, is counted and never printed. A file whose run targeted an offline synthetic upstream (`Target: offline synthetic localhost ...`) lists no Sandbox IDs, and the report says so. When the test evidence names a charge (`Test charge:`), it links the charge in the Straddle dashboard, `https://dashboard.straddle.com/charges/<id>`; otherwise it links the payments list, `https://dashboard.straddle.com/payments`. The dashboard's Sandbox switch picks the environment, so the link can't: turn on Sandbox if it opens in Production. The Straddle docs don't publish a dashboard URL pattern; this one is the dashboard's own charge route. The report lists the state files as evidence; in a terminal, each report file the run's steps wrote follows. When Go Live isn't ready, it lists the gaps from `straddle-go-live-report.md`, unless that report is already shown in full.
+1. Confirm the detected language, framework, and existing payment providers.
+2. Choose charges, payouts, or both; your integration type; an SDK; and a notification method. Leave a choice undecided if you need help during planning.
+3. Choose your coding agent and Auto or Manual mode.
+4. Review the plugin download and any setup commands Wizard proposes.
+5. Work with your agent to approve the integration plan, implement it, test it in sandbox, and check production readiness.
 
-**What it looks like.** In a terminal the Wizard draws its screens the way the Straddle CLI's human mode draws a record: a start splash on start and resume (one `✦ Straddle Wizard` line under 80 columns), the context screen and the report header as titled cards, the step checklist as a boxed table with a status mark per step, and, at the end of the session, each report file the run's steps wrote (`straddle-setup.md`, `straddle-integration-report.md`, `straddle-test-evidence.md`, `straddle-migration-report.md`, `straddle-go-live-report.md`, `straddle-audit-report.md`) rendered from its Markdown: tables boxed, headings and bold styled, lists bulleted, code wrapped. Escape sequences and control characters in a report are dropped before it's drawn. Boxes fit the terminal, at most 100 columns (80 when the terminal reports no width), and wrap inside their cells, between words where they can; emoji, emoji sequences and CJK count as two cells. A table too wide even at four cells a column shows each row as its own card. `NO_COLOR` keeps the boxes and drops the color; `CI` (any value but `false` or `0`) or `TERM=dumb` drops the color and the splash. In a pipe the output is the plain lines it always was, with no splash and no report files; `--json` output is unchanged.
+The agent saves `straddle-integration-plan.md` and the step reports in your project. When Wizard detects an existing payment provider, it adds a migration step after planning. Each sandbox write requires a preview and approval in the agent session.
 
-### Resume
-
-Resume comes from the files the skills write, not from session tracking. Each starts with a small header block:
-
-| Step | File | Done when |
-| -- | -- | -- |
-| Setup | `straddle-setup.md` | `Status: complete` |
-| Plan | `straddle-integration-plan.md` | `- Plan state: Approved` and the `- Approval:` line's sha256 matches the plan |
-| Migrate | `straddle-migration-report.md` | `Status: migrated` and `Plan hash:` is the current approved migration plan's |
-| Integrate | `straddle-integration-report.md` | `Status: complete` and `Plan hash:` is the current approved plan's |
-| Test | `straddle-test-evidence.md` | `Status: complete` and `Plan hash:` is the current approved plan's |
-| Go Live | `straddle-go-live-report.md` | `Status: ready` and `Plan hash:` is the current approved plan's |
-
-The plan hash is SHA-256 of the plan without its `- Plan state:` and `- Approval:` lines, exactly what `grep -v -e '^- Plan state:' -e '^- Approval:' <plan> | sha256sum` prints. A report counts only for the plan its `Plan:` line names. The next step is the first one in program order whose file is missing, not done, or made for an older plan, so a plan edited after approval sends you back to Plan, and a partial or blocked report reruns its step. An approved migration plan isn't a finished migration: Migrate finishes when its report says `migrated` for that plan. The Wizard reads these files under the same rules as discovery: a symlinked or excluded file counts as not done and is never opened.
-
-**Finishing without Go Live.** When Test is complete for the current approved plan, Go Live is the only step left, and Go Live hasn't reported for that plan yet, the end-of-session summary, `wizard resume` and plain `wizard` on the saved run offer **Finish here (skip Go Live)** beside resuming at Go Live. Once Go Live has reported for the plan (not ready, say), that result stands and there's no finish option. Finishing marks the run completed and records your choice in `.straddle-wizard/events.jsonl` with the plan hash Test was complete at. From then on `wizard status` (in `--json`, `run.skippedSteps` lists `straddle-go-live`), the status line and the report show `Go Live skipped`, and `wizard resume` says the program is finished and offers a fresh start instead of reopening Go Live. The choice counts only while Test stays complete for that plan: edit the plan, or redo Test for another one, and Go Live is back on the list. `wizard go-live` runs the readiness review on its own whenever you want it.
-
-`wizard resume` shows where the run stands and reopens your last agent session at the next step (`claude --resume <session>`, `codex resume <session>` or `cursor-agent --resume=<chat>`) with a prompt that starts there. The reopened conversation still holds its earlier previews and yeses, so the prompt adds a line, as the skills' `wizard-program.md` asks: approvals given before it don't count, every Sandbox write preview is shown and asked again, and a plan approval counts only as recorded in the plan file. The receipt only remembers that session id and your context; without a session id, it starts a new session at the same step. Cursor has no hooks, so the Wizard takes its chat id from the transcript folder Cursor writes, `~/.cursor/projects/<real repo path with / and . as ->/agent-transcripts/<chat>/`: the chat it reopened, or else the first chat created there after it started `cursor-agent`, never an earlier chat in the same repo that is still being written. In Manual, `wizard resume` and `wizard status` read the state files and print the same message to paste next; nothing is reopened. Without a receipt at all, `wizard resume` asks for the context again and starts at the first unfinished step from the skills' state files. When `wizard` finds Straddle state files or a saved run, it asks **Start fresh or resume?** Start fresh keeps the earlier files beside the new ones as `<file>.previous-<time>`, and the saved receipt and events as `.straddle-wizard/receipt.json.<state>-<time>` and `events.jsonl.<state>-<time>`. The receipt goes aside once you confirm the context; the skills' files and events stay where they are until you've chosen an agent and a mode, so cancelling before that leaves them in place; only the receipt has moved. Only the integration program sets the skills' files aside; `wizard plan` and the other single-step commands always run their skill.
-
-When `STRADDLE_API_KEY` or the Sandbox environment isn't set, Setup would stop at the missing value, so the session leaves Setup for later and lists only the steps up to the first one that can send Straddle requests: usually just Plan. Set the values in your own shell and run `wizard resume`: Setup runs first and checks them, then Integrate and the rest. `wizard setup` on its own still runs Setup, which reports what's missing. In Manual, `wizard status` follows the same rule, and prints nothing to paste while the next step can't start.
-
-Ctrl-C at a Wizard prompt marks the run aborted and keeps all work. While the agent runs, Ctrl-C belongs to the agent. Nothing is rolled back.
-
-## Commands
-
-| Command | What it does |
-| -- | -- |
-| `wizard` | Guided integration in one agent session: Setup, Plan, Migrate when another payment provider is detected, Integrate, Test, Go Live. With a skills bundle that carries `straddle-payment-review`, a fresh read-only session runs the [payment review](#payment-review) between Test and Go Live. |
-| `wizard resume` | Shows where the run stands, from the skills' state files, and reopens the last agent session at the first unfinished step (Manual: prints what to paste next). When Test is done and only Go Live is left, it also offers to finish there. Choices the first run didn't finish, and Auto or Manual when the saved run has none, are asked first, and `--exclude` paths are added to the saved ones. Before Go Live it runs the payment review again in a new session, unless the saved report's Plan hash and Code hash still match the plan and the code. |
-| `wizard setup`, `plan`, `integrate`, `test` | One step of the integration program. |
-| `wizard get-started`, `migrate`, `go-live`, `audit` | The named program's skill. |
-| `wizard skill list`, `wizard skill run <name>` | Lists the bundle's skills with versions, or runs one directly. |
-| `wizard install`, `update`, `remove` | Installs, updates, or removes the Straddle plugin with the client's own plugin commands. Install and update succeed only when the copy the client loads matches the Wizard's bundle, and never replace a `straddle` marketplace registered from another place. |
-| `wizard mcp add`, `mcp remove` | Registers or removes only `straddle-api` and `straddle-docs` with the client's own MCP commands. |
-| `wizard status` | Bundle, clients, plugin and MCP state, the Straddle CLI binary (from its platform package, never downloaded) and version the agent session uses, key presence, environment, and the saved run with its checklist; for a Manual run, the message `wizard resume` would hand you next (none while the next step can't start). |
-| `wizard log` | Writes `.straddle-wizard/session-log.html` (owner-only, replaced on each run) from `events.jsonl` and the session's Claude Code transcript or Codex rollout: one section per step, each tool call as a one-line row that opens to its recorded result, highlighted with Expressive Code in Ayu Mirage as in the Northwind integration log (Bash and Codex shell calls as a terminal, Edit as a diff, Write as the file, MCP tools by their short name such as `straddle-api execute-request`), and the agent's replies drawn by the same Markdown renderer as the report screens, tables box-drawn and also given to screen readers as real tables, with their fenced code highlighted like tool output. A reply wider than the screen scrolls sideways, and takes keyboard focus so arrow keys can scroll it. Keys, tokens, the values of secret-named `KEY=value` and `"secret": "value"` pairs with six or more characters between their delimiters, found by one forward scan: after a quoted label, as in JSON, a quoted string keeps its quotes, an object or array is left for its own fields, and the next field stays; after any label the value, which may start on the next line as in pretty-printed JSON, is read by how it opens (a quote, an escaped quote, backticks or `*`/`_` emphasis to its closer, or to the end of the line when unclosed) and then the rest of its word, so `PASSWORD="a".b'c d'`, `PASSWORD=it's-a-secret`, ``"password": `two words` `` and ``**API key:** `value` `` go entirely; a name holding a secret word is a secret label even when it starts with account or routing (`ACCOUNT_TOKEN`, `routing_signature`), and a Markdown code fence that starts the line after a label (`Set your API key:` then ```` ```shell ````) stays code; JWTs, long hex or base64 runs, account and routing numbers are redacted, and home directories show as `~`, before anything is clipped, highlighted or written. The page is self-contained (HTML, CSS and script inline) and nothing leaves the machine. In a terminal it opens the page in your browser; a pipe gets the path. A transcript that has moved, or that isn't a regular file (a directory or a FIFO), is named on the page, which still shows the recorded steps. At the end of a session in a terminal (not `--json`), the Wizard asks `Open the session log? [Y/n]` when the session recorded anything; Ctrl-C there leaves the session's saved outcome and exit code as the report gave them. |
-
-Options: `--dir <path>`, `--client claude|codex|cursor` (for guided runs, `resume`, and configuration commands), `--mode auto|manual` (for guided runs and `resume`; on `resume` it changes the saved mode), `--bundle <path>` (or `STRADDLE_WIZARD_BUNDLE`), `--exclude <glob>` (repeatable, or `STRADDLE_WIZARD_EXCLUDE=a,b`), `--yes` for downloading the skills and for configuration commands, and `--json` for `status` and `skill list`.
-
-`wizard audit` runs the `straddle-audit` skill and prints the findings table from `straddle-audit-report.md`, with `file:line` and confidence for each finding. There is no `diagnose` command.
-
-## Payment review
-
-The payment review is an advisory checklist of payment-path risks in the code this run changed. It is not a security audit, a clean report doesn't mean the code is safe, and it never blocks Go Live.
-
-- **When it runs.** In Auto with Claude Code or Codex, or in Manual with Claude Code, the Wizard records the repository's starting state before the first session changes anything. It keeps that state as Git objects under `refs/straddle-wizard/<run id>` in your repository, so edits already there don't count as the run's. After Test, a fresh read-only session reviews only what the run changed, and Go Live then resumes the original session.
-- **What it never reads.** The starting state and the review scope leave out the same files the Wizard never opens (see **No secrets** below), including your `--exclude` paths.
-- **What it can do.** The reviewer can read files, and nothing else. It can't edit files, write to the shell, or reach the network. Claude Code gets no shell at all. Codex runs in its read-only sandbox with every MCP server turned off. These restrictions apply only to the review process, never to your settings or the original session.
-- **The report.** The reviewer writes no file. The Wizard saves the report it prints to `straddle-payment-review.md` when the report is valid and the code didn't change during the review. Go Live lists open Critical and High findings as warnings and can still report ready. Fixes go back through Integrate only when you approve them.
-- **Stopping and resuming.** One Ctrl-C ends the review and saves no report; `wizard resume` reviews again. A review that fails or comes back incomplete is a warning, and Go Live still runs. In Manual with Claude Code, the Wizard prints the reviewer's command to run in a new terminal. Manual with Codex runs no review, and Go Live warns that none ran.
-
-The full contract is the Payment review section of the skills' `wizard-program.md` reference.
-
-## Guarantees
-
-- **No code edit before the plan.** Integrate and Test do not start until `straddle-integration-plan.md` (or, for Test, `straddle-migration-plan.md`) exists. In Claude Code, a per-session hook also denies the file-edit tools (Edit, Write, MultiEdit, NotebookEdit) on repository files until the plan exists, except the skills' own state files and reports. It does not cover shell commands that write files; your own Claude Code permission settings decide those. The hook is per session, not per step: in a session that runs both Plan and Migrate it lifts once either plan exists, so after Plan writes `straddle-integration-plan.md` it no longer blocks Migrate's edits before `straddle-migration-plan.md` exists; Migrate's own rules and your Claude Code permission settings still apply. Codex and Cursor sessions get no such hook; the skill's own instructions and your client's sandbox and approval policy apply there.
-- **No Straddle request without configuration.** A missing `STRADDLE_API_KEY`, an environment other than Sandbox, or a `STRADDLE_BASE_URL` that disagrees with `STRADDLE_ENVIRONMENT` is shown as a configuration error before any step that can send Straddle requests. `STRADDLE_BASE_URL` is treated as the target when it is set, as the Straddle CLI and SDKs do. The run stops before sending any Straddle request; set the values in your shell and resume. The Wizard checks only these shell variables, not a saved Straddle CLI login. In Claude Code, any of these set in the `env` block of your Claude Code settings override your shell inside the session; the Wizard doesn't read your settings, and the skills check the environment again in the session before any Straddle request.
-- **No secrets.** The Wizard reads dependency manifests and file names in the selected repository, and hashes other files locally to report which ones changed. When a manifest declares Plaid, it also searches source files for Plaid's Transfer, Identity Verification and Link calls. It never opens `.env*` files, keys, certificates, credential or CLI configuration files, or paths you pass with `--exclude`, and it does not follow symlinks. The same rules apply when it shows the plan or the audit report: a symlinked or excluded one is not opened. Directories it cannot read are skipped and named. It never reads, stores, or prints your API key; set it in your own shell.
-- **No stored or inherited approval.** `.straddle-wizard/receipt.json` records the program, agent, Auto or Manual mode, context, choices, bundle identity, state (`ready`, `running`, `blocked`, `aborted`, `completed`), and each agent session the Wizard opened (its client session id, the steps it was asked to run, changed files). `.straddle-wizard/events.jsonl` holds the observed events, reported markers and any choice to finish without Go Live. Neither has an approval field, and the Wizard treats both as untrusted input: a receipt whose run id, program, agent, mode, session id, step or choices are not the Wizard's own is set aside, not used, and a malformed event line is skipped. A reopened session keeps its earlier conversation, so the Wizard's resume prompt tells the agent that approvals given before it don't count and that every Sandbox write is previewed and asked again, and the skills follow the same rule (`wizard-program.md`). That rule is an instruction to the agent, not something the Wizard can enforce. Only a plan approval recorded in the plan file, for the unchanged plan, carries over.
-- **Your settings, unchanged.** The Wizard launches your agent's program sessions with your own settings and never changes them. The [payment review](#payment-review) is the one exception: its own process gets read-only flags. Claude Code runs with your permission mode, allow and deny rules, hooks, plugins, managed policy and `env` values; Codex runs with your sandbox, approval policy and the rest of your configuration. For program sessions, the Wizard passes no permission, sandbox or approval flag. In Claude Code it adds, through `--settings`, its checklist status line, which replaces yours for that session, its progress hooks and the pre-plan edit hook above, and nothing else. Claude Code merges these with your settings, so your hooks still run. If your settings turn hooks off (`disableAllHooks`, or a managed `allowManagedHooksOnly`), there is no checklist and no edit hook, and `wizard resume` can't reopen the session: it starts a new one at the next unfinished step. If Codex asks whether to trust the folder, that is your own Codex configuration asking, as it would without the Wizard. The session's environment is yours with one change: the Wizard's Straddle CLI directory goes first on `PATH`, ahead of any `straddle` of your own, and `wizard status` shows which binary that is.
-- **Cursor, unchanged.** In Auto the Wizard starts `cursor-agent --workspace <repo> --plugin-dir <bundle> [--resume=<chat>] "<prompt>"`, with no `--force`, `--yolo`, `--sandbox`, `--approve-mcps`, `--trust` or `--auto-review`, so your own approval mode, sandbox, MCP approvals and workspace trust apply. It writes no Cursor configuration. Manual never starts your agent, in any client: the Wizard still runs its readiness checks (`cursor-agent --version` and `cursor-agent status`, and their Claude Code and Codex equivalents) and any install command you approve, and nothing else.
-- **Your agent owns the code.** Edits happen in your local agent. The Wizard hosts no model and sends no repository content to Straddle.
-- **Other client configuration stays.** Install, update, remove, and MCP commands act only on the `straddle` plugin, its `straddle` marketplace, and the `straddle-api` and `straddle-docs` servers.
-
-## MCP servers
-
-| Server | URL | Credential |
-| -- | -- | -- |
-| `straddle-api` | `https://mcp.scalar.com/mcp/d5d1b1c2-ae5b-432d-b795-4fcb31cfdedd` | Your Straddle API key as a bearer token from `STRADDLE_API_KEY`. No Scalar login. |
-| `straddle-docs` | `https://straddle-build-straddle-openapi.apidocumentation.com/mcp` | None. |
-
-Claude Code gets both from the Straddle plugin. Codex needs a client-level `straddle-api` with `--bearer-token-env-var STRADDLE_API_KEY`, which `wizard install` and `wizard mcp add` add. Cursor configuration is manual; the Wizard prints the JSON to merge.
-
-## Development
+Planning can begin before you have an API key. Before implementation or testing sends Straddle requests, set a sandbox key from the [Straddle dashboard](https://dashboard.straddle.com) and declare the sandbox environment. In Bash or Zsh, replace the placeholder with your key:
 
 ```sh
-npm ci
-export STRADDLE_SKILLS_SOURCE=/path/to/straddle-skills   # any straddle-build/skills checkout with plugin 0.1.x
-npm run typecheck
-npm test
-npm run build
+export STRADDLE_API_KEY="YOUR_SANDBOX_API_KEY"
+export STRADDLE_ENVIRONMENT=sandbox
 ```
 
-Tests drive the real CLI. Most use `STRADDLE_SKILLS_SOURCE` as a local bundle. `tests/contract.test.ts` also reads the state-file header templates and the approval hash command from that checkout, fills them in the way the skills say, and checks that the Wizard reads each file as the skill means it, so a contract change in the skills fails here first. The release tests serve fixture plugin releases, built from that checkout, from a local HTTP server that answers like the GitHub releases API, so no real tag or release is used. Claude Code is replaced by a scripted process in `tests/fixtures/fake-claude.mjs`, so the test suite is simulated-adapter evidence, not native-client proof.
+Wizard reads the key from these shell variables, including when the CLI already has a saved token. For PowerShell and base URL configuration, see [Configure sandbox requests](docs/usage.md#configure-sandbox-requests).
+
+## Choose how your agent runs
+
+Auto starts your installed agent in the current terminal. Manual prints the message and setup steps for you to use in your own agent.
+
+| Agent | Auto prerequisite | Progress in Auto |
+| --- | --- | --- |
+| Claude Code | `claude` on `PATH`, signed in | Checklist in the terminal status line |
+| Codex | `codex` on `PATH`, signed in | Checklist on a local browser page |
+| Cursor | `cursor-agent` on `PATH`, signed in | Saved reports after the session ends |
+
+Manual also works when the agent is available only in an app. Choose the agent and mode at the prompts, or set them explicitly:
+
+```sh
+npx @straddlecom/wizard@latest --client codex --mode auto
+```
+
+Your agent uses its configured permissions. Wizard asks before running plugin or MCP configuration commands. See [Configure an agent](docs/usage.md#configure-an-agent) for the client-specific setup.
+
+## Resume work
+
+Check the saved run or continue from its first unfinished step:
+
+```sh
+npx @straddlecom/wizard@latest status
+npx @straddlecom/wizard@latest resume
+```
+
+In Auto, Wizard reopens the previous session when its session ID is available. In Manual, it prints the next message to paste. The plan and report files determine where work resumes. Editing an approved plan requires approval again and makes reports for the earlier plan out of date.
+
+To inspect a recorded session, open its local log:
+
+```sh
+npx @straddlecom/wizard@latest log
+```
+
+See [Resume and inspect a run](docs/usage.md#resume-and-inspect-a-run) for completion rules, fresh starts, and saved files.
+
+## Run one task
+
+Use a focused command when you already know the next step.
+
+| Task | Command |
+| --- | --- |
+| Check project setup | `wizard setup` |
+| Choose an integration approach | `wizard get-started` |
+| Write an integration plan | `wizard plan` |
+| Add Straddle beside another provider | `wizard migrate` |
+| Implement the approved plan | `wizard integrate` |
+| Test the integration in sandbox | `wizard test` |
+| Review production readiness | `wizard go-live` |
+| Review an existing integration | `wizard audit` |
+
+The table assumes a global installation. With npx, replace `wizard` with `npx @straddlecom/wizard@latest`. For example:
+
+```sh
+npx @straddlecom/wizard@latest plan
+```
+
+Use `wizard skill list` to inspect the selected bundle, or `wizard skill run straddle-setup` to invoke a skill by name. The [usage guide](docs/usage.md) covers command options, plugin updates, MCP configuration, and local bundle testing.
+
+## Contribute
+
+See [Develop and test Wizard](docs/usage.md#develop-and-test-wizard) for the build commands and required skills fixture. The source branch includes changes after npm release `0.1.2`; [source-only behavior](docs/usage.md#source-only-behavior) identifies those differences.
+
+Report reproducible problems in [GitHub issues](https://github.com/straddle-build/wizard/issues). Licensed under [Apache-2.0](LICENSE).
