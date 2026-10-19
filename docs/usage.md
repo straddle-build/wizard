@@ -91,7 +91,7 @@ Wizard `0.1.2` accepts Straddle plugin releases in the `0.1.x` range. It selects
 
 Each release supplies `straddle-plugin-<version>.zip` and `SHA256SUMS`. Before using a download, Wizard verifies its checksum, plugin version, archive paths, file types, and allowed plugin contents. It reuses an intact cached copy of the selected release.
 
-The cache directory is `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/plugin`. Its adjacent `release.json` stores the verified content digest. Wizard checks that digest on later uses. An edited or damaged cache requires a fresh download; the source build keeps the edited copy ([details](#update-the-skills-with-one-command)). If the release list is unavailable, Wizard can use the verified release already cached on your machine and reports that choice.
+The cache directory is `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/plugin`. Its adjacent `release.json` stores the verified content digest. Wizard checks that digest on later uses. An edited or damaged cache requires a fresh download. If the release list is unavailable, Wizard can use the verified release already cached on your machine and reports that choice.
 
 `wizard status` reports the local cached bundle. To inspect the skills available in a selected release:
 

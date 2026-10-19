@@ -254,8 +254,8 @@ async function chooseMode(io: Prompter, client: ClientName, env: NodeJS.ProcessE
 
 function printCommandResults(io: Prompter, results: readonly CommandResult[]): boolean {
   for (const r of results) {
-    io.say(`${r.outcome.padEnd(8)}${displayCommand(r.command)}`);
-    if (r.outcome === 'failed') io.say(r.output.split('\n').slice(-5).map((l) => `        ${l}`).join('\n'));
+    io.say(sanitize(`${r.outcome.padEnd(8)}${displayCommand(r.command)}`));
+    if (r.outcome === 'failed') io.say(sanitize(r.output.split('\n').slice(-5).map((l) => `        ${l}`).join('\n')));
   }
   return results.every((r) => r.outcome !== 'failed');
 }
@@ -360,10 +360,10 @@ function printKeptEdits(io: Prompter, kept: KeptEdits, dir: string): void {
 }
 
 export function printPlan(say: (line: string) => void, plan: ConfigPlan): void {
-  if (plan.kind === 'nothing') { say(plan.note); return; }
-  if (plan.kind === 'manual') { for (const step of plan.steps) say(`  ${step}`); return; }
-  for (const command of plan.commands) say(`    ${displayCommand(command)}`);
-  say(`  ${plan.note}`);
+  if (plan.kind === 'nothing') { say(sanitize(plan.note)); return; }
+  if (plan.kind === 'manual') { for (const step of plan.steps) say(sanitize(`  ${step}`)); return; }
+  for (const command of plan.commands) say(sanitize(`    ${displayCommand(command)}`));
+  say(sanitize(`  ${plan.note}`));
 }
 
 function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: ClientState, env: NodeJS.ProcessEnv): void {
@@ -459,7 +459,7 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
     }
     if (repair === 'manual') {
       io.say('Manual steps:');
-      if (plan.kind === 'commands') for (const command of plan.commands) io.say(`  ${displayCommand(command)}`);
+      if (plan.kind === 'commands') for (const command of plan.commands) io.say(sanitize(`  ${displayCommand(command)}`));
       else printPlan((line) => io.say(line), plan);
       return finish(receipt, 'blocked', 'Straddle plugin not installed');
     }
@@ -760,7 +760,7 @@ async function runReview(io: Prompter, receipt: Receipt, ready: Ready, opts: Jou
     // that file carries the Wizard's hooks, so the session that started from it after this point is the review's.
     writeSettings();
     io.say(`  Test is done. Run this in a new terminal in ${repo}. It starts a new ${label} session, not your earlier one, that reviews the code this run changed. It can't edit files, reach the network or change your settings, and it prints a report I save to ${REVIEW_REPORT}:`);
-    io.say(`    ${displayCommand(command)}`);
+    io.say(sanitize(`    ${displayCommand(command)}`));
     io.say('  Come back here when it ends.');
     receipt.sessions.push(session);
     saveReceipt(receipt);

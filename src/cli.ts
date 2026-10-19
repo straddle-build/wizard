@@ -109,7 +109,7 @@ async function preparedBundle() {
 }
 
 async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number> {
-  say(heading);
+  say(sanitize(heading));
   printPlan(say, plan);
   if (plan.kind === 'nothing') return 0;
   if (plan.kind === 'manual') { say("I didn't change anything; follow the steps above in the client."); return 1; }
@@ -119,8 +119,8 @@ async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number>
   }
   let ok = true;
   for (const r of runCommands(plan.commands, env)) {
-    say(`${r.outcome.padEnd(8)}${displayCommand(r.command)}`);
-    if (r.outcome === 'failed') { ok = false; say(r.output.split('\n').slice(-5).map((l) => `        ${l}`).join('\n')); }
+    say(sanitize(`${r.outcome.padEnd(8)}${displayCommand(r.command)}`));
+    if (r.outcome === 'failed') { ok = false; say(sanitize(r.output.split('\n').slice(-5).map((l) => `        ${l}`).join('\n'))); }
   }
   return ok ? 0 : 1;
 }

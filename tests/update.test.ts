@@ -265,3 +265,17 @@ test('update strips terminal controls from remote changes and cache paths', asyn
   assert.match(r.stdout, /commit subject/);
   assert.doesNotMatch(r.stdout, /\x1b/);
 });
+
+test('update strips terminal controls from its plugin plan without changing it', async () => {
+  const control = '\x1b]52;c;unsafe\x07';
+  const cache = join(tempDir('cache'), `${control}cache`);
+  const claude = fakeClaude();
+  const installed = await wizard(['install', '--client', 'claude', '--yes'], OLD, cache, { claude });
+  const r = await wizard(['update', '--client', 'claude', '--yes'], NEW, cache, { claude });
+
+  assert.equal(installed.code, 0, installed.stdout + installed.stderr);
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /Update the Straddle plugin in Claude Code/);
+  assert.doesNotMatch(r.stdout, /\x1b/);
+  assert.equal(recorded(cache).version, '0.1.2');
+});
