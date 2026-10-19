@@ -152,7 +152,7 @@ async function configurePlugin(kind: 'install' | 'update', state: ClientState, b
 async function update(): Promise<number> {
   const named = clientOption();
   const namedState = named ? inspectClient(named, env) : null;
-  if (namedState && named !== 'cursor' && namedState.version === null) { say(`${CLIENT_LABEL[named]} isn't installed or isn't on your PATH.`); return 1; }
+  if (namedState && named !== 'cursor' && namedState.version === null) { say(`${CLIENT_LABEL[namedState.name]} isn't installed or isn't on your PATH.`); return 1; }
   const before = findBundle({ override: bundlePath, env });
   const prepared = await preparedBundle();
   if (!prepared) return 1;
