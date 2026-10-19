@@ -104,7 +104,7 @@ async function preparedBundle() {
   const check = await prepareBundle(io(), { override: bundlePath, env }, Boolean(values.yes));
   if (check === null) say("Cancelled. I didn't download anything.");
   else if (!check.ok) say(check.reason);
-  return check?.ok ? check.bundle : null;
+  return check?.ok ? { bundle: check.bundle, releaseListed: check.releaseListed } : null;
 }
 
 async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number> {
@@ -131,9 +131,9 @@ async function configure(kind: 'install' | 'remove' | 'mcp add' | 'mcp remove'):
   if (kind === 'remove') return confirmAndRun(removePlan(state), `Remove the Straddle plugin from ${state.label}:`);
   if (kind === 'mcp add') return confirmAndRun(mcpAddPlan(state), `Register the Straddle API MCP and Docs MCP in ${state.label}:`);
   if (kind === 'mcp remove') return confirmAndRun(mcpRemovePlan(state), `Remove the Straddle MCP servers from ${state.label}:`);
-  const bundle = await preparedBundle();
-  if (!bundle) return 1;
-  return configurePlugin('install', state, bundle);
+  const prepared = await preparedBundle();
+  if (!prepared) return 1;
+  return configurePlugin('install', state, prepared.bundle);
 }
 
 async function configurePlugin(kind: 'install' | 'update', state: ClientState, bundle: Bundle): Promise<number> {
@@ -151,9 +151,10 @@ async function configurePlugin(kind: 'install' | 'update', state: ClientState, b
 async function update(): Promise<number> {
   const named = clientOption();
   const before = findBundle({ override: bundlePath, env });
-  const bundle = await preparedBundle();
-  if (!bundle) return 1;
-  if (bundle.kind === 'release' && before.ok && before.bundle.contentSha256 === bundle.contentSha256) {
+  const prepared = await preparedBundle();
+  if (!prepared) return 1;
+  const { bundle } = prepared;
+  if (prepared.releaseListed && bundle.kind === 'release' && before.ok && before.bundle.pluginVersion === bundle.pluginVersion) {
     say(`The Straddle skills on this machine are already the newest ${PLUGIN_RELEASES.range} plugin release, v${bundle.pluginVersion}.`);
   }
   if (named) {
@@ -161,7 +162,7 @@ async function update(): Promise<number> {
     if (named !== 'cursor' && state.version === null) { say(`${CLIENT_LABEL[named]} isn't installed or isn't on your PATH.`); return 1; }
     return configurePlugin('update', state, bundle);
   }
-  const installed = CLIENT_NAMES.map((name) => inspectClient(name, env, bundle)).filter((c) => c.version !== null && c.plugin.state === 'installed');
+  const installed = CLIENT_NAMES.map((name) => inspectClient(name, env, bundle)).filter((c) => c.plugin.state === 'installed');
   if (!installed.length) {
     say('No agent here has the Straddle plugin installed, so the skills are all up to date. `wizard` loads them into the sessions it starts; `wizard install --client <name>` installs them in an agent.');
     return 0;
@@ -220,8 +221,9 @@ function status(): number {
 }
 
 async function skillList(): Promise<number> {
-  const bundle = await preparedBundle();
-  if (!bundle) return 1;
+  const prepared = await preparedBundle();
+  if (!prepared) return 1;
+  const { bundle } = prepared;
   const skills = Object.entries(bundle.skills).map(([name, info]) => ({ name, version: info.version, runnable: isRunnableSkill(name), description: info.description }));
   if (values.json) { say(JSON.stringify({ bundle: bundleLabel(bundle), path: bundle.path, skills }, null, 2)); return 0; }
   say(`Skills in the ${bundleLabel(bundle)}:`);

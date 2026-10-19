@@ -263,6 +263,7 @@ function printCommandResults(io: Prompter, results: readonly CommandResult[]): b
 // ---------- Skill bundle ----------
 
 export interface BundleRequest { override: string | undefined; env: NodeJS.ProcessEnv }
+export type PreparedBundleCheck = BundleCheck & { releaseListed: boolean };
 
 // The developer's --bundle, else the verified plugin release already on this machine. Never fetches.
 export function findBundle(req: BundleRequest): BundleCheck {
@@ -273,18 +274,18 @@ export function findBundle(req: BundleRequest): BundleCheck {
 // otherwise downloaded and verified after the developer agrees, with what changed since the cached release. An edited
 // cached copy is kept beside the clean release. When the release list cannot be read, the release already on this
 // machine is used. Resolves null when the developer cancels.
-export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boolean): Promise<BundleCheck | null> {
-  if (req.override) return loadLocalBundle(req.override);
+export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boolean): Promise<PreparedBundleCheck | null> {
+  if (req.override) return { ...loadLocalBundle(req.override), releaseListed: false };
   const cached = loadCachedRelease(req.env);
   let listed: unknown;
   try {
     listed = await listReleases(req.env);
   } catch (error) {
     const why = error instanceof Error ? error.message : String(error);
-    if (!cached.ok) return { ok: false, reason: `I couldn't read the Straddle plugin releases (${why}). ${cached.reason}` };
+    if (!cached.ok) return { ok: false, reason: `I couldn't read the Straddle plugin releases (${why}). ${cached.reason}`, releaseListed: false };
     io.say(`I couldn't check for a newer Straddle plugin release (${why}), so I'm using the ${bundleLabel(cached.bundle)} already on this machine.`);
     io.say();
-    return cached;
+    return { ...cached, releaseListed: false };
   }
   const beyond = newerOutsideRange(listed);
   if (beyond) {
@@ -292,8 +293,8 @@ export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boole
     io.say();
   }
   const release = pickRelease(listed);
-  if (typeof release === 'string') return { ok: false, reason: release };
-  if (cached.ok && cached.bundle.pluginVersion === release.version) return cached;
+  if (typeof release === 'string') return { ok: false, reason: release, releaseListed: true };
+  if (cached.ok && cached.bundle.pluginVersion === release.version) return { ...cached, releaseListed: true };
   const installed = cachedVersion(req.env);
   const edited = editedCopy(req.env);
   io.say(io.bold('Straddle skills'));
@@ -312,7 +313,7 @@ export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boole
   if (check.ok) io.say(`Verified straddle-plugin-${release.version}.zip against the ${release.tag} SHA256SUMS.`);
   if (check.keptEdits) printKeptEdits(io, check.keptEdits, releaseDir(req.env));
   if (check.ok) io.say();
-  return check;
+  return { ...check, releaseListed: true };
 }
 
 const MAX_COMMITS = 15;

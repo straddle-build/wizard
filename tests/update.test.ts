@@ -1,11 +1,10 @@
 // `wizard update` and the guided run's plugin download from an older or edited release on this machine, against a
 // local fixture server that answers like the GitHub releases and compare APIs. No real tag or release is used.
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { releaseNotes, tidySubject, type Release } from '../src/bundle.ts';
-import { fakeClaude, releaseServer, runWizard, tempDir, type FakeClaude, type FixtureCommit, type FixtureRelease } from './helpers.ts';
+import { fakeClaude, releaseServer, runWizard, tempDir, writeFiles, type FakeClaude, type FixtureCommit, type FixtureRelease } from './helpers.ts';
 
 const STAMP = 'Built by scripts/kit-release from 0123456789abcdef. Verify straddle-plugin-*.zip against SHA256SUMS.';
 const COMMITS: FixtureCommit[] = [
@@ -16,6 +15,13 @@ const COMMITS: FixtureCommit[] = [
   { message: 'kit: bump the plugin version to 0.1.2' },
   { message: 'Add the advisory straddle-payment-review skill and Go Live warnings (ME-967)' },
   { message: 'test(evals): tighten approval graders (ME-920, ME-923)' },
+  { message: 'ME-901: docs: revise setup' },
+  { message: 'fix: [ME-901] refresh setup #123' },
+  { message: 'fix(ME-1): keep transfer statuses (#39)' },
+  { message: 'fix: show account details (ME-967)' },
+  { message: 'build: add an important capability' },
+  { message: 'style: make an important capability clearer' },
+  { message: 'refactor: speed up an important capability' },
 ];
 
 // The Wizard's plugin release cache under `cache`, and what it holds.
@@ -35,15 +41,6 @@ async function wizard(args: string[], releases: FixtureRelease[], cache: string,
 const OLD: FixtureRelease[] = [{ tag: 'v0.1.1', notes: STAMP }];
 const NEW: FixtureRelease[] = [...OLD, { tag: 'v0.1.2', notes: `${STAMP}\n\n- Setup reports a newer kit and the command that updates it.` }];
 
-test('commit subjects lose internal ticket and pull request references, and release notes lose the build stamp', () => {
-  assert.equal(tidySubject('fix(me-918,me-898): keep install lockfiles'), 'fix: keep install lockfiles');
-  assert.equal(tidySubject('ME-947/951/954: multi-method bank connection'), 'multi-method bank connection');
-  assert.equal(tidySubject('fix(kit): make Cursor IDE Team import primary (#39)'), 'fix(kit): make Cursor IDE Team import primary');
-  assert.equal(tidySubject('Add the review skill (ME-918, ME-947)'), 'Add the review skill');
-  const release = { notes: `${STAMP}\r\n\r\nWhat changed for developers:\n- Plan keeps your SDK.` } as Release;
-  assert.deepEqual(releaseNotes(release), ['What changed for developers:', '- Plan keeps your SDK.']);
-});
-
 test('update on an old install downloads the newest release and shows what changed since the installed one', async () => {
   const cache = tempDir('cache');
   const old = await wizard(['skill', 'list', '--yes'], OLD, cache);
@@ -55,12 +52,20 @@ test('update on an old install downloads the newest release and shows what chang
   assert.match(r.stdout, /What changed since v0\.1\.1:\n {4}v0\.1\.2 release notes:\n {6}- Setup reports a newer kit and the command that updates it\.\n/);
   assert.doesNotMatch(r.stdout, /Built by scripts\/kit-release/);
   assert.ok(r.stdout.includes([
-    '    Changes to the skills (3 commits):',
+    '    Changes to the skills (9 commits):',
     "      - fix: an unobserved optional payout doesn't stop a Test pass",
     '      - best-practices: a key check never prints any part of the key',
     '      - Add the advisory straddle-payment-review skill and Go Live warnings',
+    '      - fix: refresh setup',
+    '      - fix: keep transfer statuses',
+    '      - fix: show account details',
+    '      - build: add an important capability',
+    '      - style: make an important capability clearer',
+    '      - refactor: speed up an important capability',
     '    Every commit: https://github.com/straddle-build/skills/compare/v0.1.1...v0.1.2',
   ].join('\n')), r.stdout);
+  assert.doesNotMatch(r.stdout, /\bME-\d+\b|#\d+\b/);
+  assert.doesNotMatch(r.stdout, /docs: revise setup/);
   assert.match(r.stdout, /Verified straddle-plugin-0\.1\.2\.zip against the v0\.1\.2 SHA256SUMS\./);
   assert.match(r.stdout, /No agent here has the Straddle plugin installed/);
   assert.equal(recorded(cache).version, '0.1.2');
@@ -82,6 +87,7 @@ test('update backs up locally edited skills, lists the edited files, says where 
   await wizard(['skill', 'list', '--yes'], OLD, cache);
   appendFileSync(plan(cache), '\nAlways ask about refunds.\n');
   writeFileSync(join(wizardCache(cache), 'plugin', 'skills', 'straddle-plan', 'notes.md'), 'my notes\n');
+  writeFiles(join(wizardCache(cache), 'plugin'), { 'docs/private-notes.md': 'keep this private note\n' });
   const r = await wizard(['update', '--yes'], NEW, cache, { compare: { 'v0.1.1...v0.1.2': COMMITS } });
   const status = await wizard(['status', '--json'], NEW, cache);
 
@@ -92,14 +98,27 @@ test('update backs up locally edited skills, lists the edited files, says where 
   const backup = join(wizardCache(cache), 'edited', kept[0]!);
   assert.match(readFileSync(join(backup, 'skills', 'straddle-plan', 'SKILL.md'), 'utf8'), /Always ask about refunds\./);
   assert.equal(readFileSync(join(backup, 'skills', 'straddle-plan', 'notes.md'), 'utf8'), 'my notes\n');
+  assert.equal(readFileSync(join(backup, 'docs', 'private-notes.md'), 'utf8'), 'keep this private note\n');
   // Announced before the download, and confirmed with the exact place afterwards.
-  assert.match(r.stdout, /Your copy at .*plugin no longer matches release v0\.1\.1\. I'll move it into .*edited rather than delete it, then install the clean release:\n {4}skills\/straddle-plan\/SKILL\.md \(changed\)\n {4}skills\/straddle-plan\/notes\.md \(added\)\n/);
+  assert.match(r.stdout, /Your copy at .*plugin no longer matches release v0\.1\.1\. I'll move it into .*edited rather than delete it, then install the clean release:\n {4}docs\/private-notes\.md \(added\)\n {4}skills\/straddle-plan\/SKILL\.md \(changed\)\n {4}skills\/straddle-plan\/notes\.md \(added\)\n/);
   assert.ok(r.stdout.includes(`Your edited copy of the Straddle skills is kept at ${backup}; ${join(wizardCache(cache), 'plugin')} now holds the clean release.`), r.stdout);
   assert.doesNotMatch(readFileSync(plan(cache), 'utf8'), /Always ask about refunds/);
   assert.equal(existsSync(join(wizardCache(cache), 'plugin', 'skills', 'straddle-plan', 'notes.md')), false);
+  assert.equal(existsSync(join(wizardCache(cache), 'plugin', 'docs', 'private-notes.md')), false);
   const bundle = JSON.parse(status.stdout).bundle;
   assert.equal(bundle.error, undefined, bundle.error);
   assert.equal(bundle.pluginVersion, '0.1.2');
+});
+
+test('Claude Code bookkeeping does not mark an otherwise intact cache as edited', async () => {
+  const cache = tempDir('cache');
+  await wizard(['skill', 'list', '--yes'], OLD, cache);
+  writeFiles(join(wizardCache(cache), 'plugin'), { '.in_use/session': '1234\n', '.orphaned_at': '2026-10-19T12:00:00Z\n' });
+  const r = await wizard(['update', '--yes'], NEW, cache);
+
+  assert.equal(r.code, 0, r.stdout);
+  assert.doesNotMatch(r.stdout, /no longer matches|edited copy/);
+  assert.deepEqual(keptCopies(cache), []);
 });
 
 test('an edited copy of the newest release is backed up too when the guided run downloads it again, and an intact one is replaced without a backup', async () => {
@@ -144,4 +163,37 @@ test('update on the newest release changes nothing, reports agents that already 
   assert.match(r.stdout, /Claude Code already has these skills\./);
   assert.deepEqual(r.requests.filter((path) => path.endsWith('.zip')), []);
   assert.deepEqual(claude.calls().filter((call) => /install|uninstall/.test(call)).length, 1);
+});
+
+test('update does not call an offline cache the newest release', async () => {
+  const cache = tempDir('cache');
+  await wizard(['skill', 'list', '--yes'], NEW, cache);
+  const r = await runWizard(['update', '--yes'], {
+    cwd: tempDir('repo'),
+    env: { STRADDLE_WIZARD_BUNDLE: '', XDG_CACHE_HOME: cache, STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases' },
+  });
+
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /I couldn't check for a newer Straddle plugin release/);
+  assert.doesNotMatch(r.stdout, /already the newest/);
+});
+
+test('update gives a local Cursor copy its manual step even without cursor-agent', async () => {
+  const cache = tempDir('cache');
+  await wizard(['skill', 'list', '--yes'], OLD, cache);
+  const home = tempDir('cursor-home');
+  const local = join(home, '.cursor', 'plugins', 'local', 'straddle');
+  mkdirSync(join(home, '.cursor', 'plugins', 'local'), { recursive: true });
+  cpSync(join(wizardCache(cache), 'plugin'), local, { recursive: true });
+  const server = await releaseServer(NEW);
+  const r = await runWizard(['update', '--yes'], {
+    cwd: tempDir('repo'),
+    env: { HOME: home, PATH: '/usr/bin:/bin', STRADDLE_WIZARD_BUNDLE: '', XDG_CACHE_HOME: cache, STRADDLE_WIZARD_RELEASES: server.url },
+  });
+  await server.close();
+
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /Update the Straddle plugin in Cursor/);
+  assert.match(r.stdout, /Update the "straddle" plugin from its team marketplace in Cursor\./);
+  assert.doesNotMatch(r.stdout, /No agent here has the Straddle plugin installed/);
 });

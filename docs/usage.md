@@ -229,13 +229,13 @@ wizard update
 Wizard selects the newest compatible plugin release. When the cached release is older, Wizard lists what changed since that version before asking to download:
 
 - The notes of each newer release, without the build line that every release carries.
-- The commits between the two release tags that change the skills. Merges, tests, evals, release records, CI, and documentation commits are left out, as are internal ticket references. A link to the full comparison on GitHub follows the list.
+- The commits between the two release tags that change the skills. Merges, tests, evals, release records, CI, and documentation commits are left out, as are internal ticket and pull-request references. A link to the full comparison on GitHub follows the list.
 
 If GitHub's compare API is unavailable, Wizard prints the comparison link instead of the commit list.
 
-After the download, Wizard updates the plugin in each agent that has it installed and doesn't already match the new release. Claude Code and Codex use the same native commands as `wizard update --client`. A local Cursor copy gets the manual step. With `--client`, only the named agent is updated.
+After the download, Wizard updates the plugin in each agent that has it installed and doesn't already match the new release. Claude Code and Codex use the same native commands as `wizard update --client`. A local Cursor copy gets the manual step even when `cursor-agent` is not on `PATH`. With `--client`, only the named agent is updated.
 
-If the cached release no longer matches the release Wizard verified, Wizard keeps that copy. Before installing the clean release, Wizard moves it to `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/edited/plugin-v<version>-<time>` and prints that path with each added, changed, or removed file. The guided run uses the same backup when it downloads a release over an edited cache. Wizard never loads a kept copy, so carry over any edits you still need.
+If the cached release no longer matches the release Wizard verified, Wizard keeps that copy. Before installing the clean release, Wizard moves it to `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/edited/plugin-v<version>-<time>` and prints that path with each added, changed, or removed file, including files in permitted inert directories. The guided run uses the same backup when it downloads a release over an edited cache. Wizard never loads a kept copy, so carry over any edits you still need.
 
 Wizard records a digest for each file when it downloads a release. For a cache downloaded by an earlier Wizard, it still keeps the edited copy but can't list the changed files.
 

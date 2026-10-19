@@ -24,6 +24,7 @@ const INERT_PATHS: Record<string, true> = {
   '.git': true, '.github': true, '.gitignore': true, '.markdownlint-cli2.jsonc': true, docs: true, evals: true, fixtures: true, kit: true, scripts: true, tests: true,
   '.in_use': true, '.orphaned_at': true,
 };
+const CACHE_BOOKKEEPING: Record<string, true> = { '.in_use': true, '.orphaned_at': true };
 
 export interface SkillInfo { version: string; description: string }
 
@@ -76,6 +77,21 @@ function fileDigests(root: string, tops: readonly string[]): Record<string, stri
   };
   for (const top of tops) visit(top);
   return digests;
+}
+
+function cacheEntries(root: string): string[] {
+  const entries: string[] = [];
+  const visit = (rel: string): void => {
+    const info = lstatSync(join(root, rel));
+    entries.push(rel);
+    if (info.isDirectory()) for (const name of readdirSync(join(root, rel))) visit(`${rel}/${name}`);
+  };
+  for (const top of readdirSync(root).filter((name) => !Object.hasOwn(CACHE_BOOKKEEPING, name))) visit(top);
+  return entries.sort();
+}
+
+function cachedPaths(root: string): string[] {
+  return readdirSync(root).filter((name) => !Object.hasOwn(CACHE_BOOKKEEPING, name));
 }
 
 // sha256 of the `<sha256>  <path>` listing (sorted by path) of RUNTIME_PATHS: the digest kit-release records as
@@ -150,20 +166,33 @@ export interface EditedCopy { path: string; version: string | null; changed: str
 
 export function editedCopy(env: NodeJS.ProcessEnv): EditedCopy | null {
   const dir = releaseDir(env);
-  if (!existsSync(dir)) return null;
   const record = readRecord(env);
   const version = text(field(record, 'version')) ?? null;
-  const check = readPlugin(dir, 'release');
-  if (version && check.ok && check.bundle.pluginVersion === version && check.bundle.contentSha256 === text(field(record, 'contentSha256'))) return null;
+  let info;
+  try { info = lstatSync(dir); } catch { return null; }
+  if (!info.isDirectory()) return { path: dir, version, changed: null };
   const files = field(record, 'files');
-  if (!files || typeof files !== 'object') return { path: dir, version, changed: null };
+  const entries = field(record, 'entries');
+  if (!files || typeof files !== 'object' || !Array.isArray(entries) || !entries.every((entry) => typeof entry === 'string')) {
+    return { path: dir, version, changed: null };
+  }
   const recorded = files as Record<string, unknown>;
-  const now = fileDigests(dir, readdirSync(dir).filter((name) => !Object.hasOwn(INERT_PATHS, name)));
+  const now = fileDigests(dir, cachedPaths(dir));
   const changed = [...new Set([...Object.keys(recorded), ...Object.keys(now)])].sort().flatMap((path) => {
     if (!Object.hasOwn(now, path)) return [`${path} (removed)`];
     if (!Object.hasOwn(recorded, path)) return [`${path} (added)`];
     return recorded[path] === now[path] ? [] : [`${path} (changed)`];
   });
+  const before = new Set(entries);
+  const after = new Set(cacheEntries(dir));
+  for (const path of [...new Set([...before, ...after])].sort()) {
+    if (!before.has(path) && !Object.hasOwn(now, path)) changed.push(`${path} (added)`);
+    if (!after.has(path) && !Object.hasOwn(recorded, path)) changed.push(`${path} (removed)`);
+  }
+  if (!changed.length) {
+    const check = readPlugin(dir, 'release');
+    if (version && check.ok && check.bundle.pluginVersion === version && check.bundle.contentSha256 === text(field(record, 'contentSha256'))) return null;
+  }
   return { path: dir, version, changed };
 }
 
@@ -189,7 +218,7 @@ export function loadCachedRelease(env: NodeJS.ProcessEnv): BundleCheck {
   }
   const check = readPlugin(dir, 'release');
   if (!check.ok) return check;
-  if (check.bundle.pluginVersion !== version || check.bundle.contentSha256 !== text(field(record, 'contentSha256'))) {
+  if (check.bundle.pluginVersion !== version || check.bundle.contentSha256 !== text(field(record, 'contentSha256')) || editedCopy(env)) {
     return { ok: false, reason: `${dir} no longer matches plugin release v${version} as the Wizard verified it. \`wizard\` or \`wizard install\` downloads it again.` };
   }
   return check;
@@ -256,14 +285,19 @@ export function releaseNotes(release: Release): string[] {
 }
 
 // Commits about tests, evals, release bookkeeping, CI and docs change nothing a developer's agent loads.
-const INTERNAL_COMMIT = /^(merge\b|(tests?|evals?|kit|ci|chore|build|docs?|style|refactor|release|no-mistakes)(\([^)]*\))?!?:)/i;
+const INTERNAL_COMMIT = /^(merge\b|(tests?|evals?|kit|ci|chore|docs?|release|no-mistakes)(\([^)]*\))?!?:)/i;
 
 // A commit subject without the internal ticket and pull request references developers can't open.
 export function tidySubject(subject: string): string {
   return subject
-    .replace(/^([a-z]+)\((?:[a-z]+-\d+[,\s]*)+\)(!?):/i, '$1$2:')
-    .replace(/^[A-Z]+-\d+(?:\/\d+)*:\s*/, '')
-    .replace(/\s*\((?:#\d+|[A-Z]+-\d+(?:,\s*[A-Z]+-\d+)*)\)/g, '')
+    .replace(/^ME-\d+(?:\/\d+)*:\s*/i, '')
+    .replace(/\(\s*ME-\d+(?:\s*,\s*ME-\d+)*\s*\)/gi, '')
+    .replace(/\[\s*ME-\d+(?:\s*,\s*ME-\d+)*\s*\]/gi, '')
+    .replace(/\bME-\d+\b/gi, '')
+    .replace(/\(\s*#\d+\s*\)/g, '')
+    .replace(/#\d+\b/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([:;,!.?])/g, '$1')
     .trim();
 }
 
@@ -278,7 +312,8 @@ export async function releaseCommits(env: NodeJS.ProcessEnv, from: string, to: s
   return commits.flatMap((commit) => {
     const parents = field(commit, 'parents');
     const subject = (text(field(field(commit, 'commit'), 'message')) ?? '').split('\n')[0]!.trim();
-    return (Array.isArray(parents) && parents.length > 1) || !subject || INTERNAL_COMMIT.test(subject) ? [] : [tidySubject(subject)];
+    const tidy = tidySubject(subject);
+    return (Array.isArray(parents) && parents.length > 1) || !tidy || INTERNAL_COMMIT.test(tidy) ? [] : [tidy];
   });
 }
 
@@ -350,7 +385,8 @@ export async function downloadRelease(release: Release, env: NodeJS.ProcessEnv):
   rmSync(dir, { recursive: true, force: true });
   renameSync(staging, dir);
   const archiveSha256 = createHash('sha256').update(archive).digest('hex');
-  const files = fileDigests(dir, RUNTIME_PATHS);
-  writeFileSync(recordPath(env), `${JSON.stringify({ version: release.version, release: release.page, archiveSha256, contentSha256: check.bundle.contentSha256, files }, null, 2)}\n`);
+  const files = fileDigests(dir, cachedPaths(dir));
+  const entries = cacheEntries(dir);
+  writeFileSync(recordPath(env), `${JSON.stringify({ version: release.version, release: release.page, archiveSha256, contentSha256: check.bundle.contentSha256, files, entries }, null, 2)}\n`);
   return { ...loadCachedRelease(env), keptEdits };
 }
