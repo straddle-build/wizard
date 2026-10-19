@@ -188,12 +188,19 @@ export function pluginZip(version: string): Buffer {
 
 export const sha256 = (data: Buffer | string): string => createHash('sha256').update(data).digest('hex');
 
-export interface FixtureRelease { tag: string; zip?: Buffer; sums?: string; prerelease?: boolean }
+export interface FixtureRelease { tag: string; zip?: Buffer; sums?: string; prerelease?: boolean; notes?: string }
+// A commit as the GitHub compare API lists it: its message and how many parents it has (2 for a merge).
+export interface FixtureCommit { message: string; parents?: number }
 export interface ReleaseServer { url: string; requests: string[]; close(): Promise<void> }
 
-// Serves plugin releases the way the GitHub releases API and its asset downloads do, for STRADDLE_WIZARD_RELEASES.
-export async function releaseServer(releases: FixtureRelease[]): Promise<ReleaseServer> {
+// Serves plugin releases the way the GitHub releases API and its asset downloads do, for STRADDLE_WIZARD_RELEASES,
+// and `compare`, keyed by `<from tag>...<to tag>`, the way the GitHub compare API does beside it.
+export async function releaseServer(releases: FixtureRelease[], compare: Record<string, FixtureCommit[]> = {}): Promise<ReleaseServer> {
   const files = new Map<string, Buffer>();
+  for (const [range, commits] of Object.entries(compare)) {
+    const listed = commits.map((c) => ({ commit: { message: c.message }, parents: Array.from({ length: c.parents ?? 1 }, () => ({})) }));
+    files.set(`/compare/${range}`, Buffer.from(JSON.stringify({ commits: listed })));
+  }
   const requests: string[] = [];
   let list = '';
   const server = createServer((req, res) => {
@@ -210,7 +217,7 @@ export async function releaseServer(releases: FixtureRelease[]): Promise<Release
     files.set(`/${release.tag}/${archive}`, zip);
     files.set(`/${release.tag}/SHA256SUMS`, Buffer.from(release.sums ?? `${sha256(zip)}  ${archive}\n`));
     return {
-      tag_name: release.tag, draft: false, prerelease: release.prerelease ?? false, html_url: `${base}/${release.tag}`,
+      tag_name: release.tag, draft: false, prerelease: release.prerelease ?? false, html_url: `${base}/${release.tag}`, body: release.notes ?? '',
       assets: [archive, 'SHA256SUMS'].map((name) => ({ name, browser_download_url: `${base}/${release.tag}/${name}` })),
     };
   }));

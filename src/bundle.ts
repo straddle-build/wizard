@@ -38,7 +38,8 @@ export interface Bundle {
 
 export type BundleCheck = { ok: true; bundle: Bundle } | { ok: false; reason: string };
 
-export interface Release { tag: string; version: string; page: string; archiveUrl: string; sumsUrl: string }
+// `notes`: the release's description on GitHub, its changelog.
+export interface Release { tag: string; version: string; page: string; archiveUrl: string; sumsUrl: string; notes: string }
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
 
@@ -60,21 +61,30 @@ function frontmatter(text: string): { name?: string; description?: string; versi
   return { name: scalar('name'), description: scalar('description'), version: /^\s+version:\s*(\S+)/m.exec(block)?.[1] };
 }
 
+// The sha256 of every regular file under the top-level entries `tops` of root, by path; a symlink or anything but
+// regular files and directories maps to SPECIAL.
+const SPECIAL = 'special';
+function fileDigests(root: string, tops: readonly string[]): Record<string, string> {
+  const digests: Record<string, string> = {};
+  const visit = (rel: string): void => {
+    const abs = join(root, rel);
+    if (!existsSync(abs)) return;
+    const info = lstatSync(abs);
+    if (info.isFile()) digests[rel] = createHash('sha256').update(readFileSync(abs)).digest('hex');
+    else if (info.isDirectory()) for (const name of readdirSync(abs)) visit(`${rel}/${name}`);
+    else digests[rel] = SPECIAL;
+  };
+  for (const top of tops) visit(top);
+  return digests;
+}
+
 // sha256 of the `<sha256>  <path>` listing (sorted by path) of RUNTIME_PATHS: the digest kit-release records as
 // plugin.content_sha256. Null when a runtime path holds a symlink or anything but regular files and directories.
 function contentSha256(root: string): string | null {
-  const lines: string[] = [];
-  const visit = (rel: string): boolean => {
-    const abs = join(root, rel);
-    if (!existsSync(abs)) return true;
-    const info = lstatSync(abs);
-    if (info.isFile()) { lines.push(`${createHash('sha256').update(readFileSync(abs)).digest('hex')}  ${rel}`); return true; }
-    if (!info.isDirectory()) return false;
-    return readdirSync(abs).every((name) => visit(`${rel}/${name}`));
-  };
-  if (!RUNTIME_PATHS.every(visit)) return null;
-  lines.sort((a, b) => (a.slice(66) < b.slice(66) ? -1 : 1));
-  return createHash('sha256').update(lines.map((l) => `${l}\n`).join('')).digest('hex');
+  const digests = Object.entries(fileDigests(root, RUNTIME_PATHS));
+  if (digests.some(([, sha]) => sha === SPECIAL)) return null;
+  const lines = digests.sort(([a], [b]) => (a < b ? -1 : 1)).map(([path, sha]) => `${sha}  ${path}\n`);
+  return createHash('sha256').update(lines.join('')).digest('hex');
 }
 
 // What a client would load from root, or why it is not a Straddle plugin this Wizard runs.
@@ -122,12 +132,57 @@ export function releaseDir(env: NodeJS.ProcessEnv): string {
 }
 
 const recordPath = (env: NodeJS.ProcessEnv) => join(dirname(releaseDir(env)), 'release.json');
+const readRecord = (env: NodeJS.ProcessEnv) => parseJson(existsSync(recordPath(env)) ? readFileSync(recordPath(env), 'utf8') : '');
+
+// The plugin version of the release the Wizard last downloaded, whether or not its copy is still intact.
+export function cachedVersion(env: NodeJS.ProcessEnv): string | null {
+  return existsSync(releaseDir(env)) ? text(field(readRecord(env), 'version')) ?? null : null;
+}
+
+// Where the Wizard keeps an edited copy of a release when it installs a clean one in its place.
+export function editedDir(env: NodeJS.ProcessEnv): string {
+  return join(dirname(releaseDir(env)), 'edited');
+}
+
+// The cached release when it no longer matches the release the Wizard verified: edited by hand, or damaged.
+// `changed`: each file that differs from the release, or null when the record predates per-file digests.
+export interface EditedCopy { path: string; version: string | null; changed: string[] | null }
+
+export function editedCopy(env: NodeJS.ProcessEnv): EditedCopy | null {
+  const dir = releaseDir(env);
+  if (!existsSync(dir)) return null;
+  const record = readRecord(env);
+  const version = text(field(record, 'version')) ?? null;
+  const check = readPlugin(dir, 'release');
+  if (version && check.ok && check.bundle.pluginVersion === version && check.bundle.contentSha256 === text(field(record, 'contentSha256'))) return null;
+  const files = field(record, 'files');
+  if (!files || typeof files !== 'object') return { path: dir, version, changed: null };
+  const recorded = files as Record<string, unknown>;
+  const now = fileDigests(dir, readdirSync(dir).filter((name) => !Object.hasOwn(INERT_PATHS, name)));
+  const changed = [...new Set([...Object.keys(recorded), ...Object.keys(now)])].sort().flatMap((path) => {
+    if (!Object.hasOwn(now, path)) return [`${path} (removed)`];
+    if (!Object.hasOwn(recorded, path)) return [`${path} (added)`];
+    return recorded[path] === now[path] ? [] : [`${path} (changed)`];
+  });
+  return { path: dir, version, changed };
+}
+
+// An edited copy moved aside so a clean release can take its place: nothing the developer changed is deleted.
+export interface KeptEdits extends EditedCopy { backup: string }
+
+function setAside(edited: EditedCopy, env: NodeJS.ProcessEnv): KeptEdits {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backup = join(editedDir(env), `plugin-${edited.version ? `v${edited.version}` : 'unknown'}-${stamp}`);
+  mkdirSync(editedDir(env), { recursive: true });
+  renameSync(edited.path, backup);
+  return { ...edited, backup };
+}
 
 // The release this Wizard downloaded and verified earlier, re-hashed against the content digest it recorded then.
 // Never fetches.
 export function loadCachedRelease(env: NodeJS.ProcessEnv): BundleCheck {
   const dir = releaseDir(env);
-  const record = parseJson(existsSync(recordPath(env)) ? readFileSync(recordPath(env), 'utf8') : '');
+  const record = readRecord(env);
   const version = text(field(record, 'version'));
   if (!version || !existsSync(dir)) {
     return { ok: false, reason: `No Straddle plugin release is on this machine yet. \`wizard\` or \`wizard install\` downloads the newest ${PLUGIN_RELEASES.range} release.` };
@@ -155,16 +210,21 @@ export async function listReleases(env: NodeJS.ProcessEnv): Promise<unknown> {
   return list;
 }
 
-// The newest published vX.Y.Z release in range, or why there is none. Drafts and prereleases never count.
-export function pickRelease(list: unknown): Release | string {
-  const releases = (Array.isArray(list) ? list : []).flatMap((entry): Release[] => {
+// Every published vX.Y.Z release, newest first. Drafts and prereleases never count.
+function publishedReleases(list: unknown): Release[] {
+  return (Array.isArray(list) ? list : []).flatMap((entry): Release[] => {
     const tag = text(field(entry, 'tag_name')) ?? '';
     const version = /^v(\d+\.\d+\.\d+)$/.exec(tag)?.[1];
     if (!version || field(entry, 'draft') === true || field(entry, 'prerelease') === true) return [];
     const assets = field(entry, 'assets');
     const asset = (name: string) => text(field((Array.isArray(assets) ? assets : []).find((a) => field(a, 'name') === name), 'browser_download_url')) ?? '';
-    return [{ tag, version, page: text(field(entry, 'html_url')) ?? tag, archiveUrl: asset(`straddle-plugin-${version}.zip`), sumsUrl: asset('SHA256SUMS') }];
+    return [{ tag, version, page: text(field(entry, 'html_url')) ?? tag, archiveUrl: asset(`straddle-plugin-${version}.zip`), sumsUrl: asset('SHA256SUMS'), notes: text(field(entry, 'body')) ?? '' }];
   }).sort(newestFirst);
+}
+
+// The newest published release in range, or why there is none.
+export function pickRelease(list: unknown): Release | string {
+  const releases = publishedReleases(list);
   const newest = releases.find((r) => inRange(r.version));
   if (!newest) {
     return releases[0]
@@ -173,6 +233,53 @@ export function pickRelease(list: unknown): Release | string {
   }
   if (!newest.archiveUrl || !newest.sumsUrl) return `Plugin release ${newest.tag} has no straddle-plugin-${newest.version}.zip and SHA256SUMS assets, so the Wizard cannot verify it.`;
   return newest;
+}
+
+// A published release newer than every one in range: it needs a newer Wizard.
+export function newerOutsideRange(list: unknown): Release | null {
+  const releases = publishedReleases(list);
+  const newest = releases.find((r) => inRange(r.version));
+  return releases[0] && !inRange(releases[0].version) && (!newest || newestFirst(releases[0], newest) < 0) ? releases[0] : null;
+}
+
+// The releases after version `from` up to and including `to`, newest first.
+export function releasesSince(list: unknown, from: string, to: Release): Release[] {
+  return publishedReleases(list).filter((r) => newestFirst(r, { version: from }) < 0 && newestFirst(r, to) >= 0);
+}
+
+// A changelog line kit-release writes into every release, which says nothing about what changed.
+const BUILD_STAMP = /^(Built by scripts\/kit-release\b|Verify straddle-plugin-)/;
+
+// What a release's notes say changed, without kit-release's build stamp.
+export function releaseNotes(release: Release): string[] {
+  return release.notes.split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line.trim() && !BUILD_STAMP.test(line.trim()));
+}
+
+// Commits about tests, evals, release bookkeeping, CI and docs change nothing a developer's agent loads.
+const INTERNAL_COMMIT = /^(merge\b|(tests?|evals?|kit|ci|chore|build|docs?|style|refactor|release|no-mistakes)(\([^)]*\))?!?:)/i;
+
+// A commit subject without the internal ticket and pull request references developers can't open.
+export function tidySubject(subject: string): string {
+  return subject
+    .replace(/^([a-z]+)\((?:[a-z]+-\d+[,\s]*)+\)(!?):/i, '$1$2:')
+    .replace(/^[A-Z]+-\d+(?:\/\d+)*:\s*/, '')
+    .replace(/\s*\((?:#\d+|[A-Z]+-\d+(?:,\s*[A-Z]+-\d+)*)\)/g, '')
+    .trim();
+}
+
+export const compareUrl = (from: string, to: string) => `https://github.com/${PLUGIN_RELEASES.repository}/compare/${from}...${to}`;
+
+// The subjects of the commits between two release tags that change the plugin for developers, oldest first.
+// Reads the GitHub compare API beside the releases list (STRADDLE_WIZARD_RELEASES included). Throws when it can't.
+export async function releaseCommits(env: NodeJS.ProcessEnv, from: string, to: string): Promise<string[]> {
+  const base = (env.STRADDLE_WIZARD_RELEASES || PLUGIN_RELEASES.url).replace(/\/releases(\?.*)?$/, '');
+  const commits = field(parseJson((await get(`${base}/compare/${from}...${to}`)).toString('utf8')), 'commits');
+  if (!Array.isArray(commits)) throw new Error(`${base}/compare/${from}...${to} did not return a list of commits`);
+  return commits.flatMap((commit) => {
+    const parents = field(commit, 'parents');
+    const subject = (text(field(field(commit, 'commit'), 'message')) ?? '').split('\n')[0]!.trim();
+    return (Array.isArray(parents) && parents.length > 1) || !subject || INTERNAL_COMMIT.test(subject) ? [] : [tidySubject(subject)];
+  });
 }
 
 // The plugin archive kit-release builds: a zip of stored (uncompressed) regular files. Returns why it cannot be
@@ -220,23 +327,30 @@ export function unpackRelease(release: { version: string; archive: Uint8Array; s
   return check;
 }
 
-// Downloads a release and its SHA256SUMS, verifies them, and only then replaces the cached release.
-export async function downloadRelease(release: Release, env: NodeJS.ProcessEnv): Promise<BundleCheck> {
+// `keptEdits`: where the cached release went when it had been edited, so the clean release could take its place.
+export type Downloaded = BundleCheck & { keptEdits: KeptEdits | null };
+
+// Downloads a release and its SHA256SUMS, verifies them, and only then replaces the cached release. A cached copy that
+// no longer matches what the Wizard verified is moved into editedDir, never deleted.
+export async function downloadRelease(release: Release, env: NodeJS.ProcessEnv): Promise<Downloaded> {
   let archive: Buffer;
   let sums: string;
   try {
     [archive, sums] = await Promise.all([get(release.archiveUrl), get(release.sumsUrl).then((b) => b.toString('utf8'))]);
   } catch (error) {
-    return { ok: false, reason: `Downloading plugin release ${release.tag} failed: ${error instanceof Error ? error.message : String(error)}` };
+    return { ok: false, reason: `Downloading plugin release ${release.tag} failed: ${error instanceof Error ? error.message : String(error)}`, keptEdits: null };
   }
   const dir = releaseDir(env);
   const staging = `${dir}.partial`;
   rmSync(staging, { recursive: true, force: true });
   const check = unpackRelease({ version: release.version, archive, sums }, staging);
-  if (!check.ok) { rmSync(staging, { recursive: true, force: true }); return check; }
+  if (!check.ok) { rmSync(staging, { recursive: true, force: true }); return { ...check, keptEdits: null }; }
+  const edited = editedCopy(env);
+  const keptEdits = edited ? setAside(edited, env) : null;
   rmSync(dir, { recursive: true, force: true });
   renameSync(staging, dir);
   const archiveSha256 = createHash('sha256').update(archive).digest('hex');
-  writeFileSync(recordPath(env), `${JSON.stringify({ version: release.version, release: release.page, archiveSha256, contentSha256: check.bundle.contentSha256 }, null, 2)}\n`);
-  return loadCachedRelease(env);
+  const files = fileDigests(dir, RUNTIME_PATHS);
+  writeFileSync(recordPath(env), `${JSON.stringify({ version: release.version, release: release.page, archiveSha256, contentSha256: check.bundle.contentSha256, files }, null, 2)}\n`);
+  return { ...loadCachedRelease(env), keptEdits };
 }

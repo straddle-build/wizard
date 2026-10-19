@@ -91,7 +91,7 @@ Wizard `0.1.2` accepts Straddle plugin releases in the `0.1.x` range. It selects
 
 Each release supplies `straddle-plugin-<version>.zip` and `SHA256SUMS`. Before using a download, Wizard verifies its checksum, plugin version, archive paths, file types, and allowed plugin contents. It reuses an intact cached copy of the selected release.
 
-The cache directory is `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/plugin`. Its adjacent `release.json` stores the verified content digest. Wizard checks that digest on later uses. An edited or damaged cache requires a fresh download. If the release list is unavailable, Wizard can use the verified release already cached on your machine and reports that choice.
+The cache directory is `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/plugin`. Its adjacent `release.json` stores the verified content digest. Wizard checks that digest on later uses. An edited or damaged cache requires a fresh download; the source build keeps the edited copy ([details](#update-the-skills-with-one-command)). If the release list is unavailable, Wizard can use the verified release already cached on your machine and reports that choice.
 
 `wizard status` reports the local cached bundle. To inspect the skills available in a selected release:
 
@@ -217,6 +217,29 @@ For offline integration fixtures, the configuration reader accepts a loopback sy
 ## Source-only behavior
 
 The default branch contains the following behavior after npm release `0.1.2`. Building this branch includes it; the published `0.1.2` package uses the earlier behavior.
+
+### Update the skills with one command
+
+Run `wizard update` without `--client` to bring a setup up to date:
+
+```sh
+wizard update
+```
+
+Wizard selects the newest compatible plugin release. When the cached release is older, Wizard lists what changed since that version before asking to download:
+
+- The notes of each newer release, without the build line that every release carries.
+- The commits between the two release tags that change the skills. Merges, tests, evals, release records, CI, and documentation commits are left out, as are internal ticket references. A link to the full comparison on GitHub follows the list.
+
+If GitHub's compare API is unavailable, Wizard prints the comparison link instead of the commit list.
+
+After the download, Wizard updates the plugin in each agent that has it installed and doesn't already match the new release. Claude Code and Codex use the same native commands as `wizard update --client`. A local Cursor copy gets the manual step. With `--client`, only the named agent is updated.
+
+If the cached release no longer matches the release Wizard verified, Wizard keeps that copy. Before installing the clean release, Wizard moves it to `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/edited/plugin-v<version>-<time>` and prints that path with each added, changed, or removed file. The guided run uses the same backup when it downloads a release over an edited cache. Wizard never loads a kept copy, so carry over any edits you still need.
+
+Wizard records a digest for each file when it downloads a release. For a cache downloaded by an earlier Wizard, it still keeps the edited copy but can't list the changed files.
+
+If a published plugin release is outside this Wizard's range, Wizard names it and the command that gets a newer Wizard.
 
 ### Use decisions from a revised plan
 

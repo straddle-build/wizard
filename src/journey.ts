@@ -3,7 +3,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameS
 import { homedir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PLUGIN_RELEASES, bundleLabel, downloadRelease, listReleases, loadCachedRelease, loadLocalBundle, pickRelease, releaseDir, type Bundle, type BundleCheck } from './bundle.ts';
+import {
+  PLUGIN_RELEASES, bundleLabel, cachedVersion, compareUrl, downloadRelease, editedCopy, editedDir, listReleases, loadCachedRelease, loadLocalBundle, newerOutsideRange, pickRelease,
+  releaseCommits, releaseDir, releaseNotes, releasesSince, type Bundle, type BundleCheck, type EditedCopy, type KeptEdits, type Release,
+} from './bundle.ts';
 import {
   CLIENT_LABEL, CLIENT_NAMES, EVENT_SURFACE, EVENT_SURFACE_NOTE, codexMcpOff, displayCommand, inspectClient, installPlan, launchCommand, manualHandoff, reviewCommand, reviewSettings, runCommands, updatePlan,
   type ClientName, type ClientState, type Command, type CommandResult, type ConfigPlan, type Handoff,
@@ -267,8 +270,9 @@ export function findBundle(req: BundleRequest): BundleCheck {
 }
 
 // The developer's --bundle, else the newest plugin release in range: the cached copy when it is that release,
-// otherwise downloaded and verified after the developer agrees. When the release list cannot be read, the release
-// already on this machine is used. Resolves null when the developer cancels.
+// otherwise downloaded and verified after the developer agrees, with what changed since the cached release. An edited
+// cached copy is kept beside the clean release. When the release list cannot be read, the release already on this
+// machine is used. Resolves null when the developer cancels.
 export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boolean): Promise<BundleCheck | null> {
   if (req.override) return loadLocalBundle(req.override);
   const cached = loadCachedRelease(req.env);
@@ -282,11 +286,20 @@ export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boole
     io.say();
     return cached;
   }
+  const beyond = newerOutsideRange(listed);
+  if (beyond) {
+    io.say(`Straddle plugin release ${beyond.tag} is out, and it needs a newer Wizard than ${WIZARD_VERSION}: run \`npx @straddlecom/wizard@latest update\`, or \`npm install -g @straddlecom/wizard@latest\` if you installed the Wizard globally.`);
+    io.say();
+  }
   const release = pickRelease(listed);
   if (typeof release === 'string') return { ok: false, reason: release };
   if (cached.ok && cached.bundle.pluginVersion === release.version) return cached;
+  const installed = cachedVersion(req.env);
+  const edited = editedCopy(req.env);
   io.say(io.bold('Straddle skills'));
-  io.say(`  ${cached.ok ? `Plugin release v${cached.bundle.pluginVersion} is on this machine. ` : ''}The newest ${PLUGIN_RELEASES.range} plugin release is ${release.tag} (${release.page}).`);
+  io.say(`  ${installed ? `Plugin release v${installed} is on this machine. ` : ''}The newest ${PLUGIN_RELEASES.range} plugin release is ${release.tag} (${release.page}).`);
+  if (installed && releasesSince(listed, installed, release).length) await printChanges(io, req.env, listed, `v${installed}`, release);
+  if (edited) printEdited(io, edited, editedDir(req.env));
   io.say(`  I'll download it into ${releaseDir(req.env)}, check it against the release's SHA256SUMS, and change nothing else:`);
   io.say(`    GET ${release.archiveUrl}`);
   io.say(`    GET ${release.sumsUrl}`);
@@ -296,8 +309,53 @@ export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boole
     if (!go) return null;
   }
   const check = await downloadRelease(release, req.env);
-  if (check.ok) io.say(`Verified straddle-plugin-${release.version}.zip against the ${release.tag} SHA256SUMS.\n`);
+  if (check.ok) io.say(`Verified straddle-plugin-${release.version}.zip against the ${release.tag} SHA256SUMS.`);
+  if (check.keptEdits) printKeptEdits(io, check.keptEdits, releaseDir(req.env));
+  if (check.ok) io.say();
   return check;
+}
+
+const MAX_COMMITS = 15;
+
+// What changed from release `from` to `release`: each newer release's notes, then the commits that change the plugin.
+async function printChanges(io: Prompter, env: NodeJS.ProcessEnv, listed: unknown, from: string, release: Release): Promise<void> {
+  io.say(`  What changed since ${from}:`);
+  for (const r of releasesSince(listed, from.slice(1), release)) {
+    const notes = releaseNotes(r);
+    if (!notes.length) continue;
+    io.say(`    ${r.tag} release notes:`);
+    for (const line of notes) io.say(`      ${line}`);
+  }
+  const compare = compareUrl(from, release.tag);
+  try {
+    const commits = await releaseCommits(env, from, release.tag);
+    if (commits.length) {
+      io.say(`    Changes to the skills (${commits.length} commit${commits.length === 1 ? '' : 's'}):`);
+      for (const subject of commits.slice(0, MAX_COMMITS)) io.say(`      - ${subject}`);
+      if (commits.length > MAX_COMMITS) io.say(`      and ${commits.length - MAX_COMMITS} more`);
+    } else {
+      io.say('    No commit changes the skills themselves; the release changes tests, evals or release records only.');
+    }
+    io.say(`    Every commit: ${compare}`);
+  } catch (error) {
+    io.say(`    I couldn't list the commits (${error instanceof Error ? error.message : String(error)}); see ${compare}`);
+  }
+}
+
+function printChanged(io: Prompter, copy: EditedCopy): void {
+  if (copy.changed === null) { io.say('    An earlier Wizard downloaded that copy without recording each file, so I can\'t list the files that differ.'); return; }
+  for (const file of copy.changed) io.say(`    ${file}`);
+}
+
+function printEdited(io: Prompter, edited: EditedCopy, keep: string): void {
+  io.say(`  Your copy at ${edited.path} no longer matches ${edited.version ? `release v${edited.version}` : 'the release the Wizard verified'}. I'll move it into ${keep} rather than delete it, then install the clean release:`);
+  printChanged(io, edited);
+}
+
+function printKeptEdits(io: Prompter, kept: KeptEdits, dir: string): void {
+  io.say(`Your edited copy of the Straddle skills is kept at ${kept.backup}; ${dir} now holds the clean release. Files that differed from ${kept.version ? `release v${kept.version}` : 'the verified release'}:`);
+  printChanged(io, kept);
+  io.say('  Carry over any edit you still need. The Wizard never loads the kept copy.');
 }
 
 export function printPlan(say: (line: string) => void, plan: ConfigPlan): void {
