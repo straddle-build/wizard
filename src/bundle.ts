@@ -174,6 +174,8 @@ export function editedCopy(env: NodeJS.ProcessEnv): EditedCopy | null {
   const files = field(record, 'files');
   const entries = field(record, 'entries');
   if (!files || typeof files !== 'object' || !Array.isArray(entries) || !entries.every((entry) => typeof entry === 'string')) {
+    const check = readPlugin(dir, 'release');
+    if (version && check.ok && check.bundle.pluginVersion === version && check.bundle.contentSha256 === text(field(record, 'contentSha256')) && cachedPaths(dir).every((path) => RUNTIME_PATHS.includes(path))) return null;
     return { path: dir, version, changed: null };
   }
   const recorded = files as Record<string, unknown>;
@@ -284,8 +286,7 @@ export function releaseNotes(release: Release): string[] {
   return release.notes.split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line.trim() && !BUILD_STAMP.test(line.trim()));
 }
 
-// Commits about tests, evals, release bookkeeping, CI and docs change nothing a developer's agent loads.
-const INTERNAL_COMMIT = /^(merge\b|(tests?|evals?|kit|ci|chore|docs?|release|no-mistakes)(\([^)]*\))?!?:)/i;
+const INTERNAL_COMMIT = /^(merge\b|(tests?|evals?|kit|ci|chore|docs?|no-mistakes)(\([^)]*\))?!?:)/i;
 
 // A commit subject without the internal ticket and pull request references developers can't open.
 export function tidySubject(subject: string): string {
@@ -306,7 +307,7 @@ export const compareUrl = (from: string, to: string) => `https://github.com/${PL
 // The subjects of the commits between two release tags that change the plugin for developers, oldest first.
 // Reads the GitHub compare API beside the releases list (STRADDLE_WIZARD_RELEASES included). Throws when it can't.
 export async function releaseCommits(env: NodeJS.ProcessEnv, from: string, to: string): Promise<string[]> {
-  const base = (env.STRADDLE_WIZARD_RELEASES || PLUGIN_RELEASES.url).replace(/\/releases(\?.*)?$/, '');
+  const base = (env.STRADDLE_WIZARD_RELEASES || PLUGIN_RELEASES.url).replace(/\/releases\/?(?:\?.*)?$/, '');
   const commits = field(parseJson((await get(`${base}/compare/${from}...${to}`)).toString('utf8')), 'commits');
   if (!Array.isArray(commits)) throw new Error(`${base}/compare/${from}...${to} did not return a list of commits`);
   return commits.flatMap((commit) => {

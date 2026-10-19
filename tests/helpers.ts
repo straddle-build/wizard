@@ -205,7 +205,8 @@ export async function releaseServer(releases: FixtureRelease[], compare: Record<
   let list = '';
   const server = createServer((req, res) => {
     requests.push(req.url ?? '');
-    const body = req.url === '/releases' ? Buffer.from(list) : files.get(req.url ?? '');
+    const path = (req.url ?? '').replace(/\?.*$/, '');
+    const body = path === '/releases' || path === '/releases/' ? Buffer.from(list) : files.get(req.url ?? '');
     res.writeHead(body ? 200 : 404).end(body);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

@@ -229,7 +229,7 @@ wizard update
 Wizard selects the newest compatible plugin release. When the cached release is older, Wizard lists what changed since that version before asking to download:
 
 - The notes of each newer release, without the build line that every release carries.
-- The commits between the two release tags that change the skills. Merges, tests, evals, release records, CI, and documentation commits are left out, as are internal ticket and pull-request references. A link to the full comparison on GitHub follows the list.
+- The commits between the two release tags that change the skills. Merges, tests, evals, kit, CI, chore, documentation, and no-mistakes commits are left out, as are internal ticket and pull-request references. A link to the full comparison on GitHub follows the list.
 
 If GitHub's compare API is unavailable, Wizard prints the comparison link instead of the commit list.
 

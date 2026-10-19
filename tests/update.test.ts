@@ -22,6 +22,7 @@ const COMMITS: FixtureCommit[] = [
   { message: 'build: add an important capability' },
   { message: 'style: make an important capability clearer' },
   { message: 'refactor: speed up an important capability' },
+  { message: 'release: add an important capability' },
 ];
 
 // The Wizard's plugin release cache under `cache`, and what it holds.
@@ -52,7 +53,7 @@ test('update on an old install downloads the newest release and shows what chang
   assert.match(r.stdout, /What changed since v0\.1\.1:\n {4}v0\.1\.2 release notes:\n {6}- Setup reports a newer kit and the command that updates it\.\n/);
   assert.doesNotMatch(r.stdout, /Built by scripts\/kit-release/);
   assert.ok(r.stdout.includes([
-    '    Changes to the skills (9 commits):',
+    '    Changes to the skills (10 commits):',
     "      - fix: an unobserved optional payout doesn't stop a Test pass",
     '      - best-practices: a key check never prints any part of the key',
     '      - Add the advisory straddle-payment-review skill and Go Live warnings',
@@ -62,6 +63,7 @@ test('update on an old install downloads the newest release and shows what chang
     '      - build: add an important capability',
     '      - style: make an important capability clearer',
     '      - refactor: speed up an important capability',
+    '      - release: add an important capability',
     '    Every commit: https://github.com/straddle-build/skills/compare/v0.1.1...v0.1.2',
   ].join('\n')), r.stdout);
   assert.doesNotMatch(r.stdout, /\bME-\d+\b|#\d+\b/);
@@ -80,6 +82,21 @@ test('update says where to look when the commits between releases cannot be read
   assert.equal(r.code, 0, r.stdout);
   assert.match(r.stdout, /I couldn't list the commits \(GET http:\/\/127\.0\.0\.1:\d+\/compare\/v0\.1\.1\.\.\.v0\.1\.2: HTTP 404\); see https:\/\/github\.com\/straddle-build\/skills\/compare\/v0\.1\.1\.\.\.v0\.1\.2/);
   assert.equal(recorded(cache).version, '0.1.2');
+});
+
+test('update reads the comparison from a releases mirror with a trailing slash', async () => {
+  const cache = tempDir('cache');
+  await wizard(['skill', 'list', '--yes'], OLD, cache);
+  const server = await releaseServer(NEW, { 'v0.1.1...v0.1.2': [{ message: 'fix: load releases from a mirror' }] });
+  const r = await runWizard(['update', '--yes'], {
+    cwd: tempDir('repo'),
+    env: { STRADDLE_WIZARD_BUNDLE: '', XDG_CACHE_HOME: cache, STRADDLE_WIZARD_RELEASES: `${server.url}/?per_page=100` },
+  });
+  await server.close();
+
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /Changes to the skills \(1 commit\):\n {6}- fix: load releases from a mirror/);
+  assert.doesNotMatch(r.stdout, /I couldn't list the commits/);
 });
 
 test('update backs up locally edited skills, lists the edited files, says where the copy went, then installs the release clean', async () => {
@@ -137,17 +154,18 @@ test('an edited copy of the newest release is backed up too when the guided run 
   assert.equal(readFileSync(join(wizardCache(cache), 'edited', keptCopies(cache)[0]!, 'skills', 'straddle-plan', 'SKILL.md'), 'utf8'), 'replaced\n');
 });
 
-test('an edited copy downloaded before the Wizard recorded each file is still backed up, and says it cannot list the files', async () => {
+test('an old-style cache with added inert content is backed up without a file list', async () => {
   const cache = tempDir('cache');
   await wizard(['skill', 'list', '--yes'], OLD, cache);
-  const { files: _files, ...record } = recorded(cache);
+  const { files: _files, entries: _entries, ...record } = recorded(cache);
   writeFileSync(join(wizardCache(cache), 'release.json'), JSON.stringify(record));
-  appendFileSync(plan(cache), '\nedit\n');
+  writeFiles(join(wizardCache(cache), 'plugin'), { 'docs/notes.md': 'keep this note\n' });
   const r = await wizard(['update', '--yes'], NEW, cache);
 
   assert.equal(r.code, 0, r.stdout);
   assert.match(r.stdout, /An earlier Wizard downloaded that copy without recording each file, so I can't list the files that differ\./);
   assert.equal(keptCopies(cache).length, 1);
+  assert.equal(readFileSync(join(wizardCache(cache), 'edited', keptCopies(cache)[0]!, 'docs', 'notes.md'), 'utf8'), 'keep this note\n');
 });
 
 test('update on the newest release changes nothing, reports agents that already have it, and names a release that needs a newer Wizard', async () => {
@@ -176,6 +194,25 @@ test('update does not call an offline cache the newest release', async () => {
   assert.equal(r.code, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /I couldn't check for a newer Straddle plugin release/);
   assert.doesNotMatch(r.stdout, /already the newest/);
+});
+
+test('an intact old-style cache works offline and updates without a backup', async () => {
+  const cache = tempDir('cache');
+  await wizard(['skill', 'list', '--yes'], OLD, cache);
+  const { files: _files, entries: _entries, ...record } = recorded(cache);
+  writeFileSync(join(wizardCache(cache), 'release.json'), JSON.stringify(record));
+  const offline = await runWizard(['update', '--yes'], {
+    cwd: tempDir('repo'),
+    env: { STRADDLE_WIZARD_BUNDLE: '', XDG_CACHE_HOME: cache, STRADDLE_WIZARD_RELEASES: 'http://127.0.0.1:9/releases' },
+  });
+  const updated = await wizard(['update', '--yes'], NEW, cache);
+
+  assert.equal(offline.code, 0, offline.stdout + offline.stderr);
+  assert.match(offline.stdout, /I couldn't check for a newer Straddle plugin release/);
+  assert.equal(updated.code, 0, updated.stdout + updated.stderr);
+  assert.doesNotMatch(updated.stdout, /no longer matches|edited copy/);
+  assert.deepEqual(keptCopies(cache), []);
+  assert.equal(recorded(cache).version, '0.1.2');
 });
 
 test('update gives a local Cursor copy its manual step even without cursor-agent', async () => {
