@@ -234,3 +234,34 @@ test('update gives a local Cursor copy its manual step even without cursor-agent
   assert.match(r.stdout, /Update the "straddle" plugin from its team marketplace in Cursor\./);
   assert.doesNotMatch(r.stdout, /No agent here has the Straddle plugin installed/);
 });
+
+test('update with an unavailable named client leaves the cached release untouched', async () => {
+  const cache = tempDir('cache');
+  await wizard(['skill', 'list', '--yes'], OLD, cache);
+  const record = readFileSync(join(wizardCache(cache), 'release.json'), 'utf8');
+  const server = await releaseServer(NEW);
+  const r = await runWizard(['update', '--client', 'codex', '--yes'], {
+    cwd: tempDir('repo'),
+    env: { PATH: '/usr/bin:/bin', STRADDLE_WIZARD_BUNDLE: '', XDG_CACHE_HOME: cache, STRADDLE_WIZARD_RELEASES: server.url },
+  });
+  await server.close();
+
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /Codex isn't installed or isn't on your PATH\./);
+  assert.deepEqual(server.requests, []);
+  assert.equal(readFileSync(join(wizardCache(cache), 'release.json'), 'utf8'), record);
+});
+
+test('update strips terminal controls from remote changes and cache paths', async () => {
+  const control = '\x1b]52;c;unsafe\x07';
+  const cache = join(tempDir('cache'), `${control}cache`);
+  await wizard(['skill', 'list', '--yes'], OLD, cache);
+  const r = await wizard(['update', '--yes'], [...OLD, { tag: 'v0.1.2', notes: `${STAMP}\n\n- ${control}release notes` }], cache, {
+    compare: { 'v0.1.1...v0.1.2': [{ message: `fix: ${control}commit subject` }] },
+  });
+
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /release notes/);
+  assert.match(r.stdout, /commit subject/);
+  assert.doesNotMatch(r.stdout, /\x1b/);
+});

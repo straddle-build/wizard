@@ -13,6 +13,7 @@ import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
 import { openFile, writeLog } from './log.ts';
 import { WIZARD_DIR, loadReceipt, type Mode } from './receipt.ts';
 import { REVIEW_SKILL } from './review.ts';
+import { sanitize } from './tui.ts';
 import { Prompter } from './ui.ts';
 import { bundledCli, cliSummary } from './straddle-cli.ts';
 import { WIZARD_VERSION } from './version.ts';
@@ -103,7 +104,7 @@ const io = () => (prompter ??= new Prompter(process.stdin, process.stdout));
 async function preparedBundle() {
   const check = await prepareBundle(io(), { override: bundlePath, env }, Boolean(values.yes));
   if (check === null) say("Cancelled. I didn't download anything.");
-  else if (!check.ok) say(check.reason);
+  else if (!check.ok) say(sanitize(check.reason));
   return check?.ok ? { bundle: check.bundle, releaseListed: check.releaseListed } : null;
 }
 
@@ -150,6 +151,8 @@ async function configurePlugin(kind: 'install' | 'update', state: ClientState, b
 // named client, or in every client that has it installed and doesn't already match it.
 async function update(): Promise<number> {
   const named = clientOption();
+  const namedState = named ? inspectClient(named, env) : null;
+  if (namedState && named !== 'cursor' && namedState.version === null) { say(`${CLIENT_LABEL[named]} isn't installed or isn't on your PATH.`); return 1; }
   const before = findBundle({ override: bundlePath, env });
   const prepared = await preparedBundle();
   if (!prepared) return 1;
@@ -157,11 +160,7 @@ async function update(): Promise<number> {
   if (prepared.releaseListed && bundle.kind === 'release' && before.ok && before.bundle.pluginVersion === bundle.pluginVersion) {
     say(`The Straddle skills on this machine are already the newest ${PLUGIN_RELEASES.range} plugin release, v${bundle.pluginVersion}.`);
   }
-  if (named) {
-    const state = inspectClient(named, env);
-    if (named !== 'cursor' && state.version === null) { say(`${CLIENT_LABEL[named]} isn't installed or isn't on your PATH.`); return 1; }
-    return configurePlugin('update', state, bundle);
-  }
+  if (namedState) return configurePlugin('update', namedState, bundle);
   const installed = CLIENT_NAMES.map((name) => inspectClient(name, env, bundle)).filter((c) => c.plugin.state === 'installed');
   if (!installed.length) {
     say('No agent here has the Straddle plugin installed, so the skills are all up to date. `wizard` loads them into the sessions it starts; `wizard install --client <name>` installs them in an agent.');
