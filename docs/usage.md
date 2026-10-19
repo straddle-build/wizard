@@ -218,6 +218,29 @@ For offline integration fixtures, the configuration reader accepts a loopback sy
 
 The default branch contains the following behavior after npm release `0.1.2`. Building this branch includes it; the published `0.1.2` package uses the earlier behavior.
 
+### Update the skills with one command
+
+Run `wizard update` without `--client` to bring a setup up to date:
+
+```sh
+wizard update
+```
+
+Wizard selects the newest compatible plugin release. When the cached release is older, Wizard lists what changed since that version before asking to download:
+
+- The notes of each newer release, without the build line that every release carries.
+- Up to 15 commits between the two release tags that change the skills. Merges, tests, evals, kit, CI, chore, documentation, and no-mistakes commits are left out, as are internal ticket and pull-request references. A link to the full comparison on GitHub follows the list.
+
+If GitHub's compare API is unavailable, Wizard prints the comparison link instead of the commit list.
+
+After the download, Wizard updates the plugin in each agent that has it installed and doesn't already match the new release. Claude Code and Codex use the same native commands as `wizard update --client`. A local Cursor copy gets the manual step even when `cursor-agent` is not on `PATH`. With `--client`, only the named agent is updated.
+
+If the cached release no longer matches the release Wizard verified, Wizard keeps that copy. Before installing the clean release, Wizard moves it to `${XDG_CACHE_HOME:-~/.cache}/straddle-wizard/edited/plugin-v<version>-<time>` and prints that path with each added, changed, or removed file, including files in permitted inert directories. The guided run uses the same backup when it downloads a release over an edited cache. Wizard never loads a kept copy, so carry over any edits you still need.
+
+Wizard records a digest for each file when it downloads a release. For a cache downloaded by an earlier Wizard, it still keeps the edited copy but can't list the changed files.
+
+If a published plugin release is outside this Wizard's range, Wizard names it and the command that gets a newer Wizard.
+
 ### Use decisions from a revised plan
 
 The source build uses resolved choices from the integration plan's Decisions table in later handoffs. Its final report also lists sandbox resource IDs recorded by the agent, with synthetic targets and earlier test runs excluded. Those IDs are reported evidence, not an independent API readback.

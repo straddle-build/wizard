@@ -141,8 +141,8 @@ export const isStraddleServer = (name: string, server: 'straddle-api' | 'straddl
 // cursor-agent has no plugin list, and `cursor-agent mcp list` doesn't show plugin servers, so the Wizard reads the
 // files Cursor loads: local plugin copies in ~/.cursor/plugins/local and servers in ~/.cursor/mcp.json.
 // ponytail: user-level files only; a project's .cursor/mcp.json isn't read until the Wizard passes the repo here.
-function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle | null): ClientState {
-  const status = native('cursor-agent', ['status'], env);
+function inspectCursor(env: NodeJS.ProcessEnv, version: string | null, bundle: Bundle | null): ClientState {
+  const status = version === null ? null : native('cursor-agent', ['status'], env);
   const home = join(env.HOME || homedir(), '.cursor');
   const read = (path: string) => (existsSync(path) ? parseJson(readFileSync(path, 'utf8')) : null);
   const manifest = (dir: string) => read(join(dir, '.cursor-plugin', 'plugin.json'));
@@ -159,7 +159,7 @@ function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle |
     name: 'cursor',
     label: CLIENT_LABEL.cursor,
     version,
-    loggedIn: /Logged in as /.test(status.stdout),
+    loggedIn: status === null ? null : /Logged in as /.test(status.stdout),
     // A copy in plugins/local is the only install the Wizard can see; team-marketplace installs stay unverified.
     plugin: copies.length
       ? { state: 'installed', version: text(field(manifest(copies[0]!), 'version')) ?? null, verified: bundle !== null && copies.every((d) => matchesBundle(d, bundle)) }
@@ -177,10 +177,11 @@ function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle |
 export function inspectClient(name: ClientName, env: NodeJS.ProcessEnv, bundle: Bundle | null = null): ClientState {
   const probe = native(BINARY[name], ['--version'], env);
   const version = probe.status === 0 ? (/(\d+\.\d+\.\d+\S*)/.exec(probe.stdout)?.[1] ?? probe.stdout) : null;
+  if (name === 'cursor') return inspectCursor(env, version, bundle);
   if (version === null) {
-    return { name, label: CLIENT_LABEL[name], version, loggedIn: null, plugin: { state: name === 'cursor' ? 'unverified' : 'missing', version: null, verified: false }, marketplacePath: null, apiMcp: 'unverified' };
+    return { name, label: CLIENT_LABEL[name], version, loggedIn: null, plugin: { state: 'missing', version: null, verified: false }, marketplacePath: null, apiMcp: 'unverified' };
   }
-  return name === 'claude' ? inspectClaude(env, version, bundle) : name === 'codex' ? inspectCodex(env, version, bundle) : inspectCursor(env, version, bundle);
+  return name === 'claude' ? inspectClaude(env, version, bundle) : inspectCodex(env, version, bundle);
 }
 
 export type ConfigPlan = { kind: 'commands'; commands: Command[]; note: string } | { kind: 'manual'; steps: string[] } | { kind: 'nothing'; note: string };
