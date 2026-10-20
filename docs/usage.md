@@ -60,7 +60,7 @@ The plugin connects your agent to the following services.
 | API MCP | `straddle-api` | Bearer token from `STRADDLE_API_KEY` |
 | Docs MCP | `straddle-docs` | Public documentation |
 
-The API MCP endpoint is `https://mcp.scalar.com/mcp/d5d1b1c2-ae5b-432d-b795-4fcb31cfdedd`. The Docs MCP endpoint is `https://straddle-build-straddle-openapi.apidocumentation.com/mcp`.
+The API MCP endpoint is `https://mcp.scalar.com/mcp/d5d1b1c2-ae5b-432d-b795-4fcb31cfdedd`. The Docs MCP endpoint is `https://mcp.straddle.com/docs`.
 
 Claude Code receives both servers through the plugin. Codex needs a client-level API MCP registration that reads `STRADDLE_API_KEY`; `wizard install` includes that registration. To configure the servers separately:
 
