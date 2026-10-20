@@ -218,6 +218,14 @@ For offline integration fixtures, the configuration reader accepts a loopback sy
 
 The default branch contains the following behavior after npm release `0.1.2`. Building this branch includes it; the published `0.1.2` package uses the earlier behavior.
 
+### Search docs through the read-only Docs MCP
+
+The source build registers `straddle-docs` at `https://mcp.straddle.com/docs`, replacing `https://straddle-build-straddle-openapi.apidocumentation.com/mcp`. The endpoint serves Straddle's documentation site, so searches cover the guides as well as the API reference.
+
+The endpoint is read-only. It exposes the `search_straddle_docs` and `query_docs_filesystem_straddle_docs` tools and refuses every other tool call, including the API-execution tool the previous endpoint carried. `straddle-docs` therefore needs no credential, and only `straddle-api` sends Straddle API requests.
+
+`wizard mcp add` registers the new endpoint for Codex and prints it for Cursor. Claude Code receives `straddle-docs` through the plugin, so an existing setup picks up the endpoint with `wizard update` once the plugin release declares it.
+
 ### Use decisions from a revised plan
 
 The source build uses resolved choices from the integration plan's Decisions table in later handoffs. Its final report also lists sandbox resource IDs recorded by the agent, with synthetic targets and earlier test runs excluded. Those IDs are reported evidence, not an independent API readback.
