@@ -58,7 +58,7 @@ if (hookEvent === 'SessionStart') {
   const step = STEP_FILE.exec(text(field(input, 'file_path')) ?? '');
   if (step) record({ at, kind: 'step-entered', skill: step[1]!, step: step[2]! });
 } else if (hookEvent === 'PostToolUse' && tool === 'Bash') {
-  // ponytail: a completed command that names a step file counts as opening it; the skills name one only to read it.
+  // A completed command that names a step file counts as opening it; the skills name one only to read it.
   for (const step of (text(field(input, 'command')) ?? '').matchAll(STEP_FILES)) record({ at, kind: 'step-entered', skill: step[1]!, step: step[2]! });
 } else if (hookEvent === 'PostToolUse' && EDIT_TOOLS[tool]) {
   const path = text(field(input, 'file_path')) ?? text(field(input, 'notebook_path'));
