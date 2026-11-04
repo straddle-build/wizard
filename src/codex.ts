@@ -21,7 +21,6 @@ function rolloutFiles(dir: string): string[] {
 // first session in `repo` that started at or after `since`, by its `session_meta` start time. Another Codex session
 // in the same repo can still be writing its own rollout, so which file changed last says nothing.
 export function findRollout(env: NodeJS.ProcessEnv, repo: string, since: number, session: string | null): string | null {
-  // ponytail: scans every rollout under sessions/ each second until found; limit to recent day folders if that gets slow.
   try {
     const files = rolloutFiles(join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'sessions'));
     if (session) return files.find((f) => f.endsWith(`-${session}.jsonl`)) ?? null;

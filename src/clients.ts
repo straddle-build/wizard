@@ -140,7 +140,7 @@ export const isStraddleServer = (name: string, server: 'straddle-api' | 'straddl
 
 // cursor-agent has no plugin list, and `cursor-agent mcp list` doesn't show plugin servers, so the Wizard reads the
 // files Cursor loads: local plugin copies in ~/.cursor/plugins/local and servers in ~/.cursor/mcp.json.
-// ponytail: user-level files only; a project's .cursor/mcp.json isn't read until the Wizard passes the repo here.
+// It reads user-level files only; a project's .cursor/mcp.json isn't read.
 function inspectCursor(env: NodeJS.ProcessEnv, version: string, bundle: Bundle | null): ClientState {
   const status = native('cursor-agent', ['status'], env);
   const home = join(env.HOME || homedir(), '.cursor');
