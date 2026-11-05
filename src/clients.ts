@@ -10,7 +10,9 @@ export const CLIENT_NAMES: readonly ClientName[] = ['claude', 'codex', 'cursor']
 export const CLIENT_LABEL: Record<ClientName, string> = { claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' };
 
 export const API_MCP_URL = 'https://mcp.scalar.com/mcp/d5d1b1c2-ae5b-432d-b795-4fcb31cfdedd';
-export const DOCS_MCP_URL = 'https://straddle-build-straddle-openapi.apidocumentation.com/mcp';
+// Straddle's own read-only Docs MCP: it searches the guides and the API reference, and refuses every API-execution
+// tool, so it is registered without a credential. Real API calls go to straddle-api, which carries the key.
+export const DOCS_MCP_URL = 'https://mcp.straddle.com/docs';
 export const CONNECT_MCP_GUIDE = 'https://straddle-build-straddle-openapi.apidocumentation.com/connect-mcp';
 const PLUGIN_ID = 'straddle@straddle';
 const NATIVE_TIMEOUT_MS = 60_000;

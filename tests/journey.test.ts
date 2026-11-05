@@ -1201,12 +1201,43 @@ test('mcp add registers only Straddle servers through native commands and skips 
   const withPlugin = await runWizard(['mcp', 'add', '--client', 'claude', '--yes'], { cwd: repo, claude });
 
   assert.match(add.stdout, /ok\s+claude mcp add --transport http -s user straddle-api https:\/\/mcp\.scalar\.com\/mcp\/d5d1b1c2-ae5b-432d-b795-4fcb31cfdedd -H 'Authorization: Bearer \$\{STRADDLE_API_KEY\}'/);
-  assert.match(add.stdout, /ok\s+claude mcp add --transport http -s user straddle-docs https:\/\/straddle-build-straddle-openapi\.apidocumentation\.com\/mcp/);
+  assert.match(add.stdout, /ok\s+claude mcp add --transport http -s user straddle-docs https:\/\/mcp\.straddle\.com\/docs/);
   assert.match(again.stdout, /already\s+claude mcp add .* straddle-api/);
   assert.match(remove.stdout, /ok\s+claude mcp remove -s user straddle-api/);
   assert.match(withPlugin.stdout, /The Straddle plugin already declares straddle-api and straddle-docs in Claude Code/);
   const state = JSON.parse(readFileSync(join(claude.state, 'state.json'), 'utf8'));
   assert.deepEqual(Object.keys(state.mcp), []);
+});
+
+// EG-1009: straddle-docs is Straddle's own read-only Docs MCP. Every client must reach it at that endpoint, none may
+// keep the retired Scalar-hosted one, and it stays credential-free, since only straddle-api sends API requests.
+test('mcp add points straddle-docs at the read-only Docs MCP for every client, without a credential and without the retired endpoint', async () => {
+  const codex = fakeClients('✓ Logged in as dev@example.com');
+  const cursor = fakeClients('✓ Logged in as dev@example.com');
+
+  const forCodex = await runWizard(['mcp', 'add', '--client', 'codex', '--yes'], { cwd: nextRepo(), env: codex.env });
+  const forCursor = await runWizard(['mcp', 'add', '--client', 'cursor', '--yes'], { cwd: nextRepo(), env: cursor.env });
+
+  assert.equal(forCodex.code, 0, forCodex.stdout + forCodex.stderr);
+  assert.match(forCodex.stdout, /ok\s+codex mcp add straddle-docs --url https:\/\/mcp\.straddle\.com\/docs\n/);
+  // The docs server carries no token: only straddle-api gets --bearer-token-env-var.
+  assert.doesNotMatch(forCodex.stdout, /straddle-docs .*(--bearer-token-env-var|STRADDLE_API_KEY)/);
+  // Cursor is configured by hand, so the endpoint reaches the developer as JSON with no Authorization header.
+  assert.match(forCursor.stdout, /"straddle-docs": \{\n\s+"url": "https:\/\/mcp\.straddle\.com\/docs"\n\s+\}/);
+  // The guide link is a docs page, not an MCP endpoint, so only the retired /mcp endpoint must be gone.
+  for (const r of [forCodex, forCursor]) assert.doesNotMatch(r.stdout, /apidocumentation\.com\/mcp/);
+});
+
+// The plugin declares straddle-docs, so `wizard update` moves an existing setup onto the new endpoint by installing a
+// plugin release that names it: the update itself registers no docs server and must never re-add the retired one.
+test('update refreshes the plugin that declares straddle-docs and registers no docs endpoint of its own', async () => {
+  const fake = fakeClients('✓ Logged in as dev@example.com');
+
+  const update = await runWizard(['update', '--client', 'codex', '--yes'], { cwd: nextRepo(), env: fake.env });
+
+  assert.match(update.stdout, /ok\s+codex plugin add straddle@straddle\n/);
+  assert.doesNotMatch(update.stdout, /mcp add straddle-docs/);
+  assert.doesNotMatch(update.stdout, /apidocumentation\.com\/mcp/);
 });
 
 test('Manual starts no agent process for any client: it prints the paste text, and status and resume say what to paste next from the files', async () => {
