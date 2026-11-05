@@ -2,10 +2,10 @@
 import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { bundleLabel } from './bundle.ts';
+import { PLUGIN_RELEASES, bundleLabel, type Bundle } from './bundle.ts';
 import {
   CLIENT_LABEL, CLIENT_NAMES, EVENT_SURFACE, displayCommand, inspectClient, installPlan, mcpAddPlan, mcpRemovePlan, removePlan, runCommands, updatePlan,
-  type ClientName, type ConfigPlan,
+  type ClientName, type ClientState, type ConfigPlan,
 } from './clients.ts';
 import { straddleConfiguration } from './configuration.ts';
 import { findBundle, handleInterrupt, prepareBundle, printPlan, resume, savedHandoff, savedStatus, start, type JourneyOptions } from './journey.ts';
@@ -13,6 +13,7 @@ import { PROGRAMS, isRunnableSkill, type ProgramName } from './programs.ts';
 import { openFile, writeLog } from './log.ts';
 import { WIZARD_DIR, loadReceipt, type Mode } from './receipt.ts';
 import { REVIEW_SKILL } from './review.ts';
+import { sanitize } from './tui.ts';
 import { Prompter } from './ui.ts';
 import { bundledCli, cliSummary } from './straddle-cli.ts';
 import { WIZARD_VERSION } from './version.ts';
@@ -26,6 +27,7 @@ Sets up Straddle in your repo with your own coding agent, in one guided session.
   wizard setup | plan | integrate | test
   wizard get-started | migrate | go-live | audit
   wizard skill list | skill run <name>
+  wizard update                Bring the Straddle skills up to date, show what changed, and update every agent that has them
   wizard install | update | remove [--client claude|codex|cursor] [--yes]
   wizard mcp add | mcp remove [--client claude|codex|cursor] [--yes]
   wizard status [--json]
@@ -102,12 +104,12 @@ const io = () => (prompter ??= new Prompter(process.stdin, process.stdout));
 async function preparedBundle() {
   const check = await prepareBundle(io(), { override: bundlePath, env }, Boolean(values.yes));
   if (check === null) say("Cancelled. I didn't download anything.");
-  else if (!check.ok) say(check.reason);
-  return check?.ok ? check.bundle : null;
+  else if (!check.ok) say(sanitize(check.reason));
+  return check?.ok ? { bundle: check.bundle, releaseListed: check.releaseListed } : null;
 }
 
 async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number> {
-  say(heading);
+  say(sanitize(heading));
   printPlan(say, plan);
   if (plan.kind === 'nothing') return 0;
   if (plan.kind === 'manual') { say("I didn't change anything; follow the steps above in the client."); return 1; }
@@ -117,28 +119,60 @@ async function confirmAndRun(plan: ConfigPlan, heading: string): Promise<number>
   }
   let ok = true;
   for (const r of runCommands(plan.commands, env)) {
-    say(`${r.outcome.padEnd(8)}${displayCommand(r.command)}`);
-    if (r.outcome === 'failed') { ok = false; say(r.output.split('\n').slice(-5).map((l) => `        ${l}`).join('\n')); }
+    say(sanitize(`${r.outcome.padEnd(8)}${displayCommand(r.command)}`));
+    if (r.outcome === 'failed') { ok = false; say(sanitize(r.output.split('\n').slice(-5).map((l) => `        ${l}`).join('\n'))); }
   }
   return ok ? 0 : 1;
 }
 
-async function configure(kind: 'install' | 'update' | 'remove' | 'mcp add' | 'mcp remove'): Promise<number> {
+async function configure(kind: 'install' | 'remove' | 'mcp add' | 'mcp remove'): Promise<number> {
   const client = pickClient();
   const state = inspectClient(client, env);
   if (client !== 'cursor' && state.version === null) { say(`${CLIENT_LABEL[client]} isn't installed or isn't on your PATH.`); return 1; }
   if (kind === 'remove') return confirmAndRun(removePlan(state), `Remove the Straddle plugin from ${state.label}:`);
   if (kind === 'mcp add') return confirmAndRun(mcpAddPlan(state), `Register the Straddle API MCP and Docs MCP in ${state.label}:`);
   if (kind === 'mcp remove') return confirmAndRun(mcpRemovePlan(state), `Remove the Straddle MCP servers from ${state.label}:`);
-  const bundle = await preparedBundle();
-  if (!bundle) return 1;
+  const prepared = await preparedBundle();
+  if (!prepared) return 1;
+  return configurePlugin('install', state, prepared.bundle);
+}
+
+async function configurePlugin(kind: 'install' | 'update', state: ClientState, bundle: Bundle): Promise<number> {
   const plan = kind === 'install' ? installPlan(state, bundle) : updatePlan(state, bundle);
   const code = await confirmAndRun(plan, `${kind === 'install' ? 'Install' : 'Update'} the Straddle plugin in ${state.label} from the ${bundleLabel(bundle)}:`);
-  if (client === 'cursor' || code !== 0) return code;
+  if (state.name === 'cursor' || code !== 0) return code;
   // Success means the copy the client loads is the Wizard's bundle, not only that the native commands exited 0.
-  const after = inspectClient(client, env, bundle);
+  const after = inspectClient(state.name, env, bundle);
   say(`Straddle plugin in ${after.label}: ${after.plugin.state}${after.plugin.version ? ` ${after.plugin.version}` : ''}, ${after.plugin.verified ? "matches the Wizard's bundle" : "does not match the Wizard's bundle"}`);
   return after.plugin.verified ? 0 : 1;
+}
+
+// The newest plugin release on this machine (with what changed, and any edited copy kept), then the plugin in the
+// named client, or in every client that has it installed and doesn't already match it.
+async function update(): Promise<number> {
+  const named = clientOption();
+  const namedState = named ? inspectClient(named, env) : null;
+  if (namedState && named !== 'cursor' && namedState.version === null) { say(`${CLIENT_LABEL[namedState.name]} isn't installed or isn't on your PATH.`); return 1; }
+  const before = findBundle({ override: bundlePath, env });
+  const prepared = await preparedBundle();
+  if (!prepared) return 1;
+  const { bundle } = prepared;
+  if (prepared.releaseListed && bundle.kind === 'release' && before.ok && before.bundle.pluginVersion === bundle.pluginVersion) {
+    say(`The Straddle skills on this machine are already the newest ${PLUGIN_RELEASES.range} plugin release, v${bundle.pluginVersion}.`);
+  }
+  if (namedState) return configurePlugin('update', namedState, bundle);
+  const installed = CLIENT_NAMES.map((name) => inspectClient(name, env, bundle)).filter((c) => c.plugin.state === 'installed');
+  if (!installed.length) {
+    say('No agent here has the Straddle plugin installed, so the skills are all up to date. `wizard` loads them into the sessions it starts; `wizard install --client <name>` installs them in an agent.');
+    return 0;
+  }
+  let code = 0;
+  for (const state of installed) {
+    if (state.plugin.verified) { say(`${state.label} already has these skills.`); continue; }
+    const result = await configurePlugin('update', state, bundle);
+    if (result !== 0 && code === 0) code = result;
+  }
+  return code;
 }
 
 function status(): number {
@@ -186,8 +220,9 @@ function status(): number {
 }
 
 async function skillList(): Promise<number> {
-  const bundle = await preparedBundle();
-  if (!bundle) return 1;
+  const prepared = await preparedBundle();
+  if (!prepared) return 1;
+  const { bundle } = prepared;
   const skills = Object.entries(bundle.skills).map(([name, info]) => ({ name, version: info.version, runnable: isRunnableSkill(name), description: info.description }));
   if (values.json) { say(JSON.stringify({ bundle: bundleLabel(bundle), path: bundle.path, skills }, null, 2)); return 0; }
   say(`Skills in the ${bundleLabel(bundle)}:`);
@@ -224,7 +259,8 @@ async function main(): Promise<number> {
   if (command === undefined) return journey((opts) => start('integration', opts));
   if (Object.hasOwn(PROGRAMS, command) && sub === undefined) return journey((opts) => start(command as ProgramName, opts));
   if (command === 'resume' && sub === undefined) return journey(resume);
-  if ((command === 'install' || command === 'update' || command === 'remove') && sub === undefined) return configure(command);
+  if (command === 'update' && sub === undefined) return update();
+  if ((command === 'install' || command === 'remove') && sub === undefined) return configure(command);
   if (command === 'status' && sub === undefined) return status();
   if (command === 'log' && sub === undefined) return log();
   if (command === 'mcp' && (sub === 'add' || sub === 'remove')) return configure(`mcp ${sub}`);

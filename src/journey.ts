@@ -3,7 +3,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameS
 import { homedir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PLUGIN_RELEASES, bundleLabel, downloadRelease, listReleases, loadCachedRelease, loadLocalBundle, pickRelease, releaseDir, type Bundle, type BundleCheck } from './bundle.ts';
+import {
+  PLUGIN_RELEASES, bundleLabel, cachedVersion, compareUrl, downloadRelease, editedCopy, editedDir, listReleases, loadCachedRelease, loadLocalBundle, newerOutsideRange, pickRelease,
+  releaseCommits, releaseDir, releaseNotes, releasesSince, type Bundle, type BundleCheck, type EditedCopy, type KeptEdits, type Release,
+} from './bundle.ts';
 import {
   CLIENT_LABEL, CLIENT_NAMES, EVENT_SURFACE, EVENT_SURFACE_NOTE, codexMcpOff, displayCommand, inspectClient, installPlan, launchCommand, manualHandoff, reviewCommand, reviewSettings, runCommands, updatePlan,
   type ClientName, type ClientState, type Command, type CommandResult, type ConfigPlan, type Handoff,
@@ -251,8 +254,8 @@ async function chooseMode(io: Prompter, client: ClientName, env: NodeJS.ProcessE
 
 function printCommandResults(io: Prompter, results: readonly CommandResult[]): boolean {
   for (const r of results) {
-    io.say(`${r.outcome.padEnd(8)}${displayCommand(r.command)}`);
-    if (r.outcome === 'failed') io.say(r.output.split('\n').slice(-5).map((l) => `        ${l}`).join('\n'));
+    io.say(sanitize(`${r.outcome.padEnd(8)}${displayCommand(r.command)}`));
+    if (r.outcome === 'failed') io.say(sanitize(r.output.split('\n').slice(-5).map((l) => `        ${l}`).join('\n')));
   }
   return results.every((r) => r.outcome !== 'failed');
 }
@@ -260,6 +263,7 @@ function printCommandResults(io: Prompter, results: readonly CommandResult[]): b
 // ---------- Skill bundle ----------
 
 export interface BundleRequest { override: string | undefined; env: NodeJS.ProcessEnv }
+export type PreparedBundleCheck = BundleCheck & { releaseListed: boolean };
 
 // The developer's --bundle, else the verified plugin release already on this machine. Never fetches.
 export function findBundle(req: BundleRequest): BundleCheck {
@@ -267,44 +271,99 @@ export function findBundle(req: BundleRequest): BundleCheck {
 }
 
 // The developer's --bundle, else the newest plugin release in range: the cached copy when it is that release,
-// otherwise downloaded and verified after the developer agrees. When the release list cannot be read, the release
-// already on this machine is used. Resolves null when the developer cancels.
-export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boolean): Promise<BundleCheck | null> {
-  if (req.override) return loadLocalBundle(req.override);
+// otherwise downloaded and verified after the developer agrees, with what changed since the cached release. An edited
+// cached copy is kept beside the clean release. When the release list cannot be read, the release already on this
+// machine is used. Resolves null when the developer cancels.
+export async function prepareBundle(io: Prompter, req: BundleRequest, yes: boolean): Promise<PreparedBundleCheck | null> {
+  if (req.override) return { ...loadLocalBundle(req.override), releaseListed: false };
   const cached = loadCachedRelease(req.env);
   let listed: unknown;
   try {
     listed = await listReleases(req.env);
   } catch (error) {
     const why = error instanceof Error ? error.message : String(error);
-    if (!cached.ok) return { ok: false, reason: `I couldn't read the Straddle plugin releases (${why}). ${cached.reason}` };
-    io.say(`I couldn't check for a newer Straddle plugin release (${why}), so I'm using the ${bundleLabel(cached.bundle)} already on this machine.`);
+    if (!cached.ok) return { ok: false, reason: `I couldn't read the Straddle plugin releases (${why}). ${cached.reason}`, releaseListed: false };
+    io.say(sanitize(`I couldn't check for a newer Straddle plugin release (${why}), so I'm using the ${bundleLabel(cached.bundle)} already on this machine.`));
     io.say();
-    return cached;
+    return { ...cached, releaseListed: false };
+  }
+  const beyond = newerOutsideRange(listed);
+  if (beyond) {
+    io.say(sanitize(`Straddle plugin release ${beyond.tag} is out, and it needs a newer Wizard than ${WIZARD_VERSION}: run \`npx @straddlecom/wizard@latest update\`, or \`npm install -g @straddlecom/wizard@latest\` if you installed the Wizard globally.`));
+    io.say();
   }
   const release = pickRelease(listed);
-  if (typeof release === 'string') return { ok: false, reason: release };
-  if (cached.ok && cached.bundle.pluginVersion === release.version) return cached;
+  if (typeof release === 'string') return { ok: false, reason: release, releaseListed: true };
+  if (cached.ok && cached.bundle.pluginVersion === release.version) return { ...cached, releaseListed: true };
+  const installed = cachedVersion(req.env);
+  const edited = editedCopy(req.env);
   io.say(io.bold('Straddle skills'));
-  io.say(`  ${cached.ok ? `Plugin release v${cached.bundle.pluginVersion} is on this machine. ` : ''}The newest ${PLUGIN_RELEASES.range} plugin release is ${release.tag} (${release.page}).`);
-  io.say(`  I'll download it into ${releaseDir(req.env)}, check it against the release's SHA256SUMS, and change nothing else:`);
-  io.say(`    GET ${release.archiveUrl}`);
-  io.say(`    GET ${release.sumsUrl}`);
+  io.say(sanitize(`  ${installed ? `Plugin release v${installed} is on this machine. ` : ''}The newest ${PLUGIN_RELEASES.range} plugin release is ${release.tag} (${release.page}).`));
+  if (installed && releasesSince(listed, installed, release).length) await printChanges(io, req.env, listed, `v${installed}`, release);
+  if (edited) printEdited(io, edited, editedDir(req.env));
+  io.say(sanitize(`  I'll download it into ${releaseDir(req.env)}, check it against the release's SHA256SUMS, and change nothing else:`));
+  io.say(sanitize(`    GET ${release.archiveUrl}`));
+  io.say(sanitize(`    GET ${release.sumsUrl}`));
   if (!yes) {
     const go = await io.choose('Download the Straddle skills?', [{ label: 'Download', value: true }, { label: 'Cancel', value: false }], 0);
     io.say();
     if (!go) return null;
   }
   const check = await downloadRelease(release, req.env);
-  if (check.ok) io.say(`Verified straddle-plugin-${release.version}.zip against the ${release.tag} SHA256SUMS.\n`);
-  return check;
+  if (check.ok) io.say(sanitize(`Verified straddle-plugin-${release.version}.zip against the ${release.tag} SHA256SUMS.`));
+  if (check.keptEdits) printKeptEdits(io, check.keptEdits, releaseDir(req.env));
+  if (check.ok) io.say();
+  return { ...check, releaseListed: true };
+}
+
+const MAX_COMMITS = 15;
+
+// What changed from release `from` to `release`: each newer release's notes, then the commits that change the plugin.
+async function printChanges(io: Prompter, env: NodeJS.ProcessEnv, listed: unknown, from: string, release: Release): Promise<void> {
+  io.say(sanitize(`  What changed since ${from}:`));
+  for (const r of releasesSince(listed, from.slice(1), release)) {
+    const notes = releaseNotes(r);
+    if (!notes.length) continue;
+    io.say(sanitize(`    ${r.tag} release notes:`));
+    for (const line of notes) io.say(sanitize(`      ${line}`));
+  }
+  const compare = compareUrl(from, release.tag);
+  try {
+    const commits = await releaseCommits(env, from, release.tag);
+    if (commits.length) {
+      io.say(`    Changes to the skills (${commits.length} commit${commits.length === 1 ? '' : 's'}):`);
+      for (const subject of commits.slice(0, MAX_COMMITS)) io.say(sanitize(`      - ${subject}`));
+      if (commits.length > MAX_COMMITS) io.say(`      and ${commits.length - MAX_COMMITS} more`);
+    } else {
+      io.say('    No commit changes the skills themselves; the release changes tests, evals or release records only.');
+    }
+    io.say(sanitize(`    Every commit: ${compare}`));
+  } catch (error) {
+    io.say(sanitize(`    I couldn't list the commits (${error instanceof Error ? error.message : String(error)}); see ${compare}`));
+  }
+}
+
+function printChanged(io: Prompter, copy: EditedCopy): void {
+  if (copy.changed === null) { io.say('    An earlier Wizard downloaded that copy without recording each file, so I can\'t list the files that differ.'); return; }
+  for (const file of copy.changed) io.say(sanitize(`    ${file}`));
+}
+
+function printEdited(io: Prompter, edited: EditedCopy, keep: string): void {
+  io.say(sanitize(`  Your copy at ${edited.path} no longer matches ${edited.version ? `release v${edited.version}` : 'the release the Wizard verified'}. I'll move it into ${keep} rather than delete it, then install the clean release:`));
+  printChanged(io, edited);
+}
+
+function printKeptEdits(io: Prompter, kept: KeptEdits, dir: string): void {
+  io.say(sanitize(`Your edited copy of the Straddle skills is kept at ${kept.backup}; ${dir} now holds the clean release. Files that differed from ${kept.version ? `release v${kept.version}` : 'the verified release'}:`));
+  printChanged(io, kept);
+  io.say('  Carry over any edit you still need. The Wizard never loads the kept copy.');
 }
 
 export function printPlan(say: (line: string) => void, plan: ConfigPlan): void {
-  if (plan.kind === 'nothing') { say(plan.note); return; }
-  if (plan.kind === 'manual') { for (const step of plan.steps) say(`  ${step}`); return; }
-  for (const command of plan.commands) say(`    ${displayCommand(command)}`);
-  say(`  ${plan.note}`);
+  if (plan.kind === 'nothing') { say(sanitize(plan.note)); return; }
+  if (plan.kind === 'manual') { for (const step of plan.steps) say(sanitize(`  ${step}`)); return; }
+  for (const command of plan.commands) say(sanitize(`    ${displayCommand(command)}`));
+  say(sanitize(`  ${plan.note}`));
 }
 
 function printReadiness(io: Prompter, receipt: Receipt, bundle: Bundle, client: ClientState, env: NodeJS.ProcessEnv): void {
@@ -400,7 +459,7 @@ async function ensureReady(io: Prompter, receipt: Receipt, opts: JourneyOptions)
     }
     if (repair === 'manual') {
       io.say('Manual steps:');
-      if (plan.kind === 'commands') for (const command of plan.commands) io.say(`  ${displayCommand(command)}`);
+      if (plan.kind === 'commands') for (const command of plan.commands) io.say(sanitize(`  ${displayCommand(command)}`));
       else printPlan((line) => io.say(line), plan);
       return finish(receipt, 'blocked', 'Straddle plugin not installed');
     }
@@ -701,7 +760,7 @@ async function runReview(io: Prompter, receipt: Receipt, ready: Ready, opts: Jou
     // that file carries the Wizard's hooks, so the session that started from it after this point is the review's.
     writeSettings();
     io.say(`  Test is done. Run this in a new terminal in ${repo}. It starts a new ${label} session, not your earlier one, that reviews the code this run changed. It can't edit files, reach the network or change your settings, and it prints a report I save to ${REVIEW_REPORT}:`);
-    io.say(`    ${displayCommand(command)}`);
+    io.say(sanitize(`    ${displayCommand(command)}`));
     io.say('  Come back here when it ends.');
     receipt.sessions.push(session);
     saveReceipt(receipt);
